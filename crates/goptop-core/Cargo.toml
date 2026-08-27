@@ -1,0 +1,27 @@
+[package]
+# goptop-core — 纯逻辑棋盘与规则，无平台依赖，可单元测试，可编译为 WASM 供前端调用。
+# 围棋/五子棋共用的 Board/Stone/Coord/GameState 均在此定义，规则各自独立模块。
+name = "goptop-core"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop core — shared board model and rules for Gomoku & Go"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[lib]
+name = "goptop_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+
+[features]
+# wasm 特性仅在为前端构建 WASM 时启用，避免为 Tauri/原生构建引入 wasm-bindgen。
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

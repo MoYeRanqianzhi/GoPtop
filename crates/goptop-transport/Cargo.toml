@@ -1,0 +1,22 @@
+[package]
+# goptop-transport — 传输抽象，薄封装 iroh，统一 Web WASM（relay WS）与原生（QUIC+relay）两条路径。
+# 前期全程使用 iroh 官方公有 relay，无自建服务器；memory.rs 仅用于测试/同页联调。
+name = "goptop-transport"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop transport — iroh-based P2P transport over official public relay"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+goptop-core = { path = "../goptop-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# iroh 依赖在 Phase 3 引入，此处先以 trait + memory 实现打通编译；引入时以 default-features=false 精确控制 wasm/native 特性。
+
+[features]
+# 默认不启用 iroh，便于 Phase 0-2 先以 memory 通道联调；Phase 3 再开启。
+default = []
+iroh = []  # 占位，Phase 3 关联到真实 iroh crate

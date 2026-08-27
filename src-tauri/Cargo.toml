@@ -1,0 +1,27 @@
+[package]
+# src-tauri — Tauri 2 后端，承载窗口与 iroh Endpoint（P2P 真源），通过 invoke/event 与前端 React 交互。
+# 将来移动端亦复用此后端逻辑。
+name = "goptop"
+version = "0.1.0-alpha.0"
+description = "GoPtop — P2P Gomoku & Go (Tauri backend)"
+authors = ["GoPtop Contributors"]
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+# Windows 上与 bin 重名会导致链接冲突，Tauri 模板以 _lib 后缀规避，见 https://github.com/rust-lang/cargo/issues/8519
+name = "goptop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+goptop-core = { path = "../crates/goptop-core" }
+goptop-transport = { path = "../crates/goptop-transport" }
+thiserror = "2"
+tokio = { workspace = true }

@@ -1,0 +1,18 @@
+# GoPtop workspace — P2P 围棋 / 五子棋
+# 约定：resolver = "2"，edition = "2024"（项目规范强制），成员含 Rust crates 与 Tauri 后端。
+# frontend/ 为独立 npm 包，不纳入 Cargo workspace。
+
+[workspace]
+members = ["crates/goptop-core", "crates/goptop-transport", "src-tauri"]
+resolver = "2"
+
+# 共享依赖版本，便于各 crate 对齐。core/transport/tauri 三处复用 serde 等基础库。
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+# Tauri 相关由 src-tauri/Cargo.toml 自行声明版本，workspace 仅收敛通用库。
