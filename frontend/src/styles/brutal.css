@@ -1,52 +1,52 @@
 /**
- * brutal.css — GoPtop 新野兽派/Neubrutalism 设计 token。
- *
- * 视觉关键词：高饱和撞色、硬阴影（无模糊）、粗黑描边、方正（零/极小圆角）、等宽/粗体字。
- * 仅用 CSS 变量与工具类，不引入 Tailwind，前期以可读与可拷贝为先。
+ * brutal.css — GoPtop 新野兽派 / Neubrutalism
+ * 页面：淡淡米黄 #FFF7E6 · 白卡片 · 选中橙 #FF8C1A · 零圆角、粗黑描边、硬阴影
+ * 2026-08-28 精修：装饰条居中 + 全局 UI 不可选中 + 视口自适应（整组 play-stack 等宽同步缩放，无滚动）
  */
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700&family=Space+Mono:wght@700&family=IBM+Plex+Mono:wght@700&display=swap");
 
 :root {
-  /* 高饱和撞色底色，棋盘与海报区的主背景 */
-  --bg: #fff500;
+  --bg-page: #fff7e6;
   --bg-2: #ff3b30;
   --bg-3: #00d084;
+  --bg-active: #ff8c1a;
   --ink: #0a0a0a;
   --card-bg: #ffffff;
   --muted: #6b6b6b;
+  --paper: #fffbeb;
 
-  /* 描边与阴影 — 硬阴影无模糊，偏移即阴影本体 */
   --border: 4px solid var(--ink);
   --border-thin: 3px solid var(--ink);
   --shadow: 8px 8px 0 var(--ink);
   --shadow-sm: 6px 6px 0 var(--ink);
   --shadow-xs: 4px 4px 0 var(--ink);
-  --radius: 0px;
 
-  /* 字体 — 标题用粗无衬线/等宽，正文可用系统字体垫底 */
   --font-display: "Space Grotesk", "IBM Plex Mono", ui-monospace, monospace;
+  --font-mono: "Space Mono", "IBM Plex Mono", ui-monospace, monospace;
   --font-body: ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
 
-* {
-  box-sizing: border-box;
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg-page); color: var(--ink); font-family: var(--font-body); }
+html, body, #root { height: 100%; }
+::selection { background: var(--ink); color: #fff; }
+
+/* 全局 UI 文字不可选中（装饰性文本），输入类元素除外 */
+.brutal-card,
+.brutal-btn,
+.brutal-title,
+.brutal-label,
+.poster-strip,
+header,
+footer,
+.board-paper {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-html,
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font-family: var(--font-body);
-}
+.brutal-card { border: var(--border); box-shadow: var(--shadow); background: var(--card-bg); }
+.brutal-card--paper { background: var(--paper); }
 
-/* 卡片 — 棋盘容器、信息面板等 */
-.brutal-card {
-  border: var(--border);
-  box-shadow: var(--shadow);
-  background: var(--card-bg);
-}
-
-/* 按钮 — 主操作，硬阴影 + 按压位移 */
 .brutal-btn {
   border: var(--border-thin);
   box-shadow: var(--shadow-sm);
@@ -58,41 +58,77 @@ body {
   letter-spacing: 0.04em;
   padding: 10px 18px;
   cursor: pointer;
+  transition: transform 60ms linear, box-shadow 60ms linear;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.brutal-btn:hover { background: #fff; }
+.brutal-btn:active { transform: translate(4px, 4px); box-shadow: 2px 2px 0 var(--ink); }
+.brutal-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: var(--shadow-xs); }
+
+.brutal-btn--primary { background: var(--bg-2); color: #fff; }
+.brutal-btn--primary:hover { background: #ff2a1f; }
+.brutal-btn--accent { background: var(--bg-3); color: var(--ink); }
+
+.brutal-btn--active { background: var(--bg-active); color: #fff; border-color: var(--ink); }
+.brutal-btn--active:hover { background: #ff9a2e; }
+
+.brutal-btn--sm { padding: 7px 12px; font-size: 12px; box-shadow: var(--shadow-xs); }
+
+.brutal-title { font-family: var(--font-display); font-weight: 900; letter-spacing: 0.02em; line-height: 0.9; }
+.brutal-label { font-family: var(--font-mono); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; }
+
+.board-paper {
+  background: #f5d76e;
+  background-image: radial-gradient(circle at 1px 1px, rgba(10,10,10,0.05) 1px, transparent 0);
+  background-size: 18px 18px;
 }
 
-.brutal-btn:active {
-  transform: translate(4px, 4px);
-  box-shadow: 2px 2px 0 var(--ink);
+/* 核心：整组等宽同步缩放 — play-stack 是唯一宽度锚点，其宽度同时受视口宽度和视口高度限制 */
+.play-stack {
+  width: min(720px, 92vw, calc(100dvh - 360px), calc(100vh - 360px));
+  max-width: 92vw;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(8px, 1.4vh, 14px);
+  flex: 0 1 auto;
+  min-height: 0;
+  align-items: stretch;
 }
 
-.brutal-btn--primary {
-  background: var(--bg-2);
-  color: #fff;
+/* 棋盘：占满 play-stack 宽度，保持 1:1 正方形，保证与上下卡片左右边线对齐 */
+.board-wrap {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.board-wrap > .brutal-card {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 10px;
+  overflow: hidden;
+}
+.board-wrap > .brutal-card svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  flex: 1;
 }
 
-.brutal-btn--accent {
-  background: var(--bg-3);
-}
-
-/* 输入框 — 与按钮同风格 */
-.brutal-input {
-  border: var(--border-thin);
-  box-shadow: var(--shadow-xs);
-  padding: 10px 14px;
-  font-family: var(--font-display);
-  font-weight: 700;
-  outline: none;
-}
-
-.brutal-input:focus {
-  box-shadow: 6px 6px 0 var(--ink);
-}
-
-/* 标题 */
-.brutal-title {
-  font-family: var(--font-display);
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  line-height: 1;
+.poster-strip {
+  background: var(--ink); color: #fff; font-family: var(--font-mono); font-weight: 700;
+  letter-spacing: 0.18em; text-transform: uppercase; font-size: 11px; padding: 7px 12px;
+  overflow: hidden; white-space: nowrap; border-bottom: 3px solid var(--ink);
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
 }
