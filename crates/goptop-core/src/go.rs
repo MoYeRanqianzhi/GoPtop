@@ -121,3 +121,65 @@ pub fn try_place<const N: usize>(
 
     Ok(captured)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Coord, Stone};
+
+    #[test]
+    fn capture_single() {
+        let mut b = Board::<9>::new();
+        // 白在 (1,1)，黑围三面后在 (1,0) 补一手提子
+        b.set(Coord::new(1, 1), Stone::White);
+        b.set(Coord::new(0, 1), Stone::Black);
+        b.set(Coord::new(2, 1), Stone::Black);
+        b.set(Coord::new(1, 2), Stone::Black);
+        let caps = try_place(&mut b, Coord::new(1, 0), Stone::Black).unwrap();
+        assert_eq!(caps, vec![Coord::new(1, 1)]);
+        assert_eq!(b.get(Coord::new(1, 1)), Some(Stone::Empty));
+    }
+
+    #[test]
+    fn suicide_rejected() {
+        let mut b = Board::<9>::new();
+        b.set(Coord::new(0, 1), Stone::White);
+        b.set(Coord::new(1, 0), Stone::White);
+        // 黑在 (0,0) 自杀（无气且不提子）
+        let err = try_place(&mut b, Coord::new(0, 0), Stone::Black).unwrap_err();
+        assert!(err.contains("suicide"));
+        // 棋盘应回滚，未落子
+        assert_eq!(b.get(Coord::new(0, 0)), Some(Stone::Empty));
+    }
+
+    #[test]
+    fn suicide_with_capture_allowed() {
+        // 关键反例：落子看似自杀但同时提掉对手则允许（提子后获得气）。
+        // 白在 (1,0) 且仅剩一气 (1,1)；黑占据其余三面及落子点的侧翼，使 (1,1) 填子后不自杀。
+        let mut b = Board::<9>::new();
+        b.set(Coord::new(1, 0), Stone::White);
+        b.set(Coord::new(0, 0), Stone::Black);
+        b.set(Coord::new(2, 0), Stone::Black);
+        b.set(Coord::new(0, 1), Stone::Black);
+        b.set(Coord::new(2, 1), Stone::Black);
+        b.set(Coord::new(1, 2), Stone::Black);
+        // 黑在 (1,1) 落子：提白 (1,0)，自身因提子后在 (1,0) 获得气而不自杀
+        let caps = try_place(&mut b, Coord::new(1, 1), Stone::Black).unwrap();
+        assert!(caps.contains(&Coord::new(1, 0)));
+        assert_eq!(b.get(Coord::new(1, 0)), Some(Stone::Empty));
+        assert_eq!(b.get(Coord::new(1, 1)), Some(Stone::Black));
+    }
+
+    #[test]
+    fn occupied_rejected() {
+        let mut b = Board::<9>::new();
+        b.set(Coord::new(4, 4), Stone::Black);
+        assert!(try_place(&mut b, Coord::new(4, 4), Stone::White).is_err());
+    }
+
+    #[test]
+    fn out_of_bounds_rejected() {
+        let mut b = Board::<9>::new();
+        assert!(try_place(&mut b, Coord::new(9, 0), Stone::Black).is_err());
+    }
+}

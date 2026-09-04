@@ -52,3 +52,76 @@ pub fn has_five<const N: usize>(board: &Board<N>, stone: Stone) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Coord, Stone};
+
+    #[test]
+    fn horizontal_five() {
+        let mut b = Board::<15>::new();
+        for x in 5..10 {
+            b.set(Coord::new(x, 7), Stone::Black);
+        }
+        assert!(is_five(&b, Coord::new(7, 7), Stone::Black));
+        assert!(has_five(&b, Stone::Black));
+        assert!(!has_five(&b, Stone::White));
+    }
+
+    #[test]
+    fn vertical_five() {
+        let mut b = Board::<15>::new();
+        for y in 2..7 {
+            b.set(Coord::new(3, y), Stone::White);
+        }
+        assert!(is_five(&b, Coord::new(3, 4), Stone::White));
+    }
+
+    #[test]
+    fn diag_five() {
+        let mut b = Board::<15>::new();
+        for i in 0..5 {
+            b.set(Coord::new(10 + i, i), Stone::Black);
+        }
+        assert!(is_five(&b, Coord::new(12, 2), Stone::Black));
+    }
+
+    #[test]
+    fn anti_diag_five() {
+        let mut b = Board::<15>::new();
+        for i in 0..5 {
+            b.set(Coord::new(i, 4 - i), Stone::Black);
+        }
+        assert!(is_five(&b, Coord::new(2, 2), Stone::Black));
+    }
+
+    #[test]
+    fn four_not_five() {
+        let mut b = Board::<15>::new();
+        for x in 0..4 {
+            b.set(Coord::new(x, 0), Stone::Black);
+        }
+        assert!(!is_five(&b, Coord::new(1, 0), Stone::Black));
+        assert!(!has_five(&b, Stone::Black));
+    }
+
+    #[test]
+    fn six_still_five() {
+        // 无禁手规则下六连亦算胜
+        let mut b = Board::<15>::new();
+        for x in 0..6 {
+            b.set(Coord::new(x, 0), Stone::Black);
+        }
+        assert!(is_five(&b, Coord::new(2, 0), Stone::Black));
+    }
+
+    #[test]
+    fn edge_five() {
+        let mut b = Board::<15>::new();
+        for x in 10..15 {
+            b.set(Coord::new(x, 14), Stone::White);
+        }
+        assert!(is_five(&b, Coord::new(12, 14), Stone::White));
+    }
+}

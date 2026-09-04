@@ -35,3 +35,6 @@ wasm-pack.log
 *.sln
 *.sw?
 .env
+
+# Playwright / MCP artifacts
+.playwright-mcp/

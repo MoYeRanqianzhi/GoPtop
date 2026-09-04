@@ -272,3 +272,84 @@ impl BoardVariant {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stone_opponent() {
+        assert_eq!(Stone::Black.opponent(), Stone::White);
+        assert_eq!(Stone::White.opponent(), Stone::Black);
+        assert_eq!(Stone::Empty.opponent(), Stone::Empty);
+    }
+
+    #[test]
+    fn board_basic_rw() {
+        let mut b = Board::<15>::new();
+        let c = Coord::new(7, 7);
+        assert!(b.is_empty(c));
+        assert!(b.set(c, Stone::Black));
+        assert_eq!(b.get(c), Some(Stone::Black));
+        assert!(!b.is_empty(c));
+        b.clear();
+        assert!(b.is_empty(c));
+    }
+
+    #[test]
+    fn board_out_of_bounds() {
+        let mut b = Board::<15>::new();
+        let oob = Coord::new(15, 0);
+        assert_eq!(b.get(oob), None);
+        assert!(!b.set(oob, Stone::Black));
+        assert!(!b.in_bounds(oob));
+        // 越界视为非空，避免误落子
+        assert!(!b.is_empty(oob));
+    }
+
+    #[test]
+    fn board_for_each() {
+        let mut b = Board::<15>::new();
+        b.set(Coord::new(0, 0), Stone::Black);
+        b.set(Coord::new(14, 14), Stone::White);
+        let mut v = Vec::new();
+        b.for_each(|c, s| v.push((c, s)));
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn board_serde_roundtrip_b15() {
+        let mut b = Board::<15>::new();
+        b.set(Coord::new(3, 3), Stone::Black);
+        let s = serde_json::to_string(&b).unwrap();
+        let b2: Board<15> = serde_json::from_str(&s).unwrap();
+        assert_eq!(b, b2);
+    }
+
+    #[test]
+    fn board_serde_roundtrip_b19() {
+        let mut b = Board::<19>::new();
+        b.set(Coord::new(9, 9), Stone::White);
+        let s = serde_json::to_string(&b).unwrap();
+        let b2: Board<19> = serde_json::from_str(&s).unwrap();
+        assert_eq!(b, b2);
+    }
+
+    #[test]
+    fn board_variant_new() {
+        assert_eq!(BoardVariant::new(15).size(), 15);
+        assert_eq!(BoardVariant::new(19).size(), 19);
+        // 9/13 复用 B19 物理存储（逻辑尺寸由 GameKind 约束）
+        assert_eq!(BoardVariant::new(9).size(), 19);
+        assert_eq!(BoardVariant::new(13).size(), 19);
+    }
+
+    #[test]
+    fn board_variant_serde() {
+        let mut v = BoardVariant::new(15);
+        v.set(Coord::new(7, 7), Stone::Black);
+        let s = serde_json::to_string(&v).unwrap();
+        let v2: BoardVariant = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, v2);
+    }
+}

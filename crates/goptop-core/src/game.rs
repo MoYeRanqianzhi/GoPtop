@@ -128,7 +128,12 @@ impl GameState {
                 });
             }
             Move::Place(coord) => {
-                // 边界与占用由各规则模块再次检查，此处先做快速拒绝。
+                // 逻辑边界：围棋 9/13 路的物理棋盘仍为 19×19，超出 kind.size() 的坐标视为越界。
+                // 此检查必须在 `board.get` 的物理检查之前，否则 (9,0) 在 B19 上会被误判为合法。
+                let logical = self.kind.size();
+                if (coord.x as usize) >= logical || (coord.y as usize) >= logical {
+                    return Err(RuleError::OutOfBounds);
+                }
                 if self.board.get(coord).is_none() {
                     return Err(RuleError::OutOfBounds);
                 }
@@ -225,5 +230,100 @@ impl RuleSet for GameState {
 
     fn winner(&self) -> Option<Stone> {
         self.winner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::Coord;
+
+    /// 9 路围棋超出逻辑边界的落子应被拒绝，即使物理棋盘为 19×19。
+    #[test]
+    fn go_9_out_of_logical_bounds_rejected() {
+        let mut s = GameState::new(GameKind::Go { size: 9 });
+        // (9,0) 与 (0,9) 恰好超出 9 路有效区（有效索引 0..8）。
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(9, 0))),
+            Err(RuleError::OutOfBounds)
+        );
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(0, 9))),
+            Err(RuleError::OutOfBounds)
+        );
+        // 边界内仍可落子。
+        assert!(s.try_play(Move::Place(Coord::new(8, 8))).is_ok());
+    }
+
+    /// 13 路同理。
+    #[test]
+    fn go_13_out_of_logical_bounds_rejected() {
+        let mut s = GameState::new(GameKind::Go { size: 13 });
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(13, 0))),
+            Err(RuleError::OutOfBounds)
+        );
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(0, 13))),
+            Err(RuleError::OutOfBounds)
+        );
+        assert!(s.try_play(Move::Place(Coord::new(12, 12))).is_ok());
+    }
+
+    /// 19 路物理边界与逻辑边界一致，19 为越界、18 可落子。
+    #[test]
+    fn go_19_physical_bounds() {
+        let mut s = GameState::new(GameKind::Go { size: 19 });
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(19, 0))),
+            Err(RuleError::OutOfBounds)
+        );
+        assert!(s.try_play(Move::Place(Coord::new(18, 18))).is_ok());
+    }
+
+    /// 五子棋 15 路边界：15 越界、14 可落子。
+    #[test]
+    fn gomoku_15_bounds() {
+        let mut s = GameState::new(GameKind::Gomoku { size: 15 });
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(15, 0))),
+            Err(RuleError::OutOfBounds)
+        );
+        assert!(s.try_play(Move::Place(Coord::new(14, 14))).is_ok());
+    }
+
+    /// 围棋落子后提子与轮手切换是否正确（最小闭气提子场景）。
+    #[test]
+    fn go_capture_and_turn() {
+        let mut s = GameState::new(GameKind::Go { size: 9 });
+        // 围住 (1,1) 的白子：黑在四周落子后提白。
+        //  1) 黑 (0,1)  2) 白 (1,1)  3) 黑 (1,0)  4) 白 pass  5) 黑 (2,1)  6) 白 pass  7) 黑 (1,2) -> 提白
+        assert!(s.try_play(Move::Place(Coord::new(0, 1))).is_ok()); // B
+        assert!(s.try_play(Move::Place(Coord::new(1, 1))).is_ok()); // W
+        assert!(s.try_play(Move::Place(Coord::new(1, 0))).is_ok()); // B
+        assert!(s.try_play(Move::Pass).is_ok()); // W pass
+        assert!(s.try_play(Move::Place(Coord::new(2, 1))).is_ok()); // B
+        assert!(s.try_play(Move::Pass).is_ok()); // W pass
+        let eff = s.try_play(Move::Place(Coord::new(1, 2))).unwrap(); // B 提子
+        assert_eq!(eff.captured, vec![Coord::new(1, 1)]);
+        // 提子计数：黑提 1。
+        assert_eq!(s.captures.0, 1);
+        assert_eq!(s.captures.1, 0);
+    }
+
+    /// 自杀手应被拒绝且不改变轮手。
+    #[test]
+    fn go_suicide_rejected() {
+        let mut s = GameState::new(GameKind::Go { size: 9 });
+        // 形成白子包围黑自杀点的形状：白在 (0,1) 与 (1,0)，黑若在 (0,0) 落子即自杀。
+        assert!(s.try_play(Move::Place(Coord::new(5, 5))).is_ok()); // B 随便一手
+        assert!(s.try_play(Move::Place(Coord::new(0, 1))).is_ok()); // W
+        assert!(s.try_play(Move::Place(Coord::new(6, 6))).is_ok()); // B
+        assert!(s.try_play(Move::Place(Coord::new(1, 0))).is_ok()); // W
+        // 轮到黑，(0,0) 此时四邻仅有白子与边界，无气且不能提子 -> 自杀
+        let err = s.try_play(Move::Place(Coord::new(0, 0))).unwrap_err();
+        assert_eq!(err, RuleError::Suicide);
+        // 轮手未变，仍为黑。
+        assert_eq!(s.to_move, Stone::Black);
     }
 }
