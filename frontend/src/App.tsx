@@ -372,6 +372,13 @@ export default function App() {
   const hostRtcRef = useRef<DirectRtcPeer | null>(null);
   const bootRef = useRef(false);
   const inviteDoneRef = useRef<string | null>(null);
+  // 挑战/同意信件队列：presence 回调只收件，消费逻辑走下面的 drain effect，
+  // 避免 StrictMode 重挂载时闭包函数捕获旧 state 导致 guest 永远收不到 accept。
+  type ChallengeMsg = { from: string; fromName: string; pwd: string | null; kind: GameKind; size: Size; gameId: string; rtcAns: string | null };
+  const challengeQueueRef = useRef<ChallengeMsg[]>([]);
+  const acceptQueueRef = useRef<{ from: string; gameId: string }[]>([]);
+  const rejectQueueRef = useRef<{ from: string; gameId: string }[]>([]);
+  const [signalTick, setSignalTick] = useState(0);
   useEffect(() => { boardRef.current = board; }, [board]);
   useEffect(() => { toMoveRef.current = toMove; }, [toMove]);
   useEffect(() => { winnerRef.current = winner; }, [winner]);
@@ -418,8 +425,8 @@ export default function App() {
       }
       case "SyncState": {
         setPeerConnected(true);
-        setKind(k.kind);
-        setSize(k.size);
+        if (k.kind !== kindRef.current) setKind(k.kind);
+        if (k.size !== sizeRef.current) setSize(k.size);
         setBoard(k.board.map((r) => [...r]));
         setToMove(k.toMove);
         setWinner(k.winner);
@@ -446,7 +453,10 @@ export default function App() {
           const mover = toMoveRef.current;
           if (winnerRef.current) break;
           const curBoard = boardRef.current;
-          if (c.x < 0 || c.y < 0 || c.x >= sizeRef.current || c.y >= sizeRef.current) break;
+          // 跨页消息可能早于 guest 的 kind/size 生效：按消息自带尺寸做边界检查，
+          // 落子合并以当前棋盘为准（双方 kind/size 由 SyncState 对齐）。
+          const n = curBoard.length;
+          if (c.x < 0 || c.y < 0 || c.x >= n || c.y >= n) break;
           if (curBoard[c.y]?.[c.x] !== "empty") break;
           const next = curBoard.map((r) => [...r]);
           next[c.y][c.x] = mover;
@@ -490,38 +500,66 @@ export default function App() {
   }, [handleNetMessage]);
 
   /* ---------- 在线发现与挑战 ---------- */
+  // 注意：StrictMode 下 effect 会挂载→卸载→重挂载一次。若在 effect 内用闭包函数
+  // acceptChallenge/enterPlayingAsGuest，第二次挂载会拿到旧闭包，导致 guest 收
+  // 到 accept 时 phaseRef 仍是旧值。所以这里只做"收件+分发"，把最新状态判断留给
+  // ref，实际进入对局走统一的 enterPlaying。
   useEffect(() => {
     presence.start();
     const off = presence.onEvent((e) => {
       if (e.type === "peers") {
         setPeers(e.peers.filter((p) => p.id !== tabUser));
       } else if (e.type === "challenge") {
-        // 只处理发给我的挑战
-        if (phaseRef.current === "playing") return; // 对局中：pwd 已失效，不接受第三人
-        if (phaseRef.current === "waiting" && pwdRef.current && e.pwd === pwdRef.current) {
-          // 带正确 pwd 的连接请求：自动同意（邀请钥匙语义）
-          // 同源页面间：客人 answer 已随该消息自动回传，直接完成直连
-          acceptChallenge(e.from, e.kind, e.size, e.gameId, true, e.rtcAns ?? null);
-        } else if (phaseRef.current === "home") {
-          // 主页：无 pwd 或 pwd 不对 → 弹窗手动确认
-          setIncoming({ from: e.from, fromName: e.fromName, kind: e.kind, size: e.size, gameId: e.gameId });
-        }
-        // waiting 但 pwd 对不上：忽略（第三人拿旧 pwd 无法加入）
+        challengeQueueRef.current.push(e);
+        setSignalTick((t) => t + 1);
       } else if (e.type === "accept") {
-        // 我是 guest，主机同意了
-        if (roleRef.current === "guest" && gameIdRef.current === e.gameId) {
-          enterPlayingAsGuest();
-        }
+        acceptQueueRef.current.push(e);
+        setSignalTick((t) => t + 1);
       } else if (e.type === "reject") {
-        if (roleRef.current === "guest" && gameIdRef.current === e.gameId) {
-          setNotice("对方拒绝了对局");
-          backHome();
-        }
+        rejectQueueRef.current.push(e);
+        setSignalTick((t) => t + 1);
       }
     });
     return () => { off(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabUser]);
+
+  // 消费挑战/同意信件（用最新 state 做判断，不受 StrictMode 闭包影响）。
+  // 顺序：先处理 challenge（主机自动同意→发出 accept），再处理 accept（客人进入对局）。
+  useEffect(() => {
+    if (signalTick === 0) return;
+    const challenges = challengeQueueRef.current;
+    challengeQueueRef.current = [];
+    for (const e of challenges) {
+      if (phaseRef.current === "playing") continue; // 对局中：pwd 已失效，不接受第三人
+      if (phaseRef.current === "waiting" && pwdRef.current && e.pwd === pwdRef.current) {
+        // 带正确 pwd 的连接请求：自动同意（邀请钥匙语义）
+        acceptChallenge(e.from, e.kind, e.size, e.gameId, true, e.rtcAns ?? null);
+      } else if (phaseRef.current === "home") {
+        // 主页：无 pwd 或 pwd 不对 → 弹窗手动确认
+        setIncoming({ from: e.from, fromName: e.fromName, kind: e.kind, size: e.size, gameId: e.gameId });
+      }
+      // waiting 但 pwd 对不上：忽略（第三人拿旧 pwd 无法加入）
+    }
+    const accepts = acceptQueueRef.current;
+    acceptQueueRef.current = [];
+    for (const e of accepts) {
+      const gid = gameIdRef.current;
+      if (roleRef.current === "guest" && gid && e.gameId === gid) {
+        enterPlayingAsGuest();
+      }
+    }
+    const rejects = rejectQueueRef.current;
+    rejectQueueRef.current = [];
+    for (const e of rejects) {
+      const gid = gameIdRef.current;
+      if (roleRef.current === "guest" && gid && e.gameId === gid) {
+        setNotice("对方拒绝了对局");
+        backHome();
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signalTick]);
 
   // presence 状态上报
   useEffect(() => {
@@ -549,6 +587,7 @@ export default function App() {
         return;
       }
       if (!it.pwd) return; // 无 pwd：仅展示对方主页，由用户手动挑战
+      if (roleRef.current !== "idle") return; // 已在对局流程中：忽略重复意图
       const href = window.location.href;
       if (inviteDoneRef.current === href) return;
       inviteDoneRef.current = href;
@@ -557,17 +596,24 @@ export default function App() {
     }
   }
 
-  // 启动意图（StrictMode 下守卫只执行一次）
+  const processedIntentRef = useRef<string | null>(null);
+
+  // 启动意图（StrictMode 下：effect 跑两次，但靠 processedIntentRef 只执行一次）
   useEffect(() => {
-    if (bootRef.current) return;
+    const href = window.location.href;
+    if (processedIntentRef.current === href) return;
+    processedIntentRef.current = href;
     bootRef.current = true;
     processIntent(parseUrl());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 站内路由变化时处理新意图
+  // 站内路由变化时处理新意图（跳过启动时已处理过的同一 URL，避免重复发起挑战）
   useEffect(() => {
     if (!bootRef.current) return;
+    const href = window.location.href;
+    if (processedIntentRef.current === href) return;
+    processedIntentRef.current = href;
     processIntent(intent);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intent]);
@@ -590,8 +636,11 @@ export default function App() {
     setGameId(g);
     gameIdRef.current = g;
     setPwd(p);
+    pwdRef.current = p;
     setRole("host");
+    roleRef.current = "host";
     setPhase("waiting");
+    phaseRef.current = "waiting";
     setMyColor("black");
     setPeerConnected(false);
     resetBoardFor(kind, size);
@@ -624,11 +673,14 @@ export default function App() {
     setGameId(g);
     gameIdRef.current = g;
     setRole("guest");
+    roleRef.current = "guest";
     setMyColor("white");
+    myColorRef.current = "white";
     setPeerConnected(false);
     resetBoardFor(k, s);
     transport.join(g);
     setPhase("waiting");
+    phaseRef.current = "waiting";
     setPwd(null);
     setInviteUrl(null);
     setWatchUrl(null);
@@ -680,13 +732,18 @@ export default function App() {
     // 切换到 guest 的 game channel（两人同一 channel）
     transport.join(guestGameId);
     setGameId(guestGameId);
+    gameIdRef.current = guestGameId;
     setRole("host");
+    roleRef.current = "host";
     setPhase("playing");
+    phaseRef.current = "playing";
     setMyColor("black");
+    myColorRef.current = "black";
     setPeerConnected(false);
     resetBoardFor(k, s);
     // pwd 失效：两人已满，不再接受第三人
     setPwd(null);
+    pwdRef.current = null;
     setInviteUrl(null);
     setWatchUrl(watchToUrl(guestGameId));
     presence.accept(from, guestGameId);
@@ -706,8 +763,11 @@ export default function App() {
   }
 
   function enterPlayingAsGuest() {
+    if (phaseRef.current === "playing") return;
     setPhase("playing");
+    phaseRef.current = "playing";
     setPwd(null);
+    pwdRef.current = null;
     setWatchUrl(watchToUrl(gameIdRef.current ?? ""));
     setNotice("对方已同意，对局开始（你执白）");
     setTimeout(() => {
@@ -720,11 +780,15 @@ export default function App() {
     setGameId(g);
     gameIdRef.current = g;
     setRole("spectator");
+    roleRef.current = "spectator";
     setPhase("playing");
+    phaseRef.current = "playing";
     setMyColor("white");
+    myColorRef.current = "white";
     setPeerConnected(false);
     transport.join(g);
     setPwd(null);
+    pwdRef.current = null;
     setInviteUrl(null);
     setWatchUrl(null);
     setNotice("观战模式：只读同步，不可落子");
@@ -737,15 +801,19 @@ export default function App() {
     rtcPeersRef.current = [];
     hostRtcRef.current = null;
     setRole("idle");
+    roleRef.current = "idle";
     setPhase("home");
+    phaseRef.current = "home";
     setGameId(null);
     gameIdRef.current = null;
     setPwd(null);
+    pwdRef.current = null;
     setInviteUrl(null);
     setWatchUrl(null);
     setIncoming(null);
     setPeerConnected(false);
     setMyColor("black");
+    myColorRef.current = "black";
     setNotice(null);
     setAnswerBackUrl(null);
     setDirectState("idle");
@@ -987,7 +1055,7 @@ export default function App() {
         </div>
       </header>
 
-      <main style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: 760, margin: "0 auto", overflow: "auto" }}>
+      <main style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: 760, margin: "0 auto", overflow: "auto" }}>
         <div className="play-stack">
           {incomingBanner}
 
@@ -998,11 +1066,11 @@ export default function App() {
                 <span className="brutal-label">开始 · 选一个玩法</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>{tabUser}</span>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <button className="brutal-btn" style={{ padding: "16px 8px" }} onClick={() => nav("/local")}>本地对战</button>
-                <button className="brutal-btn brutal-btn--accent" style={{ padding: "16px 8px" }} onClick={() => nav("/p2p")}>P2P 对战</button>
-                <button className="brutal-btn" style={{ padding: "16px 8px" }} onClick={() => nav("/users")}>在线用户（{peers.length}）</button>
-                <button className="brutal-btn" style={{ padding: "16px 8px" }} onClick={() => nav("/settings")}>设置</button>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/local")}>本地对战</button>
+                <button className="brutal-btn brutal-btn--accent" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/p2p")}>P2P 对战</button>
+                <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/users")}>在线用户（{peers.length}）</button>
+                <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/settings")}>设置</button>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <button className="brutal-btn brutal-btn--sm" onClick={() => nav(`/${encodeURIComponent(tabUser)}`)}>我的主页</button>
@@ -1052,6 +1120,7 @@ export default function App() {
           )}
 
           {mode === "p2p" && phase === "waiting" && (
+            <>
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span className="brutal-label">等待对手 · 邀请（本局有效）</span>
@@ -1088,6 +1157,17 @@ export default function App() {
                 </>
               )}
             </div>
+            {(role === "host" || role === "guest") && (
+              <BoardPanel
+                kind={kind} size={size} board={board} toMove={toMove} winner={winner}
+                lastMove={lastMove} hover={hover} onHover={setHover}
+                disabled onPlace={() => undefined}
+                statusText="等待对手加入…" statusNote={`联机 · 你是${myColor === "black" ? "黑" : "白"}`}
+                moveCount={moveCount} history={history}
+                onUndo={null} onReset={() => undefined}
+              />
+            )}
+            </>
           )}
 
           {mode === "p2p" && phase === "playing" && (
@@ -1201,6 +1281,7 @@ export default function App() {
 
           {/* —— 用户主页 `/<userId>` —— */}
           {mode === "user" && viewedUserId && (
+            <>
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 8 }}>
               {isSelfPage ? (
                 <>
@@ -1285,6 +1366,18 @@ export default function App() {
               {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
               {copyFb && <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</div>}
             </div>
+            {(phase === "waiting" || phase === "playing") && (role === "host" || role === "guest") && (
+              <BoardPanel
+                kind={kind} size={size} board={board} toMove={toMove} winner={winner}
+                lastMove={lastMove} hover={hover} onHover={setHover}
+                disabled={phase === "waiting" ? true : boardDisabled} onPlace={phase === "waiting" ? () => undefined : handlePlace}
+                statusText={phase === "waiting" ? "等待对手加入…" : statusText}
+                statusNote={phase === "waiting" ? `联机 · 你是${myColor === "black" ? "黑" : "白"}` : `联机 · ${myColor === "black" ? "你执黑" : "你执白"}`}
+                moveCount={moveCount} history={history}
+                onUndo={null} onReset={phase === "waiting" ? () => undefined : reset}
+              />
+            )}
+            </>
           )}
 
           {/* —— 观战 `/watch/<game>` —— */}
