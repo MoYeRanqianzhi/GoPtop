@@ -1,4 +1,5 @@
 /**
- * game/rules — 展示层规则校验占位（权威校验在 Rust `goptop-core`）。
+ * game/rules — 规则薄封装（委托给 `state/gameStore`，便于未来接入 WASM/Invoke）。
  */
-export const rules = null;
+
+export { checkFive } from "../state/gameStore";
