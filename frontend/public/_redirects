@@ -1,0 +1,4 @@
+# Cloudflare Pages / Netlify / 任何静态托管：SPA 回退
+# 站内路由（/local /p2p /users /settings /<userId> /watch/<id>）
+# 皆为前端路由，直链打开时需回退到 index.html，由前端接管。
+/*    /index.html   200
