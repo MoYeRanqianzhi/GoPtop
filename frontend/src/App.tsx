@@ -12,7 +12,8 @@ import {
   myName,
   myUserId,
   nav,
-  parseAnswerFromUrl,
+  parsePastedAnswer,
+  parsePastedLink,
   parseUrl,
   presence,
   saveStunLines,
@@ -20,6 +21,7 @@ import {
   transport,
   userToUrl,
   watchToUrl,
+  wireRtcBroadcast,
 } from "./net/transport";
 import type { GameKind, GameMsg, PeerInfo, Size, StunLine, UrlIntent } from "./net/transport";
 
@@ -355,6 +357,16 @@ export default function App() {
   const [answerBackUrl, setAnswerBackUrl] = useState<string | null>(null);
   const [copyFb, setCopyFb] = useState<string | null>(null);
 
+  /* ---------- 弹窗（所有信令消息统一走弹窗收发） ---------- */
+  // kind:
+  // - "paste-invite"：粘贴邀请链接（客人侧）
+  // - "paste-answer"：粘贴回执链接（房主侧，等对手时）
+  // - "receipt"：展示本方生成的回执链接（客人侧，供复制发回房主）
+  type ModalKind = "paste-invite" | "paste-answer" | "receipt";
+  const [modal, setModal] = useState<ModalKind | null>(null);
+  const [modalInput, setModalInput] = useState("");
+  const [modalErr, setModalErr] = useState<string | null>(null);
+
   // refs：供消息回调读取最新值
   const boardRef = useRef(board);
   const toMoveRef = useRef(toMove);
@@ -575,17 +587,21 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  /** 按 URL 意图行动：观战加入 / 邀请自动挑战 / 客人回执自动完成。 */
+  /** 按 URL 意图行动：观战加入 / 邀请自动挑战。回执不再走「打开链接」——
+   *  新标签页身份不同且主机 RTC 状态不可迁移，曾导致同机两窗互弈；统一走等待页「输入回执」弹窗。 */
   function processIntent(it: UrlIntent) {
     if (it.mode === "watch" && phaseRef.current === "home") {
       joinAsSpectator(it.gameId);
     } else if (it.mode === "user" && phaseRef.current === "home") {
-      if (it.userId === tabUser) {
-        // 房主打开客人回执链接（`?rtcAns=`）：自动完成直连，无需任何操作
-        const ans = parseAnswerFromUrl();
-        if (ans) finishHostRtc(ans);
+      let hasReceipt = false;
+      try { hasReceipt = !!new URL(window.location.href).searchParams.get("rtcAns"); } catch { /* ignore */ }
+      if (hasReceipt) {
+        // 回执链接被当页面打开（而非粘贴进弹窗）：绝不据此发起挑战，否则同源两窗会互弈
+        setNotice("这是回执链接：请在房主的「等待对手」页点「输入回执」粘贴它");
+        setTimeout(() => setNotice(null), 3200);
         return;
       }
+      if (it.userId === tabUser) return; // 自己的主页
       if (!it.pwd) return; // 无 pwd：仅展示对方主页，由用户手动挑战
       if (roleRef.current !== "idle") return; // 已在对局流程中：忽略重复意图
       const href = window.location.href;
@@ -654,7 +670,7 @@ export default function App() {
       const peer = new DirectRtcPeer({ isHost: true, role: "player" });
       attachPeer(peer);
       try {
-        const offer = await peer.createOffer();
+        const offer = await peer.createOffer(p);
         hostRtcRef.current = peer;
         setInviteUrl(inviteToUrl(tabUser, p, kind, size, offer));
         setDirectState("waiting-guest");
@@ -695,11 +711,15 @@ export default function App() {
         const peer = new DirectRtcPeer({ isHost: false, role: "player" });
         attachPeer(peer);
         try {
-          const ans = await peer.acceptOffer(hostOffer);
-          // guest 的 gameId + answer 发给主机：pwd 校验通过后主机自动完成直连并开始对局
+          const ans = await peer.acceptOffer(hostOffer, pwdOrNull ?? "");
+          // guest 的 gameId + answer 发给主机：同源经 Presence 自动送达；
+          // 跨设备 Presence 不可达，弹窗展示回执链接，发回房主「输入回执」粘贴即可
           presence.challenge(hostId, pwdOrNull, k, s, g, ans);
-          setAnswerBackUrl(answerToUrl(hostId, pwdOrNull ?? "", ans));
-          setNotice("直连应答已生成：同源会自动送达；跨设备请把回执链接发给房主打开");
+          setAnswerBackUrl(answerToUrl(hostId, pwdOrNull ?? "", ans, g, k, s));
+          // 回执弹窗延迟弹出：若同源 Presence 已把 answer 送达（直连很快建立），就不打扰
+          setTimeout(() => {
+            if (peer.state !== "open") setModal("receipt");
+          }, 1200);
         } catch {
           setDirectState("error");
           setNotice("直连建立失败，可检查设置页线路后重试");
@@ -713,12 +733,12 @@ export default function App() {
     nav("/p2p");
   }
 
-  /** 房主用客人回传的 answer 完成直连（同源自动；跨设备由回执链接自动触发）。 */
-  async function finishHostRtc(ans: string) {
+  /** 房主用客人回传的 answer 完成直连（同源自动；跨设备由弹窗粘贴回执触发）。 */
+  async function finishHostRtc(ans: string, pwd: string) {
     const peer = hostRtcRef.current;
     if (!peer || peer.state !== "waiting-guest") return;
     try {
-      await peer.acceptAnswer(ans);
+      await peer.acceptAnswer(ans, pwd);
       setNotice("对方已加入，直连建立中…");
     } catch {
       setDirectState("error");
@@ -726,9 +746,112 @@ export default function App() {
     }
   }
 
+  /** 房主受理回执：校验钥匙 → 完成直连 → 切到客人的 game channel 进对局。
+   *  回执路径（弹窗粘贴）都走这里；同源 Presence 路径走 acceptChallenge。
+   *  返回错误信息（null 表示受理成功），由弹窗就地展示。 */
+  function hostAcceptReceipt(r: { hostId: string; pwd: string; rtcAns: string; gameId: string | null; kind: GameKind | null; size: Size | null }): string | null {
+    if (roleRef.current !== "host" || phaseRef.current !== "waiting") {
+      return "当前不在等待对手状态，无法受理回执";
+    }
+    if (r.hostId !== tabUser) {
+      return `回执是发给房主 ${r.hostId} 的，本页是 ${tabUser}，不能代收`;
+    }
+    if (r.pwd !== pwdRef.current) {
+      return "回执钥匙与本局不符，已拒绝";
+    }
+    void finishHostRtc(r.rtcAns, r.pwd);
+    const k = r.kind ?? kindRef.current;
+    const s = r.size ?? sizeRef.current;
+    if (r.gameId) {
+      // 切到客人的 game channel（两人同一 channel）
+      transport.join(r.gameId);
+      setGameId(r.gameId);
+      gameIdRef.current = r.gameId;
+      setWatchUrl(watchToUrl(r.gameId));
+    }
+    setRole("host");
+    roleRef.current = "host";
+    setPhase("playing");
+    phaseRef.current = "playing";
+    setMyColor("black");
+    myColorRef.current = "black";
+    setPeerConnected(false);
+    resetBoardFor(k, s);
+    // pwd 失效：两人已满，不再接受第三人
+    setPwd(null);
+    pwdRef.current = null;
+    setInviteUrl(null);
+    setIncoming(null);
+    setNotice("回执已受理，直连建立中…");
+    nav("/p2p");
+    setTimeout(() => {
+      transport.send({ type: "Hello", kind: k, size: s });
+      transport.send({ type: "SyncRequest" });
+    }, 80);
+    return null;
+  }
+
+  /** 弹窗确认：按弹窗类型解析粘贴文本并执行。解析与域名无关；
+   *  校验失败留在弹窗内报错，成功才关闭。 */
+  function submitModal() {
+    const m = modal;
+    if (!m) return;
+    if (m === "paste-invite") {
+      const it = parsePastedLink(modalInput);
+      if (!it) {
+        setModalErr("无法识别该链接：请完整粘贴邀请链接或主页链接");
+        return;
+      }
+      if (it.mode === "user") {
+        if (phaseRef.current !== "home" && phaseRef.current !== "waiting") {
+          setModalErr("正在对局中，请先离开再加入新对局");
+          return;
+        }
+        if (it.userId === tabUser) {
+          setModalErr("这是你自己的主页链接");
+          return;
+        }
+        setModalInput("");
+        setModalErr(null);
+        setModal(null);
+        guestChallenge(it.userId, it.pwd, it.kind, it.size, it.rtc);
+        return;
+      }
+      if (it.mode === "watch") {
+        if (phaseRef.current !== "home") {
+          setModalErr("正在对局中，请先离开再观战");
+          return;
+        }
+        setModalInput("");
+        setModalErr(null);
+        setModal(null);
+        joinAsSpectator(it.gameId);
+        return;
+      }
+      setModalErr("该链接是本站页面链接，不是邀请链接");
+      return;
+    }
+    if (m === "paste-answer") {
+      const r = parsePastedAnswer(modalInput);
+      if (!r) {
+        setModalErr("无法识别该回执：请完整粘贴客人发来的回执链接（含 rtcAns）");
+        return;
+      }
+      const err = hostAcceptReceipt(r);
+      if (err) {
+        setModalErr(err);
+        return;
+      }
+      setModalInput("");
+      setModalErr(null);
+      setModal(null);
+      return;
+    }
+  }
+
   /** 主机接受挑战：pwd 失效（两人满员），进入 playing。 */
   function acceptChallenge(from: string, k: GameKind, s: Size, guestGameId: string, auto: boolean, guestAns?: string | null) {
-    if (guestAns) void finishHostRtc(guestAns);
+    if (guestAns) void finishHostRtc(guestAns, pwdRef.current ?? "");
     // 切换到 guest 的 game channel（两人同一 channel）
     transport.join(guestGameId);
     setGameId(guestGameId);
@@ -764,6 +887,7 @@ export default function App() {
 
   function enterPlayingAsGuest() {
     if (phaseRef.current === "playing") return;
+    setModal(null); // 若回执弹窗还开着（同源延迟弹出的竞态），对局开始即收起
     setPhase("playing");
     phaseRef.current = "playing";
     setPwd(null);
@@ -800,6 +924,9 @@ export default function App() {
     for (const p of rtcPeersRef.current) { try { p.close(); } catch { /* ignore */ } }
     rtcPeersRef.current = [];
     hostRtcRef.current = null;
+    setModal(null);
+    setModalInput("");
+    setModalErr(null);
     setRole("idle");
     roleRef.current = "idle";
     setPhase("home");
@@ -838,26 +965,34 @@ export default function App() {
 
   /* ---------- P2P 直连（邀请链接自动信令，无服务器、无手动输入） ---------- */
 
+  // 广播注入：GameChannel.send 单入口，同一条消息同时发 BroadcastChannel 与所有
+  // WebRTC 直连；接收端对 Move 按 (sender, seq) 去重，双链路只应用一次。
+  useEffect(() => {
+    wireRtcBroadcast((msg) => {
+      for (const q of rtcPeersRef.current) {
+        try { q.send(msg); } catch { /* ignore */ }
+      }
+    });
+    return () => wireRtcBroadcast(null);
+  }, []);
+
   function attachPeer(p: DirectRtcPeer) {
     p.onRemote = (msg) => transport.injectRemote(msg);
     p.onState = (s) => {
       setDirectState(s);
       if (s === "open") {
         setPeerConnected(true);
+        // 跨设备时 Presence 不可达（无 BroadcastChannel）：直连一旦打通，
+        // 等待中的客人直接进对局，不再依赖主机的 accept 信件
+        if (roleRef.current === "guest" && phaseRef.current === "waiting") enterPlayingAsGuest();
         // 直连建立后主动同步一次
         setTimeout(() => {
-          const sync = {
+          transport.send({
             type: "SyncState",
             board: boardRef.current, toMove: toMoveRef.current, winner: winnerRef.current,
             history: historyRef.current, lastMove: lastMoveRef.current,
             kind: kindRef.current, size: sizeRef.current,
-          } as const;
-          transport.send(sync);
-          for (const q of rtcPeersRef.current) {
-            try {
-              q.send({ seq: Date.now(), sender: transport.myId, userId: tabUser, kind: { ...sync } });
-            } catch { /* ignore */ }
-          }
+          });
         }, 200);
       }
     };
@@ -884,13 +1019,7 @@ export default function App() {
     else setToMove(mover === "black" ? "white" : "black");
 
     if (phase === "playing") {
-      const msg = { type: "Move", move: { type: "Place", coord: c } } as const;
-      transport.send(msg);
-      for (const q of rtcPeersRef.current) {
-        try {
-          q.send({ seq: Date.now(), sender: transport.myId, userId: tabUser, kind: { ...msg } });
-        } catch { /* ignore */ }
-      }
+      transport.send({ type: "Move", move: { type: "Place", coord: c } });
     }
   }
 
@@ -904,13 +1033,7 @@ export default function App() {
     setHistory([]);
     setHover(null);
     if (phase === "playing") {
-      const msg = { type: "Reset", kind: k, size: s } as const;
-      transport.send(msg);
-      for (const q of rtcPeersRef.current) {
-        try {
-          q.send({ seq: Date.now(), sender: transport.myId, userId: tabUser, kind: { ...msg } });
-        } catch { /* ignore */ }
-      }
+      transport.send({ type: "Reset", kind: k, size: s });
     }
   }
 
@@ -1099,6 +1222,7 @@ export default function App() {
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={hostCreate}>开启对战（等对手）</button>
+                <button className="brutal-btn brutal-btn--sm" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-invite"); }}>粘贴邀请链接</button>
                 <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(myHomeUrl, "主页链接已复制")}>复制我的主页</button>
                 {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
               </div>
@@ -1131,12 +1255,13 @@ export default function App() {
                   <code style={{ border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inviteUrl}</code>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(inviteUrl, "邀请链接已复制")}>复制邀请链接</button>
+                    <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>输入回执</button>
                     <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消等待</button>
                     {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
                   </div>
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
                     对方只需打开此链接即自动加入并建立直连（pwd 为本局钥匙，每局轮换；直连信息已编进链接）。
-                    跨设备若直连未自动建立，对方页会出现一条回执链接，发回给你打开即可。
+                    跨设备：对方打开链接后会弹出回执链接发给你，点「输入回执」粘贴即可开局。
                     两人进对局后 pwd 失效，不可再加入第三人；此邀请区将隐藏。
                   </div>
                   {rtcStatus}
@@ -1144,13 +1269,6 @@ export default function App() {
               ) : (
                 <>
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>{notice ?? "等待对方确认…"}</div>
-                  {answerBackUrl && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <span className="brutal-label">跨设备回执（对方房主打不开自动通道时，把这条链接发给房主打开）</span>
-                      <code style={{ border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{answerBackUrl}</code>
-                      <div><button className="brutal-btn brutal-btn--sm" onClick={() => copyText(answerBackUrl, "回执链接已复制")}>复制回执链接</button></div>
-                    </div>
-                  )}
                   <div style={{ display: "flex", gap: 8 }}>
                     <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消</button>
                   </div>
@@ -1413,6 +1531,68 @@ export default function App() {
           .bottom-grid { grid-template-columns: 1fr !important; }
         }
       `}</style>
+
+      {/* —— 弹窗（信令消息统一经弹窗收发：粘贴邀请 / 输入回执 / 展示回执） —— */}
+      {modal && (
+        <div
+          style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(10,10,10,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+          onClick={() => setModal(null)}
+        >
+          <div
+            className="brutal-card"
+            style={{ width: "min(560px, 92vw)", maxHeight: "80vh", overflow: "auto", background: "#fff", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {modal === "receipt" ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <span className="brutal-label">回执已生成 · 发给房主</span>
+                  <button className="brutal-btn brutal-btn--sm" onClick={() => setModal(null)}>关闭</button>
+                </div>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, lineHeight: 1.5 }}>
+                  把下面的回执链接发给房主；房主在「等待对手」页点「输入回执」粘贴即可开局。
+                </div>
+                <textarea
+                  value={answerBackUrl ?? ""}
+                  readOnly
+                  rows={3}
+                  onFocus={(e) => e.currentTarget.select()}
+                  style={{ border: "3px solid var(--ink)", padding: "8px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fffbeb", overflowWrap: "anywhere", resize: "vertical" }}
+                />
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => answerBackUrl && copyText(answerBackUrl, "回执链接已复制")}>复制回执链接</button>
+                  {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <span className="brutal-label">
+                    {modal === "paste-invite" ? "粘贴邀请链接（对方发来的）"
+                      : "输入回执（客人发来的回执链接）"}
+                  </span>
+                  <button className="brutal-btn brutal-btn--sm" onClick={() => setModal(null)}>关闭</button>
+                </div>
+                <input
+                  autoFocus
+                  value={modalInput}
+                  onChange={(e) => setModalInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") submitModal(); }}
+                  placeholder={modal === "paste-invite" ? "粘贴邀请链接或主页链接（任意域名均可识别）"
+                    : "粘贴客人发来的回执链接（任意域名均可识别）"}
+                  style={{ border: "3px solid var(--ink)", padding: "9px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }}
+                />
+                {modalErr && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#b00020" }}>{modalErr}</div>}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={submitModal}>
+                    {modal === "paste-answer" ? "受理回执并开局" : "连接"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       <footer style={{ flexShrink: 0, padding: "10px 16px", borderTop: "3px solid var(--ink)", background: "#fff", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center" }}>
         GoPtop · P2P Gomoku & Go · 用户直连 · 无服务器无中转

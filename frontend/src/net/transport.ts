@@ -12,7 +12,11 @@
  * - 观战：观战者只收 `SyncState`，不可落子；同源观战走同 game channel，
  *   跨设备观战走与主机之间的独立 WebRTC 直连。
  * - 跨设备信令：用户只传一次邀请链接。offer/answer 编码进邀请 URL 的 `&rtc=` 参数
- *   （同源页面间经 Presence 自动回传），全程无手动复制粘贴面板。
+ *   （同源页面间经 Presence 自动回传）；跨设备时客人把回执链接发给房主，房主在
+ *   等待页点「输入回执」粘贴即可——全程弹窗粘贴，不依赖页面导航，Tauri 桌面壳同样可用。
+ * - 回执/邀请链接的解析与域名无关：粘贴文本只取路径与查询参数，任意域名都能识别。
+ * - 分享链接的基地址自动决定：Web 用当前站点；Tauri 等非 Web 用云端部署地址
+ *   `SHARE_ORIGIN_NATIVE`（`goptop.pages.dev`）。用户不可见、不可设置。
  *
  * 直连说明（必须直连、禁用中转）：
  * - 同源页面间：`BroadcastChannel` 为同源端到端直传（浏览器内共享内存，不经过任何服务器/中转）。
@@ -206,23 +210,11 @@ export function parseUrl(): UrlIntent {
   }
 }
 
-/** 房主打开客人回执链接时解析其中的 answer（`?rtcAns=`），供自动完成直连。 */
-export function parseAnswerFromUrl(): string | null {
-  try {
-    const url = new URL(window.location.href);
-    const segs = url.pathname.split("/").filter(Boolean);
-    if (segs.length !== 1) return null;
-    return url.searchParams.get("rtcAns");
-  } catch {
-    return null;
-  }
-}
-
-/** 邀请链接：`/<host>?pwd=<pwd>&kind=&size=[&rtc=<hostOffer>]`。
+/** 邀请链接：`<分享域名>/<host>?pwd=<pwd>&kind=&size=[&rtc=<hostOffer>]`。
  *  `rtc` 为主机预生成的直连 offer（跨设备一键直连用）；同源页面间不需要它，
  *  主机建邀请时后台自动生成、生成后自动补进链接，无需用户手动复制 offer。 */
 export function inviteToUrl(hostId: string, pwd: string, kind: GameKind, size: Size, rtcOffer?: string | null): string {
-  const url = new URL(window.location.origin);
+  const url = new URL(shareOrigin());
   url.pathname = `/${encodeURIComponent(hostId)}`;
   url.searchParams.set("pwd", pwd);
   url.searchParams.set("kind", kind);
@@ -231,26 +223,31 @@ export function inviteToUrl(hostId: string, pwd: string, kind: GameKind, size: S
   return url.toString();
 }
 
-/** 回执链接：客人把自动生成的 answer 编进 URL 发回房主，房主打开此链接即完成直连。
- *  同源页面间 answer 经 Presence 自动回传，此链接仅跨设备时需要复制一次。 */
-export function answerToUrl(hostId: string, pwd: string, rtcAns: string): string {
-  const url = new URL(window.location.origin);
+/** 回执链接：客人把自动生成的 answer 编进 URL 发回房主，房主在等待页点「输入回执」
+ *  粘贴即可完成直连（不再依赖房主用浏览器打开链接——Tauri 里没有地址栏可粘贴）。
+ *  同源页面间 answer 经 Presence 自动回传，此链接仅跨设备时需要复制一次。
+ *  game/kind/size 一并编入：房主凭回执即可加入客人的 game channel 并对齐规则。 */
+export function answerToUrl(hostId: string, pwd: string, rtcAns: string, gameId?: string | null, kind?: GameKind | null, size?: Size | null): string {
+  const url = new URL(shareOrigin());
   url.pathname = `/${encodeURIComponent(hostId)}`;
   url.searchParams.set("pwd", pwd);
   url.searchParams.set("rtcAns", rtcAns);
+  if (gameId) url.searchParams.set("game", gameId);
+  if (kind) url.searchParams.set("kind", kind);
+  if (size) url.searchParams.set("size", String(size));
   return url.toString();
 }
 
-/** 用户主页链接：`/<userId>`（无 pwd，只看到主页、可手动挑战）。 */
+/** 用户主页链接：`<分享域名>/<userId>`（无 pwd，只看到主页、可手动挑战）。 */
 export function userToUrl(userId: string): string {
-  const url = new URL(window.location.origin);
+  const url = new URL(shareOrigin());
   url.pathname = `/${encodeURIComponent(userId)}`;
   return url.toString();
 }
 
-/** 观战链接：`/watch/<gameId>`。 */
+/** 观战链接：`<分享域名>/watch/<gameId>`。 */
 export function watchToUrl(gameId: string): string {
-  const url = new URL(window.location.origin);
+  const url = new URL(shareOrigin());
   url.pathname = `/watch/${encodeURIComponent(gameId)}`;
   return url.toString();
 }
@@ -258,6 +255,97 @@ export function watchToUrl(gameId: string): string {
 /** 回选项页。 */
 export function homeUrl(): string {
   return `${window.location.origin}/`;
+}
+
+/* ---------------- 分享基地址（自动决定，用户不可见不可设） ----------------
+ *
+ * 分享类链接（邀请/主页/观战/回执）发给对方后要在浏览器打开，所以基地址必须是
+ * 公网可访问的站点。两处自动决定，无需任何用户设置：
+ * - Web（http/https）：自动用当前站点 origin；
+ * - 非 Web（Tauri 桌面壳等）：自动用云端部署地址 SHARE_ORIGIN_NATIVE。
+ * 换部署域名 = 改 SHARE_ORIGIN_NATIVE 一处常量，全局生效。
+ */
+
+/** 判断当前是否运行在 Tauri 桌面壳（非 Web）。 */
+export function isTauri(): boolean {
+  try {
+    return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  } catch {
+    return false;
+  }
+}
+
+/** 非 Web 环境分享链接的基地址（云端部署地址）：换域名只改这一处。 */
+export const SHARE_ORIGIN_NATIVE = "https://goptop.pages.dev";
+
+/** 分享基地址（自动）：Web 用当前站点；Tauri/非 Web 用 SHARE_ORIGIN_NATIVE。 */
+export function shareOrigin(): string {
+  return isTauri() ? SHARE_ORIGIN_NATIVE : window.location.origin;
+}
+
+/** 从粘贴的任意 URL 中提取站内意图（路径 + 查询参数），与域名无关。
+ *  兼容旧 query 风格（`?u=` `?room=` `?watch=`）与路径风格（`/<userId>` `/watch/<id>`）。
+ *  返回 null 表示这段文本不是可识别的 GoPtop 链接。 */
+export function parsePastedLink(text: string): UrlIntent | null {
+  try {
+    const raw = text.trim();
+    if (!raw) return null;
+    // 有协议就当 URL 解析；无协议（如 "goptop.pages.dev/u-1a2b?pwd=xx"）补上再解析
+    const withProto = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) ? raw : `https://${raw}`;
+    const url = new URL(withProto);
+    const sp = url.searchParams;
+    const segs = url.pathname.split("/").filter(Boolean);
+    // 旧 query 风格优先（?u= / ?room= / ?watch=）
+    const room = sp.get("room");
+    if (room) return { mode: "watch", gameId: room };
+    const u = sp.get("u");
+    if (u) {
+      const { kind, size } = kindSizeFromParams(sp);
+      return { mode: "user", userId: decodeURIComponent(u), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
+    }
+    const watch = sp.get("watch");
+    if (watch) return { mode: "watch", gameId: watch };
+    // 路径风格
+    const [first, second] = segs;
+    if (first === "local" && segs.length === 1) return { mode: "local" };
+    if (first === "p2p" && segs.length === 1) return { mode: "p2p" };
+    if (first === "users" && segs.length === 1) return { mode: "users" };
+    if (first === "settings" && segs.length === 1) return { mode: "settings" };
+    if (first === "watch" && second) return { mode: "watch", gameId: decodeURIComponent(second) };
+    if (segs.length === 1) {
+      const { kind, size } = kindSizeFromParams(sp);
+      return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 从粘贴的任意 URL 中提取房主回执参数（hostId + pwd + rtcAns + game/kind/size），与域名无关。 */
+export function parsePastedAnswer(text: string): { hostId: string; pwd: string; rtcAns: string; gameId: string | null; kind: GameKind | null; size: Size | null } | null {
+  try {
+    const raw = text.trim();
+    if (!raw) return null;
+    const withProto = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) ? raw : `https://${raw}`;
+    const url = new URL(withProto);
+    const rtcAns = url.searchParams.get("rtcAns");
+    if (!rtcAns) return null;
+    const segs = url.pathname.split("/").filter(Boolean);
+    if (segs.length !== 1) return null;
+    const kindRaw = url.searchParams.get("kind");
+    const sizeRaw = Number(url.searchParams.get("size"));
+    return {
+      hostId: decodeURIComponent(segs[0]),
+      pwd: url.searchParams.get("pwd") ?? "",
+      rtcAns,
+      gameId: url.searchParams.get("game"),
+      kind: kindRaw === "go" || kindRaw === "gomoku" ? kindRaw : null,
+      size: ([9, 13, 15, 19] as number[]).includes(sizeRaw) ? (sizeRaw as Size) : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** 站内导航（SPA，不刷新）。 */
@@ -444,6 +532,9 @@ export class GameChannel {
   private seq = 0;
   private bc: BroadcastChannel | null = null;
   private handlers = new Set<GameHandler>();
+  /** 每个远端 sender 已应用的最大 seq：BroadcastChannel 与 WebRTC 双链路
+   *  会送达同一消息，靠 (sender, seq) 单调去重，保证每条消息只应用一次。 */
+  private lastSeq = new Map<string, number>();
 
   constructor() {
     this.myId =
@@ -490,6 +581,15 @@ export class GameChannel {
   private dispatch(msg: GameMsg) {
     if (!msg || typeof msg.seq !== "number" || !msg.kind) return;
     if (msg.sender === this.myId) return;
+    // BroadcastChannel 与 WebRTC 双链路会送达同一消息：对会改变对局状态的 Move
+    // 按 (sender, seq) 单调去重，先到者应用、后到者丢弃。
+    // SyncState/SyncRequest 不去重——它们是幂等全量同步，且重连后发送方 seq 归零，
+    // 去重会错误丢弃重连同步。
+    if (msg.kind.type === "Move") {
+      const seen = this.lastSeq.get(msg.sender) ?? 0;
+      if (msg.seq <= seen) return;
+      this.lastSeq.set(msg.sender, msg.seq);
+    }
     for (const h of this.handlers) {
       try { h(msg); } catch { /* isolate */ }
     }
@@ -498,14 +598,108 @@ export class GameChannel {
 
 /* ---------------- 跨设备直连（WebRTC DataChannel，STUN-only，禁用 TURN 中转） ---------------- */
 
+/* offer/answer 的 URL 编码：压缩 + pwd 派生 XOR + URL 安全 base64。
+ * - 压缩：`CompressionStream("deflate-raw")`（现代内核原生支持，含 Tauri WebView2），
+ *   SDP 是高度重复的文本，deflate 压缩比可观，链接显著变短。
+ * - 加密：与本局钥匙 pwd 派生的密钥流逐字节 XOR——链接里不再出现可读 SDP
+ *   （SDP 含本机 IP 候选）。这是混淆级而非密码学级（pwd 本就在同一链接里）；
+ *   真正的传输安全由 WebRTC 自带的 DTLS 端到端加密保证，此层只为不裸奔。
+ * - base64：URL 安全字母表 + 去填充，`%` 编码后无 `%2B` `%2F` `%3D` 转义。 */
+
+const RTC_ENC_MAGIC = "G1"; // 版本头：未来换编码格式时可平滑迁移
+
+/** deflate-raw 压缩。 */
+async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
+  const cs = new CompressionStream("deflate-raw");
+  const writer = cs.writable.getWriter();
+  void writer.write(bytes);
+  void writer.close();
+  const buf = await new Response(cs.readable).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/** deflate-raw 解压。 */
+async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter();
+  void writer.write(bytes);
+  void writer.close();
+  const buf = await new Response(ds.readable).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/** 由短钥匙派生重复密钥流：fnv1a 双散列扩展成 4 字节步进，避免同钥周期性。 */
+function keyStream(pwd: string, len: number): Uint8Array {
+  const enc = new TextEncoder();
+  const p = enc.encode(pwd);
+  const out = new Uint8Array(len);
+  let h1 = 0x811c9dc5, h2 = 0x1b873593;
+  for (const b of p) {
+    h1 = Math.imul(h1 ^ b, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 + b, 0x85ebca6b) >>> 0;
+  }
+  for (let i = 0; i < len; i++) {
+    h1 = (Math.imul(h1, 0x01000193) ^ (h1 >>> 15)) >>> 0;
+    h2 = (Math.imul(h2, 0x85ebca6b) ^ (h2 >>> 13)) >>> 0;
+    out[i] = (h1 ^ h2) & 0xff;
+  }
+  return out;
+}
+
+/** XOR 加密/解密（同一函数）。 */
+function xorBytes(bytes: Uint8Array, pwd: string): Uint8Array {
+  const ks = keyStream(pwd, bytes.length);
+  const out = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ ks[i];
+  return out;
+}
+
+/** URL 安全 base64（无填充）。 */
+function b64urlEncode(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** URL 安全 base64 解码。 */
+function b64urlDecode(s: string): Uint8Array {
+  const t = s.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = t.length % 4 === 0 ? "" : "=".repeat(4 - (t.length % 4));
+  const bin = atob(t + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** 编码 offer/answer：JSON 短键 → deflate → pwd XOR → URL 安全 base64。
+ *  `pwd` 为本局钥匙（编解码两端必须一致）。 */
+async function encodeRtcPayload(payload: unknown, pwd: string): Promise<string> {
+  const json = JSON.stringify(payload);
+  const raw = new TextEncoder().encode(json);
+  const deflated = await deflateRaw(raw);
+  const encrypted = xorBytes(deflated, pwd);
+  return RTC_ENC_MAGIC + b64urlEncode(encrypted);
+}
+
+/** 解码 offer/answer（`encodeRtcPayload` 的逆）。 */
+async function decodeRtcPayload(token: string, pwd: string): Promise<unknown> {
+  const token2 = token.trim();
+  if (!token2.startsWith(RTC_ENC_MAGIC)) throw new Error("unknown rtc token");
+  const encrypted = b64urlDecode(token2.slice(RTC_ENC_MAGIC.length));
+  const deflated = xorBytes(encrypted, pwd);
+  const raw = await inflateRaw(deflated);
+  return JSON.parse(new TextDecoder().decode(raw));
+}
+
 export type RtcState = "idle" | "making-invite" | "waiting-guest" | "joining" | "open" | "closed" | "error";
 
 /**
  * URL 邀请式点对点直连。约束：
  * - `iceServers` 仅用户启用的 STUN 线路（默认国服 A/B 区；外服默认关闭；可自定义），
  *   只做 NAT 地址发现、不转发数据；**不配置任何 TURN**，杜绝中转。
- * - 信令随邀请走：主机 offer 编进邀请 URL `&rtc=`；客人 answer 经同源 Presence 自动回传，
- *   跨设备时编进回执链接 `?rtcAns=` 由房主打开完成。用户全程只传链接，不碰 offer/answer 文本。
+ * - 信令随邀请走：主机 offer 压缩混淆后编进邀请 URL `&rtc=`；客人 answer 经同源
+ *   Presence 自动回传，跨设备时编进回执链接 `?rtcAns=` 由房主弹窗粘贴完成。
+ *   编码见 `encodeRtcPayload`（deflate 压缩 + pwd XOR + URL 安全 base64）。
  * - 建连后 DataChannel 标签 `goptop` 直接传 `GameMsg` JSON；观战者同样以独立连接接入主机广播。
  */
 export class DirectRtcPeer {
@@ -516,6 +710,8 @@ export class DirectRtcPeer {
   onState: ((s: RtcState) => void) | null = null;
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
+  /** 回执可能同时经弹窗与 Presence 两条路径到达：answer 只允许应用一次。 */
+  private answered = false;
   private static all = new Set<DirectRtcPeer>();
 
   constructor(opts: { isHost: boolean; role: "player" | "spectator" }) {
@@ -584,8 +780,9 @@ export class DirectRtcPeer {
     });
   }
 
-  /** 主机：预生成邀请用 offer（role 固定 player），编进邀请 URL 的 `&rtc=` 参数。 */
-  async createOffer(): Promise<string> {
+  /** 主机：预生成邀请用 offer（role 固定 player），编进邀请 URL 的 `&rtc=` 参数。
+   *  `pwd` 为本局钥匙，同时充当信令编码密钥（两端一致即可解码）。 */
+  async createOffer(pwd: string): Promise<string> {
     this.close();
     this.setState("making-invite");
     const pc = this.makePc();
@@ -594,33 +791,35 @@ export class DirectRtcPeer {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await this.waitGathering(pc);
-    const payload = { sdp: pc.localDescription, role: this.role };
+    const desc = pc.localDescription!;
     DirectRtcPeer.all.add(this);
     this.setState("waiting-guest");
-    return btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+    return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
   }
 
   /** 客人：用邀请 URL 的 offer 生成 answer 返回（随后自动回传房主，无需用户操作）。 */
-  async acceptOffer(offerB64: string): Promise<string> {
+  async acceptOffer(token: string, pwd: string): Promise<string> {
     this.close();
     this.setState("joining");
     const pc = this.makePc();
-    const payload = JSON.parse(decodeURIComponent(escape(atob(offerB64.trim())))) as { sdp: RTCSessionDescriptionInit; role?: string };
-    if (payload.role === "spectator") this.role = "spectator";
-    await pc.setRemoteDescription(payload.sdp);
+    const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType; r?: string };
+    if (payload.r === "spectator") this.role = "spectator";
+    await pc.setRemoteDescription({ type: payload.t, sdp: payload.s });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await this.waitGathering(pc);
-    const out = { sdp: pc.localDescription, role: this.role };
+    const desc = pc.localDescription!;
     DirectRtcPeer.all.add(this);
-    return btoa(unescape(encodeURIComponent(JSON.stringify(out))));
+    return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
   }
 
-  /** 房主：用客人回传的 answer 完成直连（同源自动调用；跨设备由回执链接自动触发）。 */
-  async acceptAnswer(answerB64: string): Promise<void> {
+  /** 房主：用客人回传的 answer 完成直连（同源经 Presence 自动回传；跨设备由弹窗粘贴回执触发）。 */
+  async acceptAnswer(token: string, pwd: string): Promise<void> {
     if (!this.pc) throw new Error("no pending offer");
-    const payload = JSON.parse(decodeURIComponent(escape(atob(answerB64.trim())))) as { sdp: RTCSessionDescriptionInit };
-    await this.pc.setRemoteDescription(payload.sdp);
+    if (this.answered) return;
+    this.answered = true;
+    const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType };
+    await this.pc.setRemoteDescription({ type: payload.t, sdp: payload.s });
   }
 
   send(msg: GameMsg) {
@@ -637,15 +836,24 @@ export class DirectRtcPeer {
     try { this.pc?.close(); } catch { /* ignore */ }
     this.dc = null;
     this.pc = null;
+    this.answered = false;
     if (this.state !== "idle") this.setState("closed");
   }
 }
 
-/** 主机侧广播辅助：向所有 open 的直连发送（选手+观战）。 */
+/** 主机侧广播辅助：向所有 open 的直连发送（选手+观战）。
+ *  App 启动时经 `wireRtcBroadcast` 注入实现；GameChannel.send 单入口调用。
+ *  关键约束：注入的消息与 BroadcastChannel 发出的是同一个对象（同 seq/sender），
+ *  两条链路送达同一消息时 GameChannel 按 sender+seq 去重，绝不重复应用。 */
+let rtcBroadcast: ((msg: GameMsg) => void) | null = null;
+
+export function wireRtcBroadcast(fn: ((msg: GameMsg) => void) | null) {
+  rtcBroadcast = fn;
+}
+
 export const DirectRtc = {
   broadcast(msg: GameMsg) {
-    // 占位：实际广播由 App 持有 peer 列表完成；此处保留门面以便 gameChannel.send 单入口。
-    void msg;
+    rtcBroadcast?.(msg);
   },
 };
 
