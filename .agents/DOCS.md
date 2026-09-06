@@ -8,6 +8,7 @@
 | [p2p-protocol.md](docs/p2p-protocol.md) | URL 格式、G1 信令编码（deflate+XOR+base64url）、GameMsg 线格式、同源/跨设备建连时序、身份与钥匙、STUN |
 | [../MEMORY.md](../MEMORY.md) | 关键拍板索引（指向 memory/ 下长文） |
 | [../TODO.md](../TODO.md) | 共享待办（每项标注来源记忆） |
+| [../review/2026-09-07-main-agent-code-review.md](../review/2026-09-07-main-agent-code-review.md) | **全量审查报告（2026-09-07）**：A 级 8 个真实 bug（含行号与修复方向）、架构断层 4 项、注释失实 8 项。修复轮必读，修完回填修复记录 |
 
 ## 记忆文件（memory/）
 
