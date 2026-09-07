@@ -534,10 +534,9 @@ export default function App() {
         }
         /* 底部三卡切换（用户拍板 2026-09-07）：判定用容器查询——.play-stack 是容器
            （brutal.css），stack 宽度跟随棋盘可用高度缩放，视口宽时 stack 也可能很窄，
-           媒体查询看不到这种「显示不下」。600px：宽卡并排放不下 → 收起显示 swap 卡 */
-        /* 底部三卡切换：600px（stack 实宽）以下宽卡放不下 → 收起显示 swap 卡 */
+           媒体查询看不到这种「显示不下」。阈值以下宽卡放不下 → 收起显示 swap 卡 */
         .bp-swap { display: none; }
-        @container (max-width: 600px) {
+        @container (max-width: 560px) {
           .bp-wide { display: none !important; }
           .bp-swap { display: flex !important; }
         }
