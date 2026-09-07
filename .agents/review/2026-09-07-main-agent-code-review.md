@@ -173,3 +173,14 @@
 - **D1/D6/D8/D11/C4 未修**，列入 TODO（拆分/监听器累积/notice 竞态/测试/错误枚举）。
 
 验证：`npx tsc --noEmit` 0 错；`npm run build` 成功；`cargo test --workspace` 26 passed；浏览器回归（Playwright 双窗口）：邀请粘贴→直连→落子同步（手数一致）→ by 协议注入测试（旧格式丢弃、Resign 判色正确）→ 坏回执重试闭环 → 裸文本拒识。
+
+## 修复记录（第二轮，2026-09-07 同日续）
+
+- **A3** SyncState 接收端以 history.length 作快照版本守卫（commit be7fac7）；浏览器验证：注入过时空板快照手数不变、正常落子双端同步。
+- **D1** App.tsx 三刀拆分完成（commit 60fc02e + 99fbb4c）：1698→544 行；game/board.ts 规则唯一实现、pages/components.tsx、pages/LocalPage.tsx、state/useGameSession.tsx。
+- **D6** presence beforeunload 处理器改实例字段（commit 0bf204c）。
+- **D8** showNotice 单入口接管全部 setNotice 调用点（commit 0bf204c）。
+- **D11** vitest 30 例落地（commit be7fac7）：去重/编码往返/解析/genPwd；顺修 deflate/inflate writer promise 未 catch 的 unhandled rejection。
+- **C4** go::try_place 返回 RuleError 枚举，删除字符串匹配分类（commit 0d24ea0）。
+- **术语轮（用户新拍板，非审查项）**：P2P 对等无主客，host/guest 全套改 inviter/invitee（commit 0bf204c）；文档树同步。
+- 验证链：tsc 0 错、vite build 成功、vitest 30/30、cargo test 26 通过、Playwright 双窗口邀请→直连→落子同步（拆分前后各一轮）。

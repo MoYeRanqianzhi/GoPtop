@@ -14,9 +14,9 @@
 
 - `frontend/src/net/transport.ts`：`getShareBase()` 改为纯自动（无 localStorage、无 setShareBase）；回执/邀请/主页/观战链接全部基于它。
 - `frontend/src/App.tsx`：设置页「分享域名」区块、`share-base` 弹窗分支全部移除。
-- 回执流程：客人生成回执弹窗（receipt）→ 房主等待页「输入回执」弹窗（paste-answer）粘贴。回执链接含 `pwd + rtcAns + game + kind + size`，房主校验后切到客人 game channel 进对局。
+- 回执流程：受邀者生成回执弹窗（receipt）→ 邀请者等待页「输入回执」弹窗（paste-answer）粘贴。回执链接含 `pwd + rtcAns + game + kind + size`，邀请者校验后切到受邀者 game channel 进对局。
 - 消息去重：GameChannel.dispatch 对 `Move` 按 `(sender, seq)` 单调去重（BroadcastChannel 与 WebRTC 双链路送达同一消息只应用一次）；`SyncState/SyncRequest` 不去重（幂等全量同步）。
-- 回执链接被当页面打开时：只提示「请在房主等待页输入回执」，绝不据此发起挑战（防止同机两窗互弈）。
+- 回执链接被当页面打开时：只提示「请在邀请者等待页输入回执」，绝不据此发起挑战（防止同机两窗互弈）。
 
 ## 教训
 
