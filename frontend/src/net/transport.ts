@@ -4,16 +4,16 @@
  * 模型（按需求）：
  * - 每个标签页即一个用户：`userId` 存 `sessionStorage`（每页不同），昵称可改。
  * - 选项页（`/`）：本地对战 / P2P 对战 / 在线用户 / 设置四个入口。
- * - 用户主页（`/<userId>`）；邀请链接（`/<hostId>?pwd=<pwd>`）：对端带 pwd 打开即视为
- *   "带钥匙的连接请求"，主机校验 pwd 正确则自动同意，无需手动点接受。
+ * - 用户主页（`/<userId>`）；邀请链接（`/<inviterId>?pwd=<pwd>`）：对端带 pwd 打开即视为
+ *   "带钥匙的连接请求"，邀请者校验 pwd 正确则自动同意，无需手动点接受。
  * - 无 pwd 访问某用户主页则只看到其主页，可手动发起挑战，对方弹窗同意后才进对局。
  * - pwd 只在"已开战但无对手（waiting）"时有效；两人进对局后 pwd 即失效，不存在第三人凭旧 pwd 加入。
  *   建连成功后邀请组件隐藏，转而显示观战链接（`/watch/<game>`）。
  * - 观战：观战者只收 `SyncState`，不可落子；同源观战走同 game channel。
  *   跨设备观战**尚未实现**（/watch 链接在别的设备打开收不到棋局）——待办见
- *   .agents/TODO.md，届时观战者与房主建立独立 WebRTC 直连。
+ *   .agents/TODO.md，届时观战者与邀请者建立独立 WebRTC 直连。
  * - 跨设备信令：用户只传一次邀请链接。offer/answer 编码进邀请 URL 的 `&rtc=` 参数
- *   （同源页面间经 Presence 自动回传）；跨设备时客人把回执链接发给房主，房主在
+ *   （同源页面间经 Presence 自动回传）；跨设备时受邀者把回执链接发给邀请者，邀请者在
  *   等待页点「输入回执」粘贴即可——全程弹窗粘贴，不依赖页面导航，Tauri 桌面壳同样可用。
  * - 回执/邀请链接的解析与域名无关：粘贴文本只取路径与查询参数，任意域名都能识别。
  * - 分享链接的基地址自动决定：Web 用当前站点；Tauri 等非 Web 用云端部署地址
@@ -216,12 +216,12 @@ export function parseUrl(): UrlIntent {
   }
 }
 
-/** 邀请链接：`<分享域名>/<host>?pwd=<pwd>&kind=&size=[&rtc=<hostOffer>]`。
- *  `rtc` 为主机预生成的直连 offer（跨设备一键直连用）；同源页面间不需要它，
- *  主机建邀请时后台自动生成、生成后自动补进链接，无需用户手动复制 offer。 */
-export function inviteToUrl(hostId: string, pwd: string, kind: GameKind, size: Size, rtcOffer?: string | null): string {
+/** 邀请链接：`<分享域名>/<host>?pwd=<pwd>&kind=&size=[&rtc=<inviteOffer>]`。
+ *  `rtc` 为邀请者预生成的直连 offer（跨设备一键直连用）；同源页面间不需要它，
+ *  邀请者建邀请时后台自动生成、生成后自动补进链接，无需用户手动复制 offer。 */
+export function inviteToUrl(inviterId: string, pwd: string, kind: GameKind, size: Size, rtcOffer?: string | null): string {
   const url = new URL(shareOrigin());
-  url.pathname = `/${encodeURIComponent(hostId)}`;
+  url.pathname = `/${encodeURIComponent(inviterId)}`;
   url.searchParams.set("pwd", pwd);
   url.searchParams.set("kind", kind);
   url.searchParams.set("size", String(size));
@@ -229,13 +229,13 @@ export function inviteToUrl(hostId: string, pwd: string, kind: GameKind, size: S
   return url.toString();
 }
 
-/** 回执链接：客人把自动生成的 answer 编进 URL 发回房主，房主在等待页点「输入回执」
- *  粘贴即可完成直连（不再依赖房主用浏览器打开链接——Tauri 里没有地址栏可粘贴）。
+/** 回执链接：受邀者把自动生成的 answer 编进 URL 发回邀请者，邀请者在等待页点「输入回执」
+ *  粘贴即可完成直连（不再依赖邀请者用浏览器打开链接——Tauri 里没有地址栏可粘贴）。
  *  同源页面间 answer 经 Presence 自动回传，此链接仅跨设备时需要复制一次。
- *  game/kind/size 一并编入：房主凭回执即可加入客人的 game channel 并对齐规则。 */
-export function answerToUrl(hostId: string, pwd: string, rtcAns: string, gameId?: string | null, kind?: GameKind | null, size?: Size | null): string {
+ *  game/kind/size 一并编入：邀请者凭回执即可加入受邀者的 game channel 并对齐规则。 */
+export function answerToUrl(inviterId: string, pwd: string, rtcAns: string, gameId?: string | null, kind?: GameKind | null, size?: Size | null): string {
   const url = new URL(shareOrigin());
-  url.pathname = `/${encodeURIComponent(hostId)}`;
+  url.pathname = `/${encodeURIComponent(inviterId)}`;
   url.searchParams.set("pwd", pwd);
   url.searchParams.set("rtcAns", rtcAns);
   if (gameId) url.searchParams.set("game", gameId);
@@ -331,8 +331,8 @@ export function parsePastedLink(text: string): UrlIntent | null {
   }
 }
 
-/** 从粘贴的任意 URL 中提取房主回执参数（hostId + pwd + rtcAns + game/kind/size），与域名无关。 */
-export function parsePastedAnswer(text: string): { hostId: string; pwd: string; rtcAns: string; spectator: boolean; gameId: string | null; kind: GameKind | null; size: Size | null } | null {
+/** 从粘贴的任意 URL 中提取邀请者回执参数（inviterId + pwd + rtcAns + game/kind/size），与域名无关。 */
+export function parsePastedAnswer(text: string): { inviterId: string; pwd: string; rtcAns: string; spectator: boolean; gameId: string | null; kind: GameKind | null; size: Size | null } | null {
   try {
     const raw = text.trim();
     if (!raw) return null;
@@ -345,7 +345,7 @@ export function parsePastedAnswer(text: string): { hostId: string; pwd: string; 
     const kindRaw = url.searchParams.get("kind");
     const sizeRaw = Number(url.searchParams.get("size"));
     return {
-      hostId: decodeURIComponent(segs[0]),
+      inviterId: decodeURIComponent(segs[0]),
       pwd: url.searchParams.get("pwd") ?? "",
       rtcAns,
       // spec=1 标记观战回执（回执类型由链接属性自动判断，用户拍板）；对局回执不带
@@ -393,6 +393,11 @@ export class Presence {
   private timer: number | null = null;
   private myStatus: PeerStatus = "idle";
   private myGame: string | null = null;
+  /** beforeunload 处理器作为实例字段：start 只注册一次、stop 注销，
+   *  避免闭包引用旧 bc 且 start→stop→start 循环累积监听器（审查 D6）。 */
+  private readonly onUnload = () => {
+    try { this.bc?.postMessage({ t: "bye", id: this.me } satisfies PresenceWire); } catch { /* ignore */ }
+  };
 
   constructor() {
     this.me = myUserId();
@@ -412,9 +417,7 @@ export class Presence {
       this.announce();
       this.prune();
     }, 2000);
-    window.addEventListener("beforeunload", () => {
-      try { this.bc?.postMessage({ t: "bye", id: this.me } satisfies PresenceWire); } catch { /* ignore */ }
-    });
+    window.addEventListener("beforeunload", this.onUnload);
   }
 
   stop() {
@@ -422,6 +425,7 @@ export class Presence {
     this.timer = null;
     try { this.bc?.close(); } catch { /* ignore */ }
     this.bc = null;
+    window.removeEventListener("beforeunload", this.onUnload);
   }
 
   setStatus(status: PeerStatus, gameId: string | null) {
@@ -704,20 +708,20 @@ async function decodeRtcPayload(token: string, pwd: string): Promise<unknown> {
   return JSON.parse(new TextDecoder().decode(raw));
 }
 
-export type RtcState = "idle" | "making-invite" | "waiting-guest" | "joining" | "open" | "closed" | "error";
+export type RtcState = "idle" | "making-invite" | "waiting-invitee" | "joining" | "open" | "closed" | "error";
 
 /**
  * URL 邀请式点对点直连。约束：
  * - `iceServers` 仅用户启用的 STUN 线路（默认国服 A/B 区；外服默认关闭；可自定义），
  *   只做 NAT 地址发现、不转发数据；**不配置任何 TURN**，杜绝中转。
- * - 信令随邀请走：主机 offer 压缩混淆后编进邀请 URL `&rtc=`；客人 answer 经同源
- *   Presence 自动回传，跨设备时编进回执链接 `?rtcAns=` 由房主弹窗粘贴完成。
+ * - 信令随邀请走：邀请者 offer 压缩混淆后编进邀请 URL `&rtc=`；受邀者 answer 经同源
+ *   Presence 自动回传，跨设备时编进回执链接 `?rtcAns=` 由邀请者弹窗粘贴完成。
  *   编码见 `encodeRtcPayload`（deflate 压缩 + pwd XOR + URL 安全 base64）。
- * - 建连后 DataChannel 标签 `goptop` 直接传 `GameMsg` JSON；观战者同样以独立连接接入主机广播。
+ * - 建连后 DataChannel 标签 `goptop` 直接传 `GameMsg` JSON；观战者同样以独立连接接入邀请者广播。
  */
 export class DirectRtcPeer {
   state: RtcState = "idle";
-  isHost: boolean;
+  isInviter: boolean;
   role: "player" | "spectator";
   onRemote: ((msg: GameMsg) => void) | null = null;
   onState: ((s: RtcState) => void) | null = null;
@@ -729,8 +733,8 @@ export class DirectRtcPeer {
   answered = false;
   private static all = new Set<DirectRtcPeer>();
 
-  constructor(opts: { isHost: boolean; role: "player" | "spectator" }) {
-    this.isHost = opts.isHost;
+  constructor(opts: { isInviter: boolean; role: "player" | "spectator" }) {
+    this.isInviter = opts.isInviter;
     this.role = opts.role;
   }
 
@@ -796,7 +800,7 @@ export class DirectRtcPeer {
     });
   }
 
-  /** 主机：预生成邀请用 offer（role 固定 player），编进邀请 URL 的 `&rtc=` 参数。
+  /** 邀请者：预生成邀请用 offer（role 固定 player），编进邀请 URL 的 `&rtc=` 参数。
    *  `pwd` 为本局钥匙，同时充当信令编码密钥（两端一致即可解码）。 */
   async createOffer(pwd: string): Promise<string> {
     this.close();
@@ -809,11 +813,11 @@ export class DirectRtcPeer {
     await this.waitGathering(pc);
     const desc = pc.localDescription!;
     DirectRtcPeer.all.add(this);
-    this.setState("waiting-guest");
+    this.setState("waiting-invitee");
     return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
   }
 
-  /** 客人：用邀请 URL 的 offer 生成 answer 返回（随后自动回传房主，无需用户操作）。 */
+  /** 受邀者：用邀请 URL 的 offer 生成 answer 返回（随后自动回传邀请者，无需用户操作）。 */
   async acceptOffer(token: string, pwd: string): Promise<string> {
     this.close();
     this.setState("joining");
@@ -829,8 +833,8 @@ export class DirectRtcPeer {
     return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
   }
 
-  /** 房主：用客人回传的 answer 完成直连（同源经 Presence 自动回传；跨设备由弹窗粘贴回执触发）。
-   *  幂等位在「应用成功」后才置位：坏回执解码失败不锁死，房主可再贴正确回执。 */
+  /** 邀请者：用受邀者回传的 answer 完成直连（同源经 Presence 自动回传；跨设备由弹窗粘贴回执触发）。
+   *  幂等位在「应用成功」后才置位：坏回执解码失败不锁死，邀请者可再贴正确回执。 */
   async acceptAnswer(token: string, pwd: string): Promise<void> {
     if (!this.pc) throw new Error("no pending offer");
     if (this.answered) return;
@@ -864,7 +868,7 @@ export class DirectRtcPeer {
   }
 }
 
-/** 主机侧广播辅助：向所有 open 的直连发送（选手+观战）。
+/** 邀请者侧广播辅助：向所有 open 的直连发送（选手+观战）。
  *  App 启动时经 `wireRtcBroadcast` 注入实现；GameChannel.send 单入口调用。
  *  关键约束：注入的消息与 BroadcastChannel 发出的是同一个对象（同 seq/sender），
  *  两条链路送达同一消息时 GameChannel 按 sender+seq 去重，绝不重复应用。 */
