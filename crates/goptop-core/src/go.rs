@@ -8,6 +8,7 @@
 //! 暂不实现：劫（ko）、打劫循环、终局目数。它们在 Phase 4 补齐，不阻塞 Web 验证主线。
 
 use crate::board::{Board, Coord, Stone};
+use crate::game::RuleError;
 use std::collections::{HashSet, VecDeque};
 
 /// 四邻方向。
@@ -57,20 +58,21 @@ fn block_and_liberties<const N: usize>(board: &Board<N>, start: Coord) -> (Vec<C
 /// 尝试在 `board` 的 `coord` 落 `stone`，按围棋规则执行提子与自杀检查。
 ///
 /// - 成功：返回被提走的对手棋子坐标列表（可能为空），棋盘已更新。
-/// - 失败：返回错误字符串，棋盘保持不变（调用方需在外层回滚或先克隆）。
+/// - 失败：返回结构化 [`RuleError`]（不再用字符串匹配分类——审查 C4），棋盘保持
+///   不变（调用方需在外层回滚或先克隆）。
 pub fn try_place<const N: usize>(
     board: &mut Board<N>,
     coord: Coord,
     stone: Stone,
-) -> Result<Vec<Coord>, String> {
+) -> Result<Vec<Coord>, RuleError> {
     if stone == Stone::Empty {
-        return Err("stone must be Black or White".to_string());
+        return Err(RuleError::Other("stone must be Black or White".into()));
     }
     if board.get(coord).is_none() {
-        return Err("out of bounds".to_string());
+        return Err(RuleError::OutOfBounds);
     }
     if !board.is_empty(coord) {
-        return Err("point already occupied".to_string());
+        return Err(RuleError::Occupied);
     }
 
     // 先落子，再检查提子与自杀；若非法则回滚。
@@ -116,7 +118,7 @@ pub fn try_place<const N: usize>(
         for c in &captured {
             board.set(*c, opponent);
         }
-        return Err("suicide move not allowed".to_string());
+        return Err(RuleError::Suicide);
     }
 
     Ok(captured)
@@ -147,7 +149,7 @@ mod tests {
         b.set(Coord::new(1, 0), Stone::White);
         // 黑在 (0,0) 自杀（无气且不提子）
         let err = try_place(&mut b, Coord::new(0, 0), Stone::Black).unwrap_err();
-        assert!(err.contains("suicide"));
+        assert_eq!(err, RuleError::Suicide);
         // 棋盘应回滚，未落子
         assert_eq!(b.get(Coord::new(0, 0)), Some(Stone::Empty));
     }

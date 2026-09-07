@@ -184,22 +184,12 @@ impl GameState {
     fn try_place_go(&mut self, coord: Coord) -> Result<PlayEffect, RuleError> {
         let stone = self.to_move;
 
-        // 按围棋规则落子与提子；底层 `try_place` 已处理自杀回滚。
+        // 按围棋规则落子与提子；底层 `try_place` 已处理自杀回滚，
+        // 且直接返回结构化 RuleError（审查 C4：不再做字符串匹配分类）
         let captured = match &mut self.board {
             BoardVariant::B15(b) => crate::go::try_place(b, coord, stone),
             BoardVariant::B19(b) => crate::go::try_place(b, coord, stone),
-        }
-        .map_err(|e| {
-            if e.contains("suicide") {
-                RuleError::Suicide
-            } else if e.contains("occupied") {
-                RuleError::Occupied
-            } else if e.contains("bounds") {
-                RuleError::OutOfBounds
-            } else {
-                RuleError::Other(e)
-            }
-        })?;
+        }?;
 
         // 更新提子统计：己方提掉的是对手的棋子。
         let n = captured.len() as u32;
