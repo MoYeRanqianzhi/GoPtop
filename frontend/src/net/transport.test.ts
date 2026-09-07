@@ -211,11 +211,11 @@ describe("parsePastedLink", () => {
 });
 
 describe("parsePastedAnswer", () => {
-  const ANSWER = "https://x.dev/u-host01?pwd=q9bwbu&rtcAns=G1AnsToken&game=g-99&kind=go&size=13";
+  const ANSWER = "https://x.dev/u-inviter01?pwd=q9bwbu&rtcAns=G1AnsToken&game=g-99&kind=go&size=13";
 
   it("完整回执：inviterId/pwd/rtcAns/game/kind/size", () => {
     expect(parsePastedAnswer(ANSWER)).toEqual({
-      inviterId: "u-host01",
+      inviterId: "u-inviter01",
       pwd: "q9bwbu",
       rtcAns: "G1AnsToken",
       spectator: false,

@@ -1,9 +1,9 @@
 /**
- * App 拆分（D1）——跨页面复用的展示组件与纯函数。
+ * App 拆分（D1 两刀完成后）——跨页面复用的展示组件与纯函数。
  *
  * 从 App.tsx 原样搬出（禁止行为变化）：PeerList / StunSettings / RtcStatusLine /
  * BoardPanel / loadDefaults / Role/Phase 类型。
- * 页面级 JSX 在 pages/ 下；对局状态机与信令编排仍留在 App.tsx（拆走反造间接层）。
+ * 页面级 JSX 在 pages/ 下；对局状态机与信令编排已抽到 state/useGameSession.tsx。
  */
 import { useState } from "react";
 import type { ReactNode } from "react";

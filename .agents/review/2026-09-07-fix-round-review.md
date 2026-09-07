@@ -87,4 +87,13 @@ R1/R2 建议下一轮立即修（各 ~10 分钟改动）；R3-R5 属注释/文�
 
 ## 修复记录
 
-（由修复执行者回填：日期、commit、覆盖的 R 级编号）
+**2026-09-07 R 级修复轮（原窗口主代理执行）**——R1-R6 全部核实属实并修复：
+
+- **R1** `state/gameStore.ts` 删除（git rm；零引用活代码）。architecture.md 死代码节同步。
+- **R2** `acceptReceipt` 的 `await applyAnswer` 后新增守卫：`phaseRef !== "waiting" || roleRef !== "inviter"` 即放弃续体（useGameSession.tsx）。观察项 1 同模式顺手修：createInvite 异步续体加 `pwdRef.current !== p` 复查，取消后不再写本局 state。浏览器验证：跨设备回执正常路径双端进局、落子同步（手数 1 双端一致）。
+- **R3** createInvite 成功路径与 backHome 两处 `setNotice(null)` 改 `showNotice(null)`——现在全部调用点均经单入口（showNotice 定义体内 2 处除外）。
+- **R4** components.tsx 头注释改「拆分两刀完成后」实况；App.tsx 头注释 useGameSession.ts 少写的 x 补上。
+- **R5** transport.ts:219 `<host>`→`<inviterId>`；p2p-protocol.md URL 表两处 `<hostId>`→`<inviterId>`；transport.test.ts 夹具 u-host01→u-inviter01。
+- **R6** genPwd 注释改为实测数字：36^6 与 2^32 偏差桶 2118184960/2^32（单值概率绝对差 ~2.3e-10）。审查报告给的 ~1.4% 与原注释 ~2.7% 均不准——正确口径是「低段值出现 2 次、其余 1 次」的分布差，对 6 位钥匙无实际影响。
+- 验证链：tsc 0 错、vitest 30/30、vite build 成功、Playwright 双窗口跨设备回执全流程（presence 屏蔽模拟跨设备）+ 落子同步。
+- R3 修复时发现 showNotice 内部 setTimeout 回调曾被批量替换成递归 showNotice(null)——行为等价但已改回直调 setNotice(null)（定义体内不受单入口约束）。

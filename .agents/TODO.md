@@ -19,6 +19,15 @@
 - [x] **D11 前端测试**（commit be7fac7）：vitest 30 例——GameChannel 去重、G1 编码往返、genPwd、链接解析全分支。`npm test`。
 - [x] **C4 Rust 错误枚举化**（commit 0d24ea0）：go::try_place 返回 RuleError，删除字符串匹配分类。
 
+## R 级（2026-09-07 修复轮审查新发现，同日全部修复）
+
+- [x] **R1** gameStore.ts 死代码复活+三处注释矛盾：已 git rm，architecture.md 同步。
+- [x] **R2** acceptReceipt await 间隙竞态：续体前复查 phase/role；观察项 1（createInvite 异步续体）同模式加 pwdRef 复查。跨设备回执路径浏览器验证。
+- [x] **R3** 两处 setNotice 直调改 showNotice(null)；showNotice 内部回调保持直调（非调用点）。
+- [x] **R4** components.tsx/App.tsx 头注释对齐两刀完成后的实况。
+- [x] **R5** transport.ts/p2p-protocol.md/测试夹具的 4 处 host 术语残留清理。
+- [x] **R6** genPwd 注释改实测数字（偏差桶 2118184960/2^32，单值差 ~2.3e-10；原注释 2.7% 与审查口径 1.4% 均不准）。
+
 ## 术语轮（2026-09-07 用户拍板：P2P 对等无主客）
 
 - [x] **房主/客人 → 邀请者/受邀者**（commit 0bf204c）：host/guest 全套标识符与文案改 inviter/invitee（hostCreate→createInvite、guestChallenge→acceptInvite、finishHostRtc→applyAnswer、hostAcceptReceipt→acceptReceipt、waiting-guest→waiting-invitee 等）。ICE 术语 host 候选保留（WebRTC 协议词汇）。

@@ -418,10 +418,15 @@ export function useGameSession() {
       attachPeer(peer);
       try {
         const offer = await peer.createOffer(p);
+        // await 间隙用户可能已取消/换局：不再写本局 state（与 acceptReceipt 的 R2 守卫同模式）
+        if (phaseRef.current !== "waiting" || roleRef.current !== "inviter" || pwdRef.current !== p) {
+          try { peer.close(); } catch { /* ignore */ }
+          return;
+        }
         inviterRtcRef.current = peer;
         setInviteUrl(inviteToUrl(tabUser, p, kind, size, offer));
         setDirectState("waiting-invitee");
-        setNotice(null);
+        showNotice(null);
       } catch {
         inviterRtcRef.current = null;
         try { peer.close(); } catch { /* ignore */ }
@@ -531,6 +536,9 @@ export function useGameSession() {
     // 弹窗留在原地可重试（旧实现先切 playing 再异步等结果，坏回执会让整局作废）
     const err = await applyAnswer(r.rtcAns, r.pwd);
     if (err) return err;
+    // await 间隙用户可能已「取消等待」（backHome 清了 role/phase/keys）：
+    // 续体若无条件执行，会把已回主页的用户拉回对局（修复轮 R2 竞态）
+    if (phaseRef.current !== "waiting" || roleRef.current !== "inviter") return null;
     const k = r.kind ?? kindRef.current;
     const s = r.size ?? sizeRef.current;
     if (r.gameId) {
@@ -723,7 +731,7 @@ export function useGameSession() {
     setPeerConnected(false);
     setMyColor("black");
     myColorRef.current = "black";
-    setNotice(null);
+    showNotice(null);
     setAnswerBackUrl(null);
     setDirectState("idle");
     nav("/");

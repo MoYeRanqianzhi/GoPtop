@@ -1,5 +1,5 @@
 /**
- * App 壳（D1 拆分后）——对局状态机与信令编排全部在 state/useGameSession.ts，
+ * App 壳（D1 拆分后）——对局状态机与信令编排全部在 state/useGameSession.tsx，
  * 复用组件在 pages/components.tsx，本地对战页在 pages/LocalPage.tsx，
  * 棋盘规则在 game/board.ts。本文件只做 header、页面拼装与 footer。
  */

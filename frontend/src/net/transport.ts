@@ -93,7 +93,9 @@ export function setMyName(n: string) {
 export function genPwd(): string {
   const buf = new Uint32Array(1);
   crypto.getRandomValues(buf);
-  return (buf[0] % 2176782336).toString(36).padStart(6, "0"); // 36^6，取模偏差 ~2.7% 可接受
+  // 36^6 与 2^32 不整除：低段 2118184960 个值出现 2 次、其余 1 次，
+  // 单值概率绝对差 ~2.3e-10——对 6 位钥匙的可预测性无实际影响
+  return (buf[0] % 2176782336).toString(36).padStart(6, "0");
 }
 
 /** 每局轮换的 gameId（观战 channel 后缀）。 */
@@ -216,7 +218,7 @@ export function parseUrl(): UrlIntent {
   }
 }
 
-/** 邀请链接：`<分享域名>/<host>?pwd=<pwd>&kind=&size=[&rtc=<inviteOffer>]`。
+/** 邀请链接：`<分享域名>/<inviterId>?pwd=<pwd>&kind=&size=[&rtc=<inviteOffer>]`。
  *  `rtc` 为邀请者预生成的直连 offer（跨设备一键直连用）；同源页面间不需要它，
  *  邀请者建邀请时后台自动生成、生成后自动补进链接，无需用户手动复制 offer。 */
 export function inviteToUrl(inviterId: string, pwd: string, kind: GameKind, size: Size, rtcOffer?: string | null): string {

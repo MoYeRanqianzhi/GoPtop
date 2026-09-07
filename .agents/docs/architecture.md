@@ -90,7 +90,7 @@ announce（2s 心跳，7s 超时）/ challenge（可带 pwd=自动同意；可�
 
 ## 死代码（2026-09-07 已清理）
 
-- 旧 `game/board.ts`+`game/rules.ts`、`components/Stone.tsx` 已删（零引用）；`state/gameStore.ts` 瘦身为注释态。新 `game/board.ts` 是唯一活跃规则文件（见模块地图）。
+- 旧 `game/board.ts`+`game/rules.ts`、`components/Stone.tsx`、`state/gameStore.ts` 均已删除（零引用）。`game/board.ts` 现为唯一活跃规则文件（见模块地图）。
 
 ## 待办指向
 

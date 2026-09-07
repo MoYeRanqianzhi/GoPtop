@@ -6,8 +6,8 @@
 
 | 链接 | 格式 | 说明 |
 |---|---|---|
-| 邀请 | `/<hostId>?pwd=<key>&kind=gomoku\|go&size=<9\|13\|15\|19>[&rtc=<G1offer>]` | `rtc` 为邀请者预生成 offer（跨设备一键直连）；同源不需要 |
-| 回执 | `/<hostId>?pwd=<key>&rtcAns=<G1answer>&game=<gameId>&kind=<kind>&size=<size>[&spec=1]` | 受邀者→邀请者的 answer 回传；`game/kind/size` 让邀请者凭回执即可进受邀者的 channel；`spec=1` 标记观战回执（自动识别用，观战连接待实现） |
+| 邀请 | `/<inviterId>?pwd=<key>&kind=gomoku\|go&size=<9\|13\|15\|19>[&rtc=<G1offer>]` | `rtc` 为邀请者预生成 offer（跨设备一键直连）；同源不需要 |
+| 回执 | `/<inviterId>?pwd=<key>&rtcAns=<G1answer>&game=<gameId>&kind=<kind>&size=<size>[&spec=1]` | 受邀者→邀请者的 answer 回传；`game/kind/size` 让邀请者凭回执即可进受邀者的 channel；`spec=1` 标记观战回执（自动识别用，观战连接待实现） |
 | 观战 | `/watch/<gameId>` | 目前仅同源可用 |
 | 主页 | `/<userId>` | 无 pwd，可手动挑战 |
 
