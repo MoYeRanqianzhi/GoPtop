@@ -846,7 +846,7 @@ export function useGameSession() {
 
   const p2pStatusText = useMemo(() => {
     if (phase === "home") return role === "spectator" ? "观战中" : "主页 · 选择对手或等待被挑战";
-    if (phase === "waiting") return `等待对手 · 你是${myColor === "black" ? "黑" : "白"} · pwd 本局有效`;
+    if (phase === "waiting") return `等待对手 · 你是${myColor === "black" ? "黑" : "白"}`;
     if (!peerConnected) return `连接中 · 你是${myColor === "black" ? "黑" : "白"}`;
     return `已直连 · 你是${myColor === "black" ? "黑" : "白"}${role === "spectator" ? "（观战）" : toMove === myColor ? " · 轮到你" : " · 等待对手"}`;
   }, [phase, role, peerConnected, myColor, toMove]);
@@ -877,8 +877,7 @@ export function useGameSession() {
   const viewedPeer = viewedUserId && viewedUserId !== tabUser ? peers.find((p) => p.id === viewedUserId) ?? null : null;
   const isSelfPage = viewedUserId === tabUser;
 
-  // 顶部选择器：恢复 bb452d9 的五子棋/围棋 + 尺寸布局，并在左下保留一个"选项"入口。
-  // 对局中（非主页）禁用切换，与旧版"联机中不可切换"一致。
+  // 顶部选择器：五子棋/围棋 + 尺寸；对局中（非主页）禁用切换。
   const topLocked = phase !== "home";
   const topLockedTitle = topLocked ? "对局/等待中不可切换，请先取消或离开" : undefined;
 

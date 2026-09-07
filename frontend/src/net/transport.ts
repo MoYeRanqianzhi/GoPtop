@@ -3,7 +3,7 @@
  *
  * 模型（按需求）：
  * - 每个标签页即一个用户：`userId` 存 `sessionStorage`（每页不同），昵称可改。
- * - 选项页（`/`）：本地对战 / P2P 对战 / 在线用户 / 设置四个入口。
+ * - 菜单页（`/`）：本地对战 / P2P 对战 / 在线用户 / 设置四个入口。
  * - 用户主页（`/<userId>`）；邀请链接（`/<inviterId>?pwd=<pwd>`）：对端带 pwd 打开即视为
  *   "带钥匙的连接请求"，邀请者校验 pwd 正确则自动同意，无需手动点接受。
  * - 无 pwd 访问某用户主页则只看到其主页，可手动发起挑战，对方弹窗同意后才进对局。
@@ -156,7 +156,7 @@ export function stunServers(): { urls: string }[] {
 
 /* ---------------- URL 模型（路径风格） ----------------
  *
- * - `/`              选项页（本地对战 / P2P 对战 / 在线用户 / 设置）
+ * - `/`              菜单页（本地对战 / P2P 对战 / 在线用户 / 设置）
  * - `/local`         本地对战
  * - `/p2p`           P2P 对战大厅
  * - `/users`         在线用户
@@ -260,7 +260,7 @@ export function watchToUrl(gameId: string): string {
   return url.toString();
 }
 
-/** 回选项页。 */
+/** 回菜单页。 */
 export function homeUrl(): string {
   return `${window.location.origin}/`;
 }

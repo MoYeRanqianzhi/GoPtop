@@ -75,6 +75,9 @@ footer,
 
 .brutal-btn--sm { padding: 7px 12px; font-size: 12px; box-shadow: var(--shadow-xs); }
 
+/* header 手机端降级（App.tsx 内 media query 配套）：「类型」弹出按钮默认只在窄屏出现 */
+.hp-type-btn { display: none; }
+
 .brutal-title { font-family: var(--font-display); font-weight: 900; letter-spacing: 0.02em; line-height: 0.9; }
 .brutal-label { font-family: var(--font-mono); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; }
 

@@ -97,7 +97,7 @@ export function StunSettings() {
 
   return (
     <div>
-      <div className="brutal-label" style={{ marginBottom: 6 }}>直连线路（STUN，仅地址发现、不转发数据）</div>
+      <div className="brutal-label" style={{ marginBottom: 6 }}>直连线路（STUN）</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {lines.map((l) => (
           <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: "3px solid var(--ink)", padding: "6px 8px", background: l.enabled ? "#fffbeb" : "#fff" }}>
@@ -122,7 +122,7 @@ export function StunSettings() {
         <button className="brutal-btn brutal-btn--sm" onClick={addCustom} disabled={!customUrl.trim()}>添加线路</button>
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
-        默认国服A/B区开启、外服关闭。至少保留一条启用线路；全关则仅局域网 主机候选直连。本局邀请链接在开局时按当前线路生成。
+        至少保留一条启用线路。
       </div>
     </div>
   );

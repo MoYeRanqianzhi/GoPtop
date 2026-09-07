@@ -3,12 +3,14 @@
  * 复用组件在 pages/components.tsx，本地对战页在 pages/LocalPage.tsx，
  * 棋盘规则在 game/board.ts。本文件只做 header、页面拼装与 footer。
  */
+import { useState } from "react";
 import { useGameSession } from "./state/useGameSession";
 import { nav } from "./net/transport";
 import type { Size } from "./net/transport";
 import { BoardPanel, PeerList, StunSettings } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
 export default function App() {
+  const [typeOpen, setTypeOpen] = useState(false);
   const {
     kind, size, board, toMove, winner, lastMove, hover, history,
     intent, tabUser, name, peers, role, phase, myColor, peerConnected,
@@ -40,10 +42,9 @@ export default function App() {
         }}
       >
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <div className="brutal-title" style={{ fontSize: 30, lineHeight: 1 }}>
-            GoPtop
-          </div>
+          <div className="brutal-title hp-title" style={{ fontSize: 30, lineHeight: 1 }}>GoPtop</div>
           <div
+            className="hp-badge"
             style={{
               fontFamily: "var(--font-mono)",
               fontWeight: 700,
@@ -59,49 +60,96 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              className={`brutal-btn brutal-btn--sm ${kind === "gomoku" ? "brutal-btn--active" : ""}`}
-              onClick={() => pickKind("gomoku")}
-              aria-pressed={kind === "gomoku"}
-              title={topLockedTitle}
-              disabled={topLocked}
-            >
-              五子棋
-            </button>
-            <button
-              className={`brutal-btn brutal-btn--sm ${kind === "go" ? "brutal-btn--active" : ""}`}
-              onClick={() => pickKind("go")}
-              aria-pressed={kind === "go"}
-              title={topLockedTitle}
-              disabled={topLocked}
-            >
-              围棋
-            </button>
-          </div>
-          <div style={{ width: 1, height: 26, background: "var(--ink)", opacity: 0.18 }} />
-          <div style={{ display: "flex", gap: 6 }}>
-            {(kind === "gomoku" ? [15] : [9, 13, 19]).map((s) => (
+        {/* 对局设置组：大屏直接展开，窄屏收纳进「类型」弹出面板（.hp-setup 隐藏 / .hp-type-btn 显示） */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }} onClick={() => setTypeOpen(false)}>
+          <div className="hp-setup" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 6 }}>
               <button
-                key={s}
-                className={`brutal-btn brutal-btn--sm ${size === s ? "brutal-btn--active" : ""}`}
-                onClick={() => pickSize(s as Size)}
-                aria-pressed={size === s}
+                className={`brutal-btn brutal-btn--sm ${kind === "gomoku" ? "brutal-btn--active" : ""}`}
+                onClick={() => pickKind("gomoku")}
+                aria-pressed={kind === "gomoku"}
+                title={topLockedTitle}
                 disabled={topLocked}
-                title={topLockedTitle ?? undefined}
               >
-                {s}×{s}
+                五子棋
               </button>
-            ))}
+              <button
+                className={`brutal-btn brutal-btn--sm ${kind === "go" ? "brutal-btn--active" : ""}`}
+                onClick={() => pickKind("go")}
+                aria-pressed={kind === "go"}
+                title={topLockedTitle}
+                disabled={topLocked}
+              >
+                围棋
+              </button>
+            </div>
+            <div style={{ width: 1, height: 26, background: "var(--ink)", opacity: 0.18 }} />
+            <div style={{ display: "flex", gap: 6 }}>
+              {(kind === "gomoku" ? [15] : [9, 13, 19]).map((s) => (
+                <button
+                  key={s}
+                  className={`brutal-btn brutal-btn--sm ${size === s ? "brutal-btn--active" : ""}`}
+                  onClick={() => pickSize(s as Size)}
+                  aria-pressed={size === s}
+                  disabled={topLocked}
+                  title={topLockedTitle ?? undefined}
+                >
+                  {s}×{s}
+                </button>
+              ))}
+            </div>
           </div>
-          <div style={{ width: 1, height: 26, background: "var(--ink)", opacity: 0.18 }} />
-          {/* 回执入口常驻（用户拍板）：任何页面都能粘贴收到的回执/邀请链接 */}
-          <button className="brutal-btn brutal-btn--sm" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }} title="粘贴对方发来的回执链接（自动识别加入对局或观战）">
-            输入回执
-          </button>
-          <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")} title="回选项页（本地对战 / P2P 对战 / 在线用户 / 设置）">
-            选项
+          <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
+            <button className="brutal-btn brutal-btn--sm hp-type-btn" onClick={() => setTypeOpen((o) => !o)} aria-expanded={typeOpen}>
+              类型
+            </button>
+            {typeOpen && (
+              <div
+                style={{
+                  position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 900,
+                  background: "#fff", border: "3px solid var(--ink)", boxShadow: "4px 4px 0 var(--ink)",
+                  padding: 10, display: "flex", flexDirection: "column", gap: 8, minWidth: 200,
+                }}
+              >
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    className={`brutal-btn brutal-btn--sm ${kind === "gomoku" ? "brutal-btn--active" : ""}`}
+                    onClick={() => { pickKind("gomoku"); setTypeOpen(false); }}
+                    aria-pressed={kind === "gomoku"}
+                    disabled={topLocked}
+                    title={topLockedTitle}
+                  >
+                    五子棋
+                  </button>
+                  <button
+                    className={`brutal-btn brutal-btn--sm ${kind === "go" ? "brutal-btn--active" : ""}`}
+                    onClick={() => { pickKind("go"); setTypeOpen(false); }}
+                    aria-pressed={kind === "go"}
+                    disabled={topLocked}
+                    title={topLockedTitle}
+                  >
+                    围棋
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {(kind === "gomoku" ? [15] : [9, 13, 19]).map((s) => (
+                    <button
+                      key={s}
+                      className={`brutal-btn brutal-btn--sm ${size === s ? "brutal-btn--active" : ""}`}
+                      onClick={() => { pickSize(s as Size); setTypeOpen(false); }}
+                      aria-pressed={size === s}
+                      disabled={topLocked}
+                      title={topLockedTitle ?? undefined}
+                    >
+                      {s}×{s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")} title="回菜单页（本地对战 / P2P 对战 / 在线用户 / 设置）">
+            菜单
           </button>
         </div>
       </header>
@@ -110,7 +158,7 @@ export default function App() {
         <div className="play-stack">
           {incomingBanner}
 
-          {/* —— 选项页 `/` —— */}
+          {/* —— 菜单页 `/` —— */}
           {mode === "menu" && (
             <div className="brutal-card" style={{ padding: "16px 14px", background: "#fff", display: "flex", flexDirection: "column", gap: 12 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
@@ -129,9 +177,6 @@ export default function App() {
                 {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
               </div>
               {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                用户对用户直连：每人一个主页（/:userId），邀请链接带本局钥匙 pwd（自动同意）；无 pwd 则手动挑战。两人进对局后 pwd 失效，只剩观战链接。
-              </div>
             </div>
           )}
 
@@ -145,9 +190,6 @@ export default function App() {
                 <span className="brutal-label">P2P 对战大厅</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>{tabUser}</span>
               </div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                规则/尺寸用顶部选择器统一设置（与本地对战共用）。
-              </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={createInvite}>开启对战（等对手）</button>
                 <button className="brutal-btn brutal-btn--sm" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-invite"); }}>粘贴邀请链接</button>
@@ -156,11 +198,10 @@ export default function App() {
               </div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
                 <span className="brutal-label">在线用户（{peers.length}）</span>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>点挑战即发起对局，对方同意后进入</span>
               </div>
               <PeerList
                 peers={peers}
-                emptyHint="暂无其他在线用户。把你的主页链接发给对方，对方打开即可向你发起挑战。"
+                emptyHint="暂无其他在线用户。"
                 actionLabel={() => "挑战"}
                 onAction={(p) => acceptInvite(p.id, null, kind, size)}
                 extraAction={(p) => (
@@ -175,7 +216,7 @@ export default function App() {
             <>
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                <span className="brutal-label">等待对手 · 邀请（本局有效）</span>
+                <span className="brutal-label">等待对手 · 邀请</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>{p2pStatusText}</span>
               </div>
               {role === "inviter" && inviteUrl ? (
@@ -186,11 +227,6 @@ export default function App() {
                     <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>输入回执</button>
                     <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消等待</button>
                     {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
-                  </div>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                    对方只需打开此链接即自动加入并建立直连（pwd 为本局钥匙，每局轮换；直连信息已编进链接）。
-                    跨设备：对方打开链接后会弹出回执链接发给你，点「输入回执」粘贴即可开局。
-                    两人进对局后 pwd 失效，不可再加入第三人；此邀请区将隐藏。
                   </div>
                   {rtcStatus}
                 </>
@@ -268,20 +304,17 @@ export default function App() {
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span className="brutal-label">在线用户（{peers.length}）</span>
-                <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")}>回选项页</button>
+                <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")}>回菜单页</button>
               </div>
               {phase !== "home" && (
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>
-                  你当前{phase === "waiting" ? "正在等待对手" : "正在对局中"}（规则/尺寸用顶部选择器，对局中已锁定）。
+                  你当前{phase === "waiting" ? "正在等待对手" : "正在对局中"}。
                   <button className="brutal-btn brutal-btn--sm" style={{ marginLeft: 8 }} onClick={() => nav("/p2p")}>前往 P2P 页</button>
                 </div>
               )}
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                规则/尺寸用顶部选择器统一设置（与本地对战共用）。
-              </div>
               <PeerList
                 peers={peers}
-                emptyHint="暂无其他在线用户。把你的主页链接发给对方，对方打开即可向你发起挑战。"
+                emptyHint="暂无其他在线用户。"
                 actionLabel={() => "挑战"}
                 onAction={(p) => { if (phase === "home") acceptInvite(p.id, null, kind, size); }}
                 extraAction={(p) => (
@@ -297,7 +330,7 @@ export default function App() {
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span className="brutal-label">设置</span>
-                <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")}>回选项页</button>
+                <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")}>回菜单页</button>
               </div>
               <div>
                 <div className="brutal-label" style={{ marginBottom: 6 }}>昵称（在线用户列表中显示）</div>
@@ -308,7 +341,7 @@ export default function App() {
                 </div>
               </div>
               <div>
-                <div className="brutal-label" style={{ marginBottom: 6 }}>默认规则与尺寸（新对局/开页时使用，也可直接用顶部选择器切换）</div>
+                <div className="brutal-label" style={{ marginBottom: 6 }}>默认规则与尺寸（新对局/开页时使用）</div>
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>
                   当前：{kind === "gomoku" ? "五子棋" : "围棋"} {size}×{size}
                   {phase !== "home" && "（对局/等待中，顶部已锁定）"}
@@ -333,9 +366,6 @@ export default function App() {
               </div>
               <StunSettings />
               {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                直连约束：同源页面间走 BroadcastChannel 同源直传；跨设备走 WebRTC DataChannel（仅上面启用的 STUN、无 TURN 中转），信令随邀请链接自动走，无信令服务器、无手动输入。
-              </div>
             </div>
           )}
 
@@ -351,7 +381,7 @@ export default function App() {
                   </div>
                   {phase === "waiting" && role === "inviter" && inviteUrl ? (
                     <>
-                      <span className="brutal-label">等待对手 · 邀请（本局有效）</span>
+                      <span className="brutal-label">等待对手 · 邀请</span>
                       <code style={{ border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inviteUrl}</code>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(inviteUrl, "邀请链接已复制")}>复制邀请链接</button>
@@ -361,15 +391,12 @@ export default function App() {
                     </>
                   ) : phase === "playing" ? (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>对局中（pwd 已失效，不可再加入）。</span>
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>对局中。</span>
                       <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => nav("/p2p")}>回到对局</button>
                       {watchUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(watchUrl, "观战链接已复制")}>复制观战链接</button>}
                     </div>
                   ) : (
                     <>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                        规则/尺寸用顶部选择器统一设置。
-                      </div>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={createInvite}>开启对战（等对手）</button>
                         <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(myHomeUrl, "主页链接已复制")}>复制我的主页</button>
@@ -406,7 +433,7 @@ export default function App() {
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                       <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                        在在线用户列表中暂未发现该用户（对方可能已离线）。仍可尝试发起挑战。
+                        对方可能已离线。仍可尝试发起挑战。
                       </div>
                       <div>
                         <button className="brutal-btn brutal-btn--sm brutal-btn--accent"
@@ -414,11 +441,6 @@ export default function App() {
                           {intent.mode === "user" && intent.pwd ? "接受邀请进入对局" : "挑战"}
                         </button>
                       </div>
-                    </div>
-                  )}
-                  {phase === "home" && (
-                    <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5 }}>
-                      规则/尺寸用顶部选择器统一设置。
                     </div>
                   )}
                 </>
@@ -472,6 +494,14 @@ export default function App() {
         @media (max-width: 640px) {
           .bottom-grid { grid-template-columns: 1fr !important; }
         }
+        /* header 三级降级（手机端致命挤压）：先隐徽章，再隐标题，最后把对局设置收进「类型」按钮 */
+        @media (max-width: 820px) { .hp-badge { display: none; } }
+        @media (max-width: 660px) { .hp-title { display: none; } }
+        @media (max-width: 420px) {
+          .hp-setup { display: none !important; }
+          .hp-type-btn { display: inline-block; }
+          header { padding: 8px 10px !important; }
+        }
       `}</style>
 
       {/* —— 弹窗（信令消息统一经弹窗收发：粘贴邀请 / 输入回执 / 展示回执） —— */}
@@ -492,7 +522,7 @@ export default function App() {
                   <button className="brutal-btn brutal-btn--sm" onClick={() => setModal(null)}>关闭</button>
                 </div>
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, lineHeight: 1.5 }}>
-                  把下面的回执链接发给邀请者；邀请者在「等待对手」页点「输入回执」粘贴即可开局。
+                  把下面的回执链接发给邀请者即可开局。
                 </div>
                 <textarea
                   value={answerBackUrl ?? ""}
@@ -520,8 +550,8 @@ export default function App() {
                   value={modalInput}
                   onChange={(e) => setModalInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") submitModal(); }}
-                  placeholder={modal === "paste-invite" ? "粘贴邀请链接或主页链接（任意域名均可识别）"
-                    : "粘贴受邀者发来的回执链接（任意域名均可识别）"}
+                  placeholder={modal === "paste-invite" ? "粘贴邀请链接或主页链接"
+                    : "粘贴受邀者发来的回执链接"}
                   style={{ border: "3px solid var(--ink)", padding: "9px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }}
                 />
                 {modalErr && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#b00020" }}>{modalErr}</div>}
