@@ -67,6 +67,7 @@ export default function App() {
       <div className="poster-strip">GoPtop · P2P Gomoku & Go · Neubrutalism · 用户直连 · 无服务器无中转</div>
 
       <header
+        data-kind={kind}
         style={{
           display: "flex",
           alignItems: "center",
@@ -524,9 +525,16 @@ export default function App() {
       <style>{`
         /* bottom-grid 列数已由 minmax(auto-fit) 自适应，窄屏自动单列，旧 640px 断点删除 */
         /* header 三级降级（手机端致命挤压）：先隐徽章，再隐标题，最后把对局设置收进「类型」按钮。
-           阈值按实测单行自然宽度定（含 padding：围棋全量 677 / 隐徽章后 572 / 收起后 332，取最宽模式 +10px 字体余量） */
-        @media (max-width: 687px) { .hp-badge { display: none; } }
-        @media (max-width: 582px) { .hp-title { display: none; } }
+           阈值按模式分测（含 padding，2026-09-07 实测）：五子棋全量 578 / 无徽章 442；
+           围棋（3 个尺寸钮）全量 677 / 无徽章 572。各 +2px 余量——宁可挤一点也不提前隐藏 */
+        @media (max-width: 580px) { header[data-kind="gomoku"] .hp-badge { display: none; } }
+        @media (max-width: 679px) { header[data-kind="go"] .hp-badge { display: none; } }
+        @media (max-width: 444px) { header[data-kind="gomoku"] .hp-title { display: none; } }
+        @media (max-width: 574px) { header[data-kind="go"] .hp-title { display: none; } }
+        @media (max-width: 463px) {
+          header[data-kind="go"] .hp-setup { display: none !important; }
+          header[data-kind="go"] .hp-type-btn { display: inline-block; }
+        }
         @media (max-width: 342px) {
           .hp-setup { display: none !important; }
           .hp-type-btn { display: inline-block; }
