@@ -1,7 +1,7 @@
 # .agents/TODO.md — 共享待办
 
 > 记忆规范见 CLAUDE.md 与 .agents/MEMORY.md。每个待办动手前先读对应记忆文件。
-> 审查报告：review/2026-09-07-main-agent-code-review.md（修复记录已回填）。
+> 审查报告已归档：review/archive/（2026-09-07 审查-修复循环闭环，报告头有归档标注）。仍开放的事项以本文件为准。
 
 ## 回执与观战（2026-09-07 用户拍板，见 memory/2026-09-07-receipt-ui-and-spectator-design.md）
 
@@ -34,7 +34,7 @@
 
 ## 下一步候选（未获指令，不动工）
 
-- **R2 残留（R2a/R2b，修复轮审查新发现，低）**：acceptReceipt 守卫补 `pwdRef.current !== r.pwd` 对比（防取消后同阶段开新局被骗过）；createInvite catch 分支补同款三重守卫（成功路径已有）。合计 ~6 行，见 review/2026-09-07-fix-round-review.md「修复记录审查」。
+- **R2 残留（R2a/R2b，修复轮审查新发现，低）**：acceptReceipt 守卫补 `pwdRef.current !== r.pwd` 对比（防取消后同阶段开新局被骗过）；createInvite catch 分支补同款三重守卫（成功路径已有）。合计 ~6 行，详见 review/archive/2026-09-07-fix-round-review.md「修复记录审查」节。
 
 - **D8 后续（可选）**：App.tsx 剩余 544 行中的页面拼装（menu/p2p/users/settings/user/watch JSX）可再拆 pages/*.tsx——纯机械移动，收益是文件更小，无行为面。
 - **D11 扩展（可选）**：useGameSession 状态机尚未有测试（需 renderHook 或拆纯函数）；DirectRtcPeer 集成路径未测（需真实 ICE）。

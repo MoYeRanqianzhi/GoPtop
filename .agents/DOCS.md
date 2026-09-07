@@ -8,8 +8,7 @@
 | [p2p-protocol.md](docs/p2p-protocol.md) | URL 格式、G1 信令编码（deflate+XOR+base64url）、GameMsg 线格式、同源/跨设备建连时序、身份与钥匙、STUN |
 | [../MEMORY.md](../MEMORY.md) | 关键拍板索引（指向 memory/ 下长文） |
 | [../TODO.md](../TODO.md) | 共享待办（每项标注来源记忆） |
-| [../review/2026-09-07-main-agent-code-review.md](../review/2026-09-07-main-agent-code-review.md) | **全量审查报告（2026-09-07）**：A 级 8 个真实 bug（含行号与修复方向）、架构断层 4 项、注释失实 8 项。修复轮必读，修完回填修复记录 |
-| [../review/2026-09-07-fix-round-review.md](../review/2026-09-07-fix-round-review.md) | **修复轮审查（2026-09-07）**：A1-A8/B/C/D 修复全部核实通过；新发现 R1-R6（gameStore.ts 死代码复活+注释三方矛盾、acceptReceipt await 竞态等）。R1/R2 待修 |
+| [../review/archive/](../review/archive/) | **审查报告归档（2026-09-07，已闭环）**：全量审查（A 级 8 bug 等）+ 修复轮审查（R1-R6），循环已闭环，仅作历史记录 |
 
 ## 记忆文件（memory/）
 
