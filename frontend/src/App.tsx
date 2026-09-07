@@ -454,6 +454,10 @@ export default function App() {
       }
       case "SyncState": {
         setPeerConnected(true);
+        // 覆盖守卫（审查 A3）：快照版本 = history.length。直连 open 后本方可能先落子，
+        // 对方 200ms 后发出的旧空板快照若后到会吞掉这一手——只应用不旧于本地的快照；
+        // 同长视为同版本（正常对局中双方历史一致，覆盖无害）
+        if (k.history.length < historyRef.current.length) break;
         if (k.kind !== kindRef.current) setKind(k.kind);
         if (k.size !== sizeRef.current) setSize(k.size);
         setBoard(k.board.map((r) => [...r]));

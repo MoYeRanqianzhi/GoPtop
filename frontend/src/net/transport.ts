@@ -629,8 +629,10 @@ const RTC_ENC_MAGIC = "G1"; // 版本头：未来换编码格式时可平滑迁�
 async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
   const cs = new CompressionStream("deflate-raw");
   const writer = cs.writable.getWriter();
-  void writer.write(bytes);
-  void writer.close();
+  // write/close 的失败已由 arrayBuffer() 的 reject 上报；不 catch 会变成
+  // unhandled rejection（截断 token 的解码即触发，console 出现游离报错）
+  writer.write(bytes).catch(() => { /* 由 readable 侧上报 */ });
+  writer.close().catch(() => { /* 由 readable 侧上报 */ });
   const buf = await new Response(cs.readable).arrayBuffer();
   return new Uint8Array(buf);
 }
@@ -639,8 +641,8 @@ async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
 async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
   const ds = new DecompressionStream("deflate-raw");
   const writer = ds.writable.getWriter();
-  void writer.write(bytes);
-  void writer.close();
+  writer.write(bytes).catch(() => { /* 由 readable 侧上报 */ });
+  writer.close().catch(() => { /* 由 readable 侧上报 */ });
   const buf = await new Response(ds.readable).arrayBuffer();
   return new Uint8Array(buf);
 }
@@ -690,7 +692,7 @@ function b64urlDecode(s: string): Uint8Array {
 
 /** 编码 offer/answer：JSON 短键 → deflate → pwd XOR → URL 安全 base64。
  *  `pwd` 为本局钥匙（编解码两端必须一致）。 */
-async function encodeRtcPayload(payload: unknown, pwd: string): Promise<string> {
+export async function encodeRtcPayload(payload: unknown, pwd: string): Promise<string> {
   const json = JSON.stringify(payload);
   const raw = new TextEncoder().encode(json);
   const deflated = await deflateRaw(raw);
@@ -699,7 +701,7 @@ async function encodeRtcPayload(payload: unknown, pwd: string): Promise<string> 
 }
 
 /** 解码 offer/answer（`encodeRtcPayload` 的逆）。 */
-async function decodeRtcPayload(token: string, pwd: string): Promise<unknown> {
+export async function decodeRtcPayload(token: string, pwd: string): Promise<unknown> {
   const token2 = token.trim();
   if (!token2.startsWith(RTC_ENC_MAGIC)) throw new Error("unknown rtc token");
   const encrypted = b64urlDecode(token2.slice(RTC_ENC_MAGIC.length));
