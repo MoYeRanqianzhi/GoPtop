@@ -460,10 +460,16 @@ export default function App() {
       }
       case "Move": {
         setPeerConnected(true);
+        // 执子颜色以消息自带的 by 为准，不从本地推断：观战者没有"我的颜色"，
+        // 对局者若本地 toMove 与发送端有偏差会错色。旧格式无 by 的消息直接丢弃
+        // （不猜）——猜测曾致"任何一方认输观战者都判白胜"。
+        const by = k.by;
+        if (by !== "black" && by !== "white") break;
         if (k.move.type === "Place") {
           const c = k.move.coord;
-          const mover = toMoveRef.current;
+          const mover = by;
           if (winnerRef.current) break;
+          if (mover !== toMoveRef.current) break; // 非行棋方的落子无效（乱序/重放防御）
           const curBoard = boardRef.current;
           // 跨页消息可能早于 guest 的 kind/size 生效：按消息自带尺寸做边界检查，
           // 落子合并以当前棋盘为准（双方 kind/size 由 SyncState 对齐）。
@@ -479,9 +485,11 @@ export default function App() {
           if (willWin) setWinner(mover);
           else setToMove(mover === "black" ? "white" : "black");
         } else if (k.move.type === "Pass") {
-          setToMove((s) => (s === "black" ? "white" : "black"));
+          if (by !== toMoveRef.current) break;
+          setToMove(by === "black" ? "white" : "black");
         } else if (k.move.type === "Resign") {
-          setWinner(myColorRef.current);
+          // 认输者 = by，胜者是其对手——与接收方本地颜色无关（观战者/发送方回流都正确）
+          setWinner(by === "black" ? "white" : "black");
         }
         break;
       }
@@ -543,7 +551,12 @@ export default function App() {
     const challenges = challengeQueueRef.current;
     challengeQueueRef.current = [];
     for (const e of challenges) {
-      if (phaseRef.current === "playing") continue; // 对局中：pwd 已失效，不接受第三人
+      if (phaseRef.current === "playing" || (phaseRef.current === "waiting" && roleRef.current === "guest")) {
+        // 对局中/自己也是等待中的客人：pwd 已失效或本局已满，回拒绝信——
+        // 静默吞掉会让挑战方永远停在"等待对方同意"（审查 A8）
+        presence.reject(e.from, e.gameId);
+        continue;
+      }
       if (phaseRef.current === "waiting" && pwdRef.current && e.pwd === pwdRef.current) {
         // 带正确 pwd 的连接请求：自动同意（邀请钥匙语义）
         acceptChallenge(e.from, e.kind, e.size, e.gameId, true, e.rtcAns ?? null);
@@ -551,7 +564,10 @@ export default function App() {
         // 主页：无 pwd 或 pwd 不对 → 弹窗手动确认
         setIncoming({ from: e.from, fromName: e.fromName, kind: e.kind, size: e.size, gameId: e.gameId });
       }
-      // waiting 但 pwd 对不上：忽略（第三人拿旧 pwd 无法加入）
+      // waiting(host) 但 pwd 对不上：第三人拿旧 pwd，回拒绝信
+      else if (phaseRef.current === "waiting") {
+        presence.reject(e.from, e.gameId);
+      }
     }
     const accepts = acceptQueueRef.current;
     acceptQueueRef.current = [];
@@ -577,8 +593,9 @@ export default function App() {
   useEffect(() => {
     if (phase === "home") presence.setStatus("idle", null);
     else if (phase === "waiting") presence.setStatus("waiting", gameId);
-    else presence.setStatus("in-game", gameId);
-  }, [phase, gameId]);
+    // 观战者不是"对局中"（不占对战席位，可被挑战），对他人显示空闲（审查 D9）
+    else presence.setStatus(role === "spectator" ? "idle" : "in-game", gameId);
+  }, [phase, gameId, role]);
 
   // 路由变化监听（站内 nav / 前进后退）
   useEffect(() => {
@@ -647,6 +664,7 @@ export default function App() {
 
   /** 主机：开启对战（waiting），生成每局轮换 pwd + gameId，后台预生成直连 offer 编进邀请链接。 */
   function hostCreate() {
+    closeAllRtcPeers();
     const g = genGameId();
     const p = genPwd();
     setGameId(g);
@@ -661,9 +679,11 @@ export default function App() {
     setPeerConnected(false);
     resetBoardFor(kind, size);
     transport.join(g);
-    setInviteUrl(inviteToUrl(tabUser, p, kind, size));
+    // 邀请链接只在 offer 生成完成后才提供（含 rtc 才能跨设备直连）。
+    // 旧实现先给无 rtc 链接：用户复制发出的链接跨设备永远连不上（审查 A5）。
+    setInviteUrl(null);
     setWatchUrl(null);
-    setNotice(null);
+    setNotice("正在生成直连邀请…");
     setDirectState("making-invite");
     // 后台预生成 offer：用户只需复制最终邀请链接，无需触碰 offer 文本
     void (async () => {
@@ -674,17 +694,23 @@ export default function App() {
         hostRtcRef.current = peer;
         setInviteUrl(inviteToUrl(tabUser, p, kind, size, offer));
         setDirectState("waiting-guest");
+        setNotice(null);
       } catch {
         hostRtcRef.current = null;
         try { peer.close(); } catch { /* ignore */ }
-        // offer 生成失败也不阻塞：同源页面间仍可经 BroadcastChannel 直传对弈
-        setDirectState("idle");
+        // offer 生成失败：退化为无 rtc 链接（仅同源可玩），如实告知跨设备不可用
+        setInviteUrl(inviteToUrl(tabUser, p, kind, size));
+        setDirectState("error");
+        setNotice("直连邀请生成失败：已生成同源链接（跨设备不可用），可取消后重开");
       }
     })();
   }
 
-  /** 客人：向某用户发起挑战（pwd 可空）。发起后统一到 P2P 页等待/对战。 */
+  /** 客人：向某用户发起挑战（pwd 可空）。发起后统一到 P2P 页等待/对战。
+   *  入口先清理上一局残留（RTC peer/房主信令），防止 Awaiting 中粘贴新邀请
+   *  时旧连接泄漏（审查 A7：角色被覆盖但底层 PeerConnection 仍开着）。 */
   function guestChallenge(hostId: string, pwdOrNull: string | null, k: GameKind, s: Size, hostOffer?: string | null) {
+    closeAllRtcPeers();
     const g = genGameId();
     setGameId(g);
     gameIdRef.current = g;
@@ -733,23 +759,34 @@ export default function App() {
     nav("/p2p");
   }
 
-  /** 房主用客人回传的 answer 完成直连（同源自动；跨设备由弹窗粘贴回执触发）。 */
-  async function finishHostRtc(ans: string, pwd: string) {
+  /** 房主用客人回传的 answer 完成直连（同源自动；跨设备由弹窗粘贴回执触发）。
+   *  返回 null=成功；其余为失败原因文案。不做任何状态变更之外的副作用。 */
+  async function finishHostRtc(ans: string, pwd: string): Promise<string | null> {
     const peer = hostRtcRef.current;
-    if (!peer || peer.state !== "waiting-guest") return;
+    // 无待用 offer（offer 生成失败过）：显式报错，不能静默——静默会让房主以为
+    // 回执已受理，客人却永远等不到直连（审查 A4）
+    if (!peer || peer.state !== "waiting-guest") {
+      return "本局邀请的直连信令未就绪（可能生成失败），无法受理回执；请取消等待后重新开战";
+    }
     try {
       await peer.acceptAnswer(ans, pwd);
       setNotice("对方已加入，直连建立中…");
-    } catch {
+      return null;
+    } catch (err) {
+      // 双路径竞态：弹窗与 Presence 同时送达时，后到路径遇到已成功应用不算失败
+      if (peer.answered) return null;
       setDirectState("error");
-      setNotice("直连建立失败，可检查设置页线路后重试");
+      const msg = err instanceof Error && err.message === "unknown rtc token"
+        ? "回执无法解码（可能不是本程序生成的回执）"
+        : "回执解码或直连建立失败，请让对方重新发送回执";
+      return msg;
     }
   }
 
   /** 房主受理回执：校验钥匙 → 完成直连 → 切到客人的 game channel 进对局。
    *  回执路径（弹窗粘贴）都走这里；同源 Presence 路径走 acceptChallenge。
    *  返回错误信息（null 表示受理成功），由弹窗就地展示。 */
-  function hostAcceptReceipt(r: { hostId: string; pwd: string; rtcAns: string; gameId: string | null; kind: GameKind | null; size: Size | null }): string | null {
+  async function hostAcceptReceipt(r: { hostId: string; pwd: string; rtcAns: string; spectator: boolean; gameId: string | null; kind: GameKind | null; size: Size | null }): Promise<string | null> {
     if (roleRef.current !== "host" || phaseRef.current !== "waiting") {
       return "当前不在等待对手状态，无法受理回执";
     }
@@ -759,7 +796,14 @@ export default function App() {
     if (r.pwd !== pwdRef.current) {
       return "回执钥匙与本局不符，已拒绝";
     }
-    void finishHostRtc(r.rtcAns, r.pwd);
+    if (r.spectator) {
+      // 观战回执（预留）：跨设备观战尚未实现，此分支只为自动识别与明确报错
+      return "跨设备观战尚未实现：已识别为观战回执，请等待后续版本";
+    }
+    // 直连应答必须先应用成功，才允许进入对局状态——失败时保持 waiting，
+    // 弹窗留在原地可重试（旧实现先切 playing 再异步等结果，坏回执会让整局作废）
+    const err = await finishHostRtc(r.rtcAns, r.pwd);
+    if (err) return err;
     const k = r.kind ?? kindRef.current;
     const s = r.size ?? sizeRef.current;
     if (r.gameId) {
@@ -792,8 +836,8 @@ export default function App() {
   }
 
   /** 弹窗确认：按弹窗类型解析粘贴文本并执行。解析与域名无关；
-   *  校验失败留在弹窗内报错，成功才关闭。 */
-  function submitModal() {
+   *  校验失败留在弹窗内报错，成功才关闭。回执受理含异步信令，整体 async。 */
+  async function submitModal() {
     const m = modal;
     if (!m) return;
     if (m === "paste-invite") {
@@ -837,7 +881,7 @@ export default function App() {
         setModalErr("无法识别该回执：请完整粘贴客人发来的回执链接（含 rtcAns）");
         return;
       }
-      const err = hostAcceptReceipt(r);
+      const err = await hostAcceptReceipt(r);
       if (err) {
         setModalErr(err);
         return;
@@ -851,6 +895,8 @@ export default function App() {
 
   /** 主机接受挑战：pwd 失效（两人满员），进入 playing。 */
   function acceptChallenge(from: string, k: GameKind, s: Size, guestGameId: string, auto: boolean, guestAns?: string | null) {
+    // 同源路径：answer 经 BroadcastChannel 送达，由刚生成的对端产生、损坏概率极低，
+    // 不阻塞进局（同源本就不依赖 WebRTC）；万一失败仅显示直连错误，棋局仍可下
     if (guestAns) void finishHostRtc(guestAns, pwdRef.current ?? "");
     // 切换到 guest 的 game channel（两人同一 channel）
     transport.join(guestGameId);
@@ -901,12 +947,15 @@ export default function App() {
   }
 
   function joinAsSpectator(g: string) {
+    closeAllRtcPeers();
     setGameId(g);
     gameIdRef.current = g;
     setRole("spectator");
     roleRef.current = "spectator";
     setPhase("playing");
     phaseRef.current = "playing";
+    // 观战者没有执子颜色：占位 white 仅供 UI（棋盘禁用等），
+    // 消息判定一律用消息自带 by（审查 A2），不得从 myColor 推断
     setMyColor("white");
     myColorRef.current = "white";
     setPeerConnected(false);
@@ -919,7 +968,9 @@ export default function App() {
     setTimeout(() => transport.send({ type: "SyncRequest" }), 120);
   }
 
-  function backHome() {
+  /** 关闭全部 P2P 连接与棋盘 channel（换局入口 hostCreate/guestChallenge 与 backHome 共用）。
+   *  开新局前必调：旧 PeerConnection 不关会泄漏（审查 A7）。 */
+  function closeAllRtcPeers() {
     transport.leave();
     for (const p of rtcPeersRef.current) { try { p.close(); } catch { /* ignore */ } }
     rtcPeersRef.current = [];
@@ -927,6 +978,10 @@ export default function App() {
     setModal(null);
     setModalInput("");
     setModalErr(null);
+  }
+
+  function backHome() {
+    closeAllRtcPeers();
     setRole("idle");
     roleRef.current = "idle";
     setPhase("home");
@@ -980,6 +1035,10 @@ export default function App() {
     p.onRemote = (msg) => transport.injectRemote(msg);
     p.onState = (s) => {
       setDirectState(s);
+      // 关闭/失败即出列：rtcPeersRef 只装活连接，防止跨局累积（审查 D7）
+      if (s === "closed" || s === "error") {
+        rtcPeersRef.current = rtcPeersRef.current.filter((q) => q !== p);
+      }
       if (s === "open") {
         setPeerConnected(true);
         // 跨设备时 Presence 不可达（无 BroadcastChannel）：直连一旦打通，
@@ -1019,7 +1078,7 @@ export default function App() {
     else setToMove(mover === "black" ? "white" : "black");
 
     if (phase === "playing") {
-      transport.send({ type: "Move", move: { type: "Place", coord: c } });
+      transport.send({ type: "Move", move: { type: "Place", coord: c }, by: mover });
     }
   }
 
@@ -1172,6 +1231,10 @@ export default function App() {
             ))}
           </div>
           <div style={{ width: 1, height: 26, background: "var(--ink)", opacity: 0.18 }} />
+          {/* 回执入口常驻（用户拍板）：任何页面都能粘贴收到的回执/邀请链接 */}
+          <button className="brutal-btn brutal-btn--sm" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }} title="粘贴对方发来的回执链接（自动识别加入对局或观战）">
+            输入回执
+          </button>
           <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")} title="回选项页（本地对战 / P2P 对战 / 在线用户 / 设置）">
             选项
           </button>
@@ -1266,9 +1329,24 @@ export default function App() {
                   </div>
                   {rtcStatus}
                 </>
+              ) : role === "host" ? (
+                /* offer 生成中/失败：不给链接可复制（防发出无 rtc 的废链接，审查 A5） */
+                <>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>{notice ?? "正在生成直连邀请…"}</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消</button>
+                  </div>
+                  {rtcStatus}
+                </>
               ) : (
                 <>
                   <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>{notice ?? "等待对方确认…"}</div>
+                  {answerBackUrl && (
+                    /* 误关回执弹窗后可从这里重新查看（审查 A6） */
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <button className="brutal-btn brutal-btn--sm" onClick={() => setModal("receipt")}>查看回执</button>
+                    </div>
+                  )}
                   <div style={{ display: "flex", gap: 8 }}>
                     <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消</button>
                   </div>
@@ -1585,7 +1663,7 @@ export default function App() {
                 {modalErr && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#b00020" }}>{modalErr}</div>}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={submitModal}>
-                    {modal === "paste-answer" ? "受理回执并开局" : "连接"}
+                    {modal === "paste-answer" ? "确认回执" : "连接"}
                   </button>
                 </div>
               </>

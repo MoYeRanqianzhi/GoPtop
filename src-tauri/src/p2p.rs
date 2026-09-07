@@ -1,4 +1,5 @@
-//! P2P 占位 — Phase 3 将在此持有 `iroh::Endpoint` 与 `GoPtop` 的 `GameState`，
-//! 并通过 `AppHandle::emit("game://msg", payload)` 将 `GameMsg` 推送到前端。
+//! P2P 占位 — 空模块，仅保证 `mod p2p` 编译通过。
 //!
-//! 当前为空模块，仅保证 `mod p2p` 编译通过，避免 Phase 0 引入未就绪的 iroh 依赖。
+//! 早期规划在此持有 iroh Endpoint，该路线已弃：现行 P2P 全部在前端 TS
+//! （WebRTC STUN-only 直连，见 .agents/docs/p2p-protocol.md），Tauri 壳只承载窗口。
+//! 若未来 Rust 侧需要参与传输，再在此落地。

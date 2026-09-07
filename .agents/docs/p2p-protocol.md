@@ -7,7 +7,7 @@
 | 链接 | 格式 | 说明 |
 |---|---|---|
 | 邀请 | `/<hostId>?pwd=<key>&kind=gomoku\|go&size=<9\|13\|15\|19>[&rtc=<G1offer>]` | `rtc` 为房主预生成 offer（跨设备一键直连）；同源不需要 |
-| 回执 | `/<hostId>?pwd=<key>&rtcAns=<G1answer>&game=<gameId>&kind=<kind>&size=<size>` | 客人→房主的 answer 回传；`game/kind/size` 让房主凭回执即可进客人的 channel |
+| 回执 | `/<hostId>?pwd=<key>&rtcAns=<G1answer>&game=<gameId>&kind=<kind>&size=<size>[&spec=1]` | 客人→房主的 answer 回传；`game/kind/size` 让房主凭回执即可进客人的 channel；`spec=1` 标记观战回执（自动识别用，观战连接待实现） |
 | 观战 | `/watch/<gameId>` | 目前仅同源可用 |
 | 主页 | `/<userId>` | 无 pwd，可手动挑战 |
 
@@ -33,11 +33,15 @@ encodeRtcPayload(payload, pwd):
 
 ```ts
 GameMsg = { seq: number; sender: string(uuid); userId: string; kind: MsgKind }
-MsgKind = Hello{kind,size} | Move{move: Place{coord}|Pass|Resign}
+MsgKind = Hello{kind,size} | Move{move: Place{coord}|Pass|Resign; by: StoneColor}
         | SyncState{board,toMove,winner,history,lastMove,kind,size}
         | SyncRequest | Chat{text} | Ping | Pong
         | Reset{kind,size} | UndoReq | UndoAck{ok}
 ```
+
+`Move.by`：发送端声明的执子颜色（2026-09-07 协议变更）。接收端一律按 by 判定
+（Place/Pass 须 by===本地 toMove 才应用；Resign 胜者=by 的对手），**不得**从本地
+toMove/myColor 推断——观战者没有"我的颜色"。无 by 的旧格式消息直接丢弃。
 
 发送（唯一口）：`transport.send()` → BC postMessage + `DirectRtc.broadcast`（App 注入 `wireRtcBroadcast` → 所有 open RTC peer）→ **同 seq 双通道**。
 接收：`GameChannel.dispatch()` → `Move` 按 `(sender, seq)` 单调去重（lastSeq Map）；其余不去重。
@@ -72,13 +76,14 @@ guest: RTC open → enterPlayingAsGuest
 
 ### 4.3 连接建立后的同步
 
-`attachPeer` 的 onState("open")：setPeerConnected(true)；guest 若 waiting 则进对局；200ms 后双方各发一次 SyncState（全量），后到覆盖先到——初局均为空板，无实际冲突。
+`attachPeer` 的 onState("open")：setPeerConnected(true)；guest 若 waiting 则进对局；200ms 后双方各发一次 SyncState（全量），后到覆盖先到——**已知竞态**：open 后本方先落子、对方空板快照后到会吞子（审查 A3，修复列入 TODO）；closed/error 的 peer 从 rtcPeersRef 出列。
 
 ## 5. 身份与钥匙
 
 - `userId`：`sessionStorage.goptop:tabUser`，每标签页一个（跨页即新身份，设计如此）。
 - `myId`（GameChannel.sender）：crypto.randomUUID，每次页面加载随机——这是去重按 sender 隔离、且重载后 seq 归零不撞车的前提。
-- `pwd`：`genPwd()` 6 位 base36，hostCreate 生成；两人进局即作废。回执/URL 自动挑战都校验它。
+- `pwd`：`genPwd()` 6 位 base36（crypto.getRandomValues CSPRNG），hostCreate 生成；两人进局即作废。回执/URL 自动挑战都校验它，且是 G1 编码密钥。
+- 邀请链接时序：hostCreate 后台异步生成 offer，**生成成功前不提供可复制链接**（防发出无 rtc 的废链接）；失败退化为无 rtc 同源链接并如实提示。
 - `gameId`：**客人生成**（guestChallenge），对局 channel 名 `goptop-game-<gameId>`；房主 acceptChallenge/hostAcceptReceipt 时切换过去。观战 channel 同名复用。
 
 ## 6. STUN

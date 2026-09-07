@@ -142,4 +142,34 @@
 
 ## 修复记录
 
-（由修复执行者回填：日期、commit、覆盖的条目编号）
+**2026-09-07 修复轮（原窗口主代理执行）**——覆盖 A1-A8、C1-C3/C5-C8、D2-D5/D7/D9/D10、B1-B4；遗留项见 .agents/TODO.md「审查遗留」。
+
+- **A1** `acceptAnswer` 幂等位移到 setRemoteDescription 成功后置位；catch 内双路径竞态容错（peer.answered / remoteDescription 已设则视为成功）。
+- **A2** `MsgKind.Move` 增加 `by: StoneColor`（协议变更，发送端 handlePlace 带 by；接收端 Place/Pass 按 by 校验行棋方、Resign 按 by 判胜者，注释说明"不得从本地推断"）；无 by 的旧格式消息直接丢弃。
+- **A3 未修**（报告建议单独一轮），列入 TODO。
+- **A4** `finishHostRtc` 改为返回错误文案；`hostAcceptReceipt` 改 async：先 await 受理成功、再推进 phase/pwd/join；peer 缺失显式报错。浏览器验证：坏 token → 弹窗内「回执无法解码」+ 仍 waiting + 弹窗保留；同弹窗贴正确回执 → 进对局且直连建立。
+- **A5** hostCreate 不再先发无 rtc 链接；offer 生成成功才出现邀请链接；失败退化为无 rtc 链接并如实提示「跨设备不可用」。
+- **A6** 客人等待页新增「查看回执」按钮（answerBackUrl 非空即可重开回执弹窗）。
+- **A7** 抽 `closeAllRtcPeers()`（关 rtcPeers/hostRtc/modal 状态），hostCreate/guestChallenge/joinAsSpectator/backHome 入口统一调用。
+- **A8** drain effect：对局中、等待中钥匙不符、guest 等待中收到挑战——一律 `presence.reject` 回拒绝信。
+- **C1** transport 头注释观战行改为「跨设备观战尚未实现」。
+- **C2** CompressionStream 兼容面写实（Chromium 103+/FF 113+/Safari 16.4+，无降级）；错误文案不再误导为线路问题。
+- **C3** BoardSvg「选中」→「悬停」。
+- **C5** protocol.rs RoomTicket 注释去除 iroh Phase 3。
+- **C6** Move 分支 WHY 注释随 A2 重写补齐。
+- **C7** game/board.ts、game/rules.ts、components/Stone.tsx 删除（零引用，git rm）。
+- **C8** 弹窗按钮「受理回执并开局」→「确认回执」；header 常驻「输入回执」（用户拍板三条硬性要求之二落地，自动识别=协议+分派就位）。
+- **B1** protocol.rs/lib.rs 头注释明确：现行协议真源是 `frontend/src/net/transport.ts`，本模块为未接线参考实现。
+- **B2** goptop-transport lib.rs/Cargo.toml 去 iroh 路线残留，标明未接线；src-tauri/p2p.rs 同步。
+- **B3** wasm.rs/commands.rs 注释改实况（前端未调用 WASM/invoke）。
+- **B4** state/gameStore.ts 瘦身为 checkFive 单函数+实况注释（tryPlace/GameState 等零引用且围棋规则残缺，删除）；BrutalCard 注明暂无调用者。
+- **D2** 见 C7/B4。
+- **D3** genPwd 改 crypto.getRandomValues，固定 6 位 base36（36^6 取模）。
+- **D4** parsePastedLink 单段路径收紧：须 u- 前缀或带 pwd/rtc 参数，否则视为普通文本返回 null。浏览器验证裸中文文本被拒。
+- **D5** connectionState 仅 failed 判死，disconnected 留观（可自愈）。
+- **D7** attachPeer onState closed/error 时从 rtcPeersRef 出列。
+- **D9** presence 上报：观战者显示 idle（不占对战席位）。
+- **D10** GameState::new 校验尺寸不变量（Gomoku=15，Go∈{9,13,19}，非法 panic）；cargo test 26 全绿。
+- **D1/D6/D8/D11/C4 未修**，列入 TODO（拆分/监听器累积/notice 竞态/测试/错误枚举）。
+
+验证：`npx tsc --noEmit` 0 错；`npm run build` 成功；`cargo test --workspace` 26 passed；浏览器回归（Playwright 双窗口）：邀请粘贴→直连→落子同步（手数一致）→ by 协议注入测试（旧格式丢弃、Resign 判色正确）→ 坏回执重试闭环 → 裸文本拒识。

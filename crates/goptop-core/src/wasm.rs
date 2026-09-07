@@ -1,7 +1,7 @@
 //! WASM 绑定 — 仅在 `feature = "wasm"` 时编译。
 //!
-//! 为纯 Web 前端（`npm run dev` 不经 Tauri）暴露 `GameState` 的权威规则校验，
-//! 避免在 TS 侧重复实现围棋/五子棋规则。Tauri 模式下前端亦可走 `invoke`，WASM 绑定仅为无 Tauri 时的加速路径。
+//! 设计意图是为纯 Web 前端暴露 `GameState` 的权威规则校验。**当前前端（App.tsx）
+//! 使用 TS 内联规则实现，本模块尚未接线**；接入前两者并存，规则语义须保持一致。
 
 use wasm_bindgen::prelude::*;
 

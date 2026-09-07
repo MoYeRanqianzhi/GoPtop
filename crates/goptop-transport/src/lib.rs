@@ -1,11 +1,12 @@
 #![allow(missing_docs)]
-//! goptop-transport — P2P 传输抽象。
+//! goptop-transport — P2P 传输抽象（**当前无任何调用者，属未接线代码**）。
 //!
-//! - `Transport` trait 统一 `create_room`/`join`/`send`/`recv` 语义，Web WASM 与 Tauri 原生共用。
+//! - `Transport` trait 统一 `create_room`/`join`/`send`/`recv` 语义，预留 Rust 侧复用。
 //! - `memory` 仅用于测试与同页联调（无网络）。
-//! - `iroh` 模块在 Phase 3 引入，封装官方 relay 上的真 P2P（Web 经 relay WS，原生 QUIC+relay 回退）。
 //!
-//! 约束：很长时间内无自建服务器，全程使用 iroh 官方公有 relay（dumb forward，端到端加密）。
+//! 现行传输：前端 TS 的 WebRTC DataChannel（STUN-only，禁中转）+ 同源 BroadcastChannel，
+//! 见 `.agents/docs/p2p-protocol.md`。本 crate 不依赖 iroh；早期"官方 relay"路线已弃，
+//! 引入任何中转都违背项目「无服务器、数据不过第三方」红线（用户拍板，见 .agents/memory/）。
 
 pub mod memory;
 

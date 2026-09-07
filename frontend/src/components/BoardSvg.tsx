@@ -1,6 +1,6 @@
 /**
  * BoardSvg — 棋盘 SVG 组件（Gomoku 15 / Go 9/13/19 通用）
- * 纸面暖黄、粗黑网格、坐标外移防重合、星位实心、棋子纯色无边框无阴影、选中橙色高亮。
+ * 纸面暖黄、粗黑网格、坐标外移防重合、星位实心、棋子纯色无边框无阴影、悬停橙色高亮。
  */
 export type StoneColor = "empty" | "black" | "white";
 export type Coord = { x: number; y: number };

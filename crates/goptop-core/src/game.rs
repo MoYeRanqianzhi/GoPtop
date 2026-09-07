@@ -89,9 +89,18 @@ pub struct GameState {
 
 impl GameState {
     /// 以指定种类创建新对局，黑先。
+    ///
+    /// 尺寸不变量在边界校验：五子棋仅 15，围棋仅 9/13/19。非法组合 panic——
+    /// 这是核心层的内部保证（URL 等外部输入应在反序列化/前端入口先校验），
+    /// 防止"逻辑 9 路 + 物理 19 路盘"的混搭状态悄然通过。
     #[must_use]
     pub fn new(kind: GameKind) -> Self {
         let size = kind.size();
+        let valid = match &kind {
+            GameKind::Gomoku { size } => *size == 15,
+            GameKind::Go { size } => matches!(*size, 9 | 13 | 19),
+        };
+        assert!(valid, "invalid GameKind size combination: {kind:?}");
         Self {
             board: BoardVariant::new(size),
             kind,

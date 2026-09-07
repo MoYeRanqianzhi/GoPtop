@@ -9,8 +9,9 @@
  * - 无 pwd 访问某用户主页则只看到其主页，可手动发起挑战，对方弹窗同意后才进对局。
  * - pwd 只在"已开战但无对手（waiting）"时有效；两人进对局后 pwd 即失效，不存在第三人凭旧 pwd 加入。
  *   建连成功后邀请组件隐藏，转而显示观战链接（`/watch/<game>`）。
- * - 观战：观战者只收 `SyncState`，不可落子；同源观战走同 game channel，
- *   跨设备观战走与主机之间的独立 WebRTC 直连。
+ * - 观战：观战者只收 `SyncState`，不可落子；同源观战走同 game channel。
+ *   跨设备观战**尚未实现**（/watch 链接在别的设备打开收不到棋局）——待办见
+ *   .agents/TODO.md，届时观战者与房主建立独立 WebRTC 直连。
  * - 跨设备信令：用户只传一次邀请链接。offer/answer 编码进邀请 URL 的 `&rtc=` 参数
  *   （同源页面间经 Presence 自动回传）；跨设备时客人把回执链接发给房主，房主在
  *   等待页点「输入回执」粘贴即可——全程弹窗粘贴，不依赖页面导航，Tauri 桌面壳同样可用。
@@ -37,7 +38,9 @@ export type Move =
 
 export type MsgKind =
   | { type: "Hello"; kind: GameKind; size: Size; name?: string }
-  | { type: "Move"; move: Move }
+  // by：发送端声明的执子颜色。接收端（尤其观战者，没有"我的颜色"可用）据此判定，
+  // 不得从本地 toMove/myColor 推断——历史 bug：任何一方认输，观战者都判白胜。
+  | { type: "Move"; move: Move; by: StoneColor }
   | { type: "SyncState"; board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null; history: Coord[]; lastMove: Coord | null; kind: GameKind; size: Size }
   | { type: "SyncRequest" }
   | { type: "Chat"; text: string }
@@ -85,9 +88,12 @@ export function setMyName(n: string) {
   } catch { /* ignore */ }
 }
 
-/** 每局轮换的一次性 pwd（邀请钥匙）。 */
+/** 每局轮换的一次性 pwd（邀请钥匙）。CSPRNG 生成，固定 6 位 base36。
+ *  pwd 同时是信令编码密钥（encodeRtcPayload），必须不可预测且长度稳定。 */
 export function genPwd(): string {
-  return Math.random().toString(36).slice(2, 8);
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return (buf[0] % 2176782336).toString(36).padStart(6, "0"); // 36^6，取模偏差 ~2.7% 可接受
 }
 
 /** 每局轮换的 gameId（观战 channel 后缀）。 */
@@ -313,6 +319,9 @@ export function parsePastedLink(text: string): UrlIntent | null {
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
     if (first === "watch" && second) return { mode: "watch", gameId: decodeURIComponent(second) };
     if (segs.length === 1) {
+      // 收紧识别：单段路径必须像用户链接（用户 ID 均为 u- 前缀，或带 pwd/rtc 邀请参数），
+      // 否则视为普通文本/陌生网址——避免粘贴任意内容被误判成"用户主页"发起挑战。
+      if (!first.startsWith("u-") && !sp.has("pwd") && !sp.has("rtc")) return null;
       const { kind, size } = kindSizeFromParams(sp);
       return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
     }
@@ -323,7 +332,7 @@ export function parsePastedLink(text: string): UrlIntent | null {
 }
 
 /** 从粘贴的任意 URL 中提取房主回执参数（hostId + pwd + rtcAns + game/kind/size），与域名无关。 */
-export function parsePastedAnswer(text: string): { hostId: string; pwd: string; rtcAns: string; gameId: string | null; kind: GameKind | null; size: Size | null } | null {
+export function parsePastedAnswer(text: string): { hostId: string; pwd: string; rtcAns: string; spectator: boolean; gameId: string | null; kind: GameKind | null; size: Size | null } | null {
   try {
     const raw = text.trim();
     if (!raw) return null;
@@ -339,6 +348,8 @@ export function parsePastedAnswer(text: string): { hostId: string; pwd: string; 
       hostId: decodeURIComponent(segs[0]),
       pwd: url.searchParams.get("pwd") ?? "",
       rtcAns,
+      // spec=1 标记观战回执（回执类型由链接属性自动判断，用户拍板）；对局回执不带
+      spectator: url.searchParams.get("spec") === "1",
       gameId: url.searchParams.get("game"),
       kind: kindRaw === "go" || kindRaw === "gomoku" ? kindRaw : null,
       size: ([9, 13, 15, 19] as number[]).includes(sizeRaw) ? (sizeRaw as Size) : null,
@@ -599,8 +610,10 @@ export class GameChannel {
 /* ---------------- 跨设备直连（WebRTC DataChannel，STUN-only，禁用 TURN 中转） ---------------- */
 
 /* offer/answer 的 URL 编码：压缩 + pwd 派生 XOR + URL 安全 base64。
- * - 压缩：`CompressionStream("deflate-raw")`（现代内核原生支持，含 Tauri WebView2），
- *   SDP 是高度重复的文本，deflate 压缩比可观，链接显著变短。
+ * - 压缩：`CompressionStream("deflate-raw")`，SDP 是高度重复的文本，压缩比可观，
+ *   链接显著变短。兼容面：Chromium 103+ / Firefox 113+ / Safari 16.4+ / Tauri
+ *   WebView2（Chromium）均可用；**无降级路径**——极旧内核会在 encode/decode 抛错，
+ *   上层以「直连建立失败」提示（不误报为线路问题）。
  * - 加密：与本局钥匙 pwd 派生的密钥流逐字节 XOR——链接里不再出现可读 SDP
  *   （SDP 含本机 IP 候选）。这是混淆级而非密码学级（pwd 本就在同一链接里）；
  *   真正的传输安全由 WebRTC 自带的 DTLS 端到端加密保证，此层只为不裸奔。
@@ -710,8 +723,10 @@ export class DirectRtcPeer {
   onState: ((s: RtcState) => void) | null = null;
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
-  /** 回执可能同时经弹窗与 Presence 两条路径到达：answer 只允许应用一次。 */
-  private answered = false;
+  /** answer 是否已成功应用（setRemoteDescription 成功后才置位）。
+   *  回执可能经弹窗与 Presence 双路径到达，本位防重复应用；App 层也读它判断
+   *  「失败是否真的失败」（另一路径成功时 catch 不算失败）。 */
+  answered = false;
   private static all = new Set<DirectRtcPeer>();
 
   constructor(opts: { isHost: boolean; role: "player" | "spectator" }) {
@@ -735,7 +750,8 @@ export class DirectRtcPeer {
     pc.onconnectionstatechange = () => {
       const st = pc.connectionState;
       if (st === "connected") this.setState("open");
-      else if (st === "failed" || st === "disconnected") this.setState("error");
+      // disconnected 常可自愈（网络抖动、ICE 切换候选），不判死；真断会转 failed
+      else if (st === "failed") this.setState("error");
       else if (st === "closed") this.setState("closed");
     };
     this.pc = pc;
@@ -813,13 +829,20 @@ export class DirectRtcPeer {
     return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
   }
 
-  /** 房主：用客人回传的 answer 完成直连（同源经 Presence 自动回传；跨设备由弹窗粘贴回执触发）。 */
+  /** 房主：用客人回传的 answer 完成直连（同源经 Presence 自动回传；跨设备由弹窗粘贴回执触发）。
+   *  幂等位在「应用成功」后才置位：坏回执解码失败不锁死，房主可再贴正确回执。 */
   async acceptAnswer(token: string, pwd: string): Promise<void> {
     if (!this.pc) throw new Error("no pending offer");
     if (this.answered) return;
-    this.answered = true;
     const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType };
-    await this.pc.setRemoteDescription({ type: payload.t, sdp: payload.s });
+    try {
+      await this.pc.setRemoteDescription({ type: payload.t, sdp: payload.s });
+      this.answered = true;
+    } catch (err) {
+      // 双路径竞态：另一路径（Presence/弹窗）可能已成功应用同一 answer
+      if (this.answered || this.pc.remoteDescription) return;
+      throw err;
+    }
   }
 
   send(msg: GameMsg) {

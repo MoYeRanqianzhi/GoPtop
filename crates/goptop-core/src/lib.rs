@@ -5,8 +5,11 @@
 //! - `gomoku` — 五子棋规则（五连判定等）。
 //! - `go`     — 围棋规则（落子、提子、气等，最小可玩子集先行）。
 //! - `game`   — 统一的 `GameState`/`GameKind`/`Move` 状态机，屏蔽 Gomoku/Go 差异。
-//! - `protocol` — 联机消息 `GameMsg`（serde），端到端明文，外层由 iroh 端到端加密。
+//! - `protocol` — 联机消息 `GameMsg`（serde）参考实现。**注意：现行联机协议的
+//!   唯一真源是前端 `frontend/src/net/transport.ts`**（TS 线格式含 sender/userId/
+//!   SyncState 等，与本模块不同）；本模块尚未接线，对接 Rust 传输前须先对齐。
 //! - `wasm`   — 仅在 `feature = "wasm"` 时编译，为纯 Web 前端暴露 `wasm-bindgen` 绑定。
+//!   **前端当前使用 TS 内联规则实现，WASM 尚未接线**。
 //!
 //! 设计约束：
 //! - 本 crate 不依赖任何平台/网络/前端库，可在原生、Tauri、WASM 三端复用。
