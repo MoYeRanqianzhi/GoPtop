@@ -162,7 +162,7 @@ export function BoardPanel(props: {
   const rulesBody = (
     <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
       {kind === "gomoku" ? (
-        <><li style={ruleLine}>黑先，双方轮流落子。</li><li style={ruleLine}>落子于交叉点，已有棋子处不可落子。</li><li style={ruleLine}>任意一方五子连珠（横/竖/斜）即获胜。</li></>
+        <><li style={ruleLine}>黑先，双方轮流落子。</li><li style={ruleLine}>落子于交叉点，已有棋子处不可落子。</li><li style={ruleLine}>任意一方五子连珠即获胜。</li></>
       ) : (
         <><li style={ruleLine}>黑先，双方轮流落子。</li><li style={ruleLine}>落子于交叉点，同点不可重复落子。</li><li style={ruleLine}>无气的棋子被提掉；禁自杀。</li></>
       )}

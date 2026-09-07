@@ -536,7 +536,7 @@ export default function App() {
            （brutal.css），stack 宽度跟随棋盘可用高度缩放，视口宽时 stack 也可能很窄，
            媒体查询看不到这种「显示不下」。阈值以下宽卡放不下 → 收起显示 swap 卡 */
         .bp-swap { display: none; }
-        @container (max-width: 560px) {
+        @container (max-width: 520px) {
           .bp-wide { display: none !important; }
           .bp-swap { display: flex !important; }
         }
