@@ -846,9 +846,9 @@ export function useGameSession() {
 
   const p2pStatusText = useMemo(() => {
     if (phase === "home") return role === "spectator" ? "观战中" : "主页 · 选择对手或等待被挑战";
-    if (phase === "waiting") return `等待对手 · 你是${myColor === "black" ? "黑" : "白"}`;
-    if (!peerConnected) return `连接中 · 你是${myColor === "black" ? "黑" : "白"}`;
-    return `已直连 · 你是${myColor === "black" ? "黑" : "白"}${role === "spectator" ? "（观战）" : toMove === myColor ? " · 轮到你" : " · 等待对手"}`;
+    if (phase === "waiting") return `等待对手 · 执${myColor === "black" ? "黑" : "白"}`;
+    if (!peerConnected) return `连接中 · 执${myColor === "black" ? "黑" : "白"}`;
+    return `已直连 · 执${myColor === "black" ? "黑" : "白"}${role === "spectator" ? "（观战）" : toMove === myColor ? " · 轮到你" : " · 等待对手"}`;
   }, [phase, role, peerConnected, myColor, toMove]);
 
   const boardDisabled = useMemo(() => {

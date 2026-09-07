@@ -154,13 +154,47 @@ export function BoardPanel(props: {
   actions?: ReactNode;
 }) {
   const { kind, size, board, toMove, winner, lastMove, hover, onHover, disabled, onPlace } = props;
+  /* 底部三卡（2026-09-07 用户拍板）：宽时「规则」「对局」并排；显示不下时两宽卡收起，
+     显示第三个组件 .bp-swap——独立完整的一张卡，标题/底色/内容随 bottomTab 真切换，
+     默认「对局」。判定用容器查询（跟随 stack 实际宽度，视口宽≠stack 宽） */
+  const [bottomTab, setBottomTab] = useState<"game" | "rules">("game");
+  const ruleLine = { whiteSpace: "nowrap" } as const;
+  const rulesBody = (
+    <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
+      {kind === "gomoku" ? (
+        <><li style={ruleLine}>黑先，双方轮流落子。</li><li style={ruleLine}>落子于交叉点，已有棋子处不可落子。</li><li style={ruleLine}>任意一方五子连珠（横/竖/斜）即获胜。</li></>
+      ) : (
+        <><li style={ruleLine}>黑先，双方轮流落子。</li><li style={ruleLine}>落子于交叉点，同点不可重复落子。</li><li style={ruleLine}>无气的棋子被提掉；禁自杀。</li></>
+      )}
+    </ul>
+  );
+  const gameBody = (
+    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ color: "var(--muted)" }}>手数</span>
+        <span style={{ fontFamily: "var(--font-mono)" }}>{props.moveCount}</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ color: "var(--muted)" }}>轮到</span>
+        <span style={{ fontFamily: "var(--font-mono)" }}>{winner ? "—" : toMove === "black" ? "黑" : "白"}</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ color: "var(--muted)" }}>棋盘</span>
+        <span style={{ fontFamily: "var(--font-mono)" }}>{size}×{size}</span>
+      </div>
+      {winner && (
+        <div style={{ marginTop: 4, padding: "6px 8px", border: "2px solid var(--ink)", background: "var(--bg-2)", color: "#fff", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, textAlign: "center" }}>
+          {winner === "black" ? "黑" : "白"} 胜 — 点击重开开始新对局
+        </div>
+      )}
+    </div>
+  );
   return (
     <>
       <div className="brutal-card" style={{ flexShrink: 0, width: "100%", maxWidth: "100%", padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: winner ? "var(--bg-2)" : "#fff", color: winner ? "#fff" : "var(--ink)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span style={{ width: 16, height: 16, borderRadius: 999, background: winner ? (winner === "black" ? "#0A0A0A" : "#fff") : toMove === "black" ? "#0A0A0A" : "#fff", border: winner === "white" ? "2px solid var(--ink)" : winner ? "2px solid #fff" : "2px solid var(--ink)", display: "inline-block", flexShrink: 0 }} />
           <span className="brutal-title" style={{ fontSize: 18, letterSpacing: "0.04em" }}>{props.statusText}</span>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, opacity: 0.9 }}>手数 {props.moveCount}</span>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", opacity: 0.6 }}>
             {props.statusNote}
           </span>
@@ -176,38 +210,34 @@ export function BoardPanel(props: {
         <BoardSvg size={size} board={board} onPlace={onPlace} lastMove={lastMove} hover={hover} onHover={onHover} disabled={disabled} kind={kind} />
       </div>
 
-      <div style={{ flexShrink: 0, width: "100%", maxWidth: "100%", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }} className="bottom-grid">
-        <div className="brutal-card brutal-card--paper" style={{ padding: 14 }}>
+      {/* 底部（用户拍板 2026-09-07）：宽时「规则/对局」两张原卡并排；显示不下时两卡都收起，
+          显示第三个组件 .bp-swap——它是独立完整的一张卡，可在「对局/规则」间真切换
+          （标题、底色、内容全套跟随），默认显示对局；规则每条独占一行（ruleLine） */}
+      <div style={{ flexShrink: 0, width: "100%", maxWidth: "100%", display: "flex", gap: 12, alignItems: "stretch" }}>
+        <div className="brutal-card brutal-card--paper bp-wide" style={{ flex: "1 1 0", minWidth: 0, padding: 14 }}>
           <div className="brutal-label">规则</div>
-          <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
-            {kind === "gomoku" ? (
-              <><li>黑先，轮流落子，先连五者胜。</li><li>落子于交点，已有棋子处不可落子。</li><li>胜负以最后一手的四方向连珠判定。</li></>
-            ) : (
-              <><li>黑先，轮流落子于交点。</li><li>同点不可重复落子。</li><li>提子、禁自杀、终局数目为后续版本（见 docs/已知限制与路线图.md）。</li></>
-            )}
-          </ul>
+          {rulesBody}
         </div>
-        <div className="brutal-card" style={{ padding: 14, background: "#fff" }}>
+        <div className="brutal-card bp-wide" style={{ flex: "1 1 0", minWidth: 0, padding: 14, background: "#fff" }}>
           <div className="brutal-label">对局</div>
-          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ color: "var(--muted)" }}>手数</span>
-              <span style={{ fontFamily: "var(--font-mono)" }}>{props.moveCount}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ color: "var(--muted)" }}>轮到</span>
-              <span style={{ fontFamily: "var(--font-mono)" }}>{winner ? "—" : toMove === "black" ? "黑" : "白"}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ color: "var(--muted)" }}>棋盘</span>
-              <span style={{ fontFamily: "var(--font-mono)" }}>{size}×{size}</span>
-            </div>
-            {winner && (
-              <div style={{ marginTop: 4, padding: "6px 8px", border: "2px solid var(--ink)", background: "var(--bg-2)", color: "#fff", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, textAlign: "center" }}>
-                {winner === "black" ? "黑" : "白"} 胜 — 点击重开开始新对局
-              </div>
-            )}
+          {gameBody}
+        </div>
+        <div
+          className={`brutal-card bp-swap${bottomTab === "rules" ? " brutal-card--paper" : ""}`}
+          style={{ flex: 1, minWidth: 0, padding: 14, background: bottomTab === "game" ? "#fff" : undefined, display: "none", flexDirection: "column" }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <div className="brutal-label">{bottomTab === "game" ? "对局" : "规则"}</div>
+            <button
+              className="brutal-btn brutal-btn--sm"
+              style={{ padding: "3px 8px", fontSize: 11, lineHeight: 1.2 }}
+              onClick={() => setBottomTab((t) => (t === "game" ? "rules" : "game"))}
+              title="在对局 / 规则之间切换"
+            >
+              ⇄ {bottomTab === "game" ? "规则" : "对局"}
+            </button>
           </div>
+          {bottomTab === "game" ? gameBody : rulesBody}
         </div>
       </div>
     </>

@@ -3,7 +3,7 @@
  * 复用组件在 pages/components.tsx，本地对战页在 pages/LocalPage.tsx，
  * 棋盘规则在 game/board.ts。本文件只做 header、页面拼装与 footer。
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useGameSession } from "./state/useGameSession";
 import { nav } from "./net/transport";
 import type { Size } from "./net/transport";
@@ -11,6 +11,43 @@ import { BoardPanel, PeerList, StunSettings } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
 export default function App() {
   const [typeOpen, setTypeOpen] = useState(false);
+  const mainRef = useRef<HTMLElement | null>(null);
+
+  /* 等宽同步缩放（Phase 2 设计的实测版）：board-wrap 以 flex 吃掉剩余高度，
+     其 clientHeight 就是棋盘可用边长——把它写成 --stack-max 限住整组宽度，
+     棋盘（min(100cqw,100cqh)）恰好占满宽度，上下卡片与棋盘永远左右对齐。
+     取代旧公式 calc(100dvh - 360px)：那是按当时 chrome 估的死数，卡片加高后失准。 */
+  useEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    let last = 0;
+    let armed = true;
+    let watched: Element | null = null;
+    const compute = () => {
+      const boardWrap = main.querySelector<HTMLElement>(".board-wrap");
+      if (!boardWrap) {
+        if (watched) { ro.disconnect(); watched = null; }
+        main.style.setProperty("--stack-max", "720px");
+        return;
+      }
+      if (watched !== boardWrap) { ro.disconnect(); ro.observe(main); ro.observe(boardWrap); watched = boardWrap; }
+      if (!armed) return;
+      armed = false;
+      requestAnimationFrame(() => {
+        armed = true;
+        const next = Math.max(220, Math.floor(boardWrap.clientHeight));
+        if (Math.abs(next - last) < 4) return;
+        last = next;
+        main.style.setProperty("--stack-max", `${next}px`);
+      });
+    };
+    const ro = new ResizeObserver(() => compute());
+    const mo = new MutationObserver(() => compute());
+    mo.observe(main, { childList: true, subtree: true });
+    compute();
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, []);
+
   const {
     kind, size, board, toMove, winner, lastMove, hover, history,
     intent, tabUser, name, peers, role, phase, myColor, peerConnected,
@@ -154,7 +191,7 @@ export default function App() {
         </div>
       </header>
 
-      <main style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: 760, margin: "0 auto", overflow: "hidden" }}>
+      <main ref={mainRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: 760, margin: "0 auto", overflow: "hidden" }}>
         <div className="play-stack">
           {incomingBanner}
 
@@ -215,20 +252,15 @@ export default function App() {
           {mode === "p2p" && phase === "waiting" && (
             <>
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                <span className="brutal-label">等待对手 · 邀请</span>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>{p2pStatusText}</span>
-              </div>
               {role === "inviter" && inviteUrl ? (
                 <>
-                  <code style={{ border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inviteUrl}</code>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(inviteUrl, "邀请链接已复制")}>复制邀请链接</button>
-                    <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>输入回执</button>
-                    <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消等待</button>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <code style={{ flex: 1, minWidth: 0, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inviteUrl}</code>
+                    <button className="brutal-btn brutal-btn--sm" style={{ flexShrink: 0 }} onClick={() => copyText(inviteUrl, "邀请链接已复制")}>复制</button>
+                    <button className="brutal-btn brutal-btn--sm brutal-btn--accent" style={{ flexShrink: 0 }} onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>回执</button>
+                    <button className="brutal-btn brutal-btn--sm" style={{ flexShrink: 0 }} onClick={backHome}>取消</button>
                     {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
                   </div>
-                  {rtcStatus}
                 </>
               ) : role === "inviter" ? (
                 /* offer 生成中/失败：不给链接可复制（防发出无 rtc 的废链接，审查 A5） */
@@ -237,7 +269,6 @@ export default function App() {
                   <div style={{ display: "flex", gap: 8 }}>
                     <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消</button>
                   </div>
-                  {rtcStatus}
                 </>
               ) : (
                 <>
@@ -259,7 +290,7 @@ export default function App() {
                 kind={kind} size={size} board={board} toMove={toMove} winner={winner}
                 lastMove={lastMove} hover={hover} onHover={setHover}
                 disabled onPlace={() => undefined}
-                statusText="等待对手加入…" statusNote={`联机 · 你是${myColor === "black" ? "黑" : "白"}`}
+                statusText="等待对手加入…" statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
                 moveCount={moveCount} history={history}
                 onUndo={null} onReset={() => undefined}
               />
@@ -288,7 +319,7 @@ export default function App() {
                 kind={kind} size={size} board={board} toMove={toMove} winner={winner}
                 lastMove={lastMove} hover={hover} onHover={setHover}
                 disabled={boardDisabled} onPlace={handlePlace}
-                statusText={statusText} statusNote={`联机 · ${myColor === "black" ? "你执黑" : "你执白"}`}
+                statusText={statusText} statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
                 moveCount={moveCount} history={history}
                 onUndo={null} onReset={reset}
                 actions={watchUrl
@@ -454,7 +485,7 @@ export default function App() {
                 lastMove={lastMove} hover={hover} onHover={setHover}
                 disabled={phase === "waiting" ? true : boardDisabled} onPlace={phase === "waiting" ? () => undefined : handlePlace}
                 statusText={phase === "waiting" ? "等待对手加入…" : statusText}
-                statusNote={phase === "waiting" ? `联机 · 你是${myColor === "black" ? "黑" : "白"}` : `联机 · ${myColor === "black" ? "你执黑" : "你执白"}`}
+                statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
                 moveCount={moveCount} history={history}
                 onUndo={null} onReset={phase === "waiting" ? () => undefined : reset}
               />
@@ -491,16 +522,27 @@ export default function App() {
       </main>
 
       <style>{`
-        @media (max-width: 640px) {
-          .bottom-grid { grid-template-columns: 1fr !important; }
-        }
-        /* header 三级降级（手机端致命挤压）：先隐徽章，再隐标题，最后把对局设置收进「类型」按钮 */
-        @media (max-width: 820px) { .hp-badge { display: none; } }
-        @media (max-width: 660px) { .hp-title { display: none; } }
-        @media (max-width: 420px) {
+        /* bottom-grid 列数已由 minmax(auto-fit) 自适应，窄屏自动单列，旧 640px 断点删除 */
+        /* header 三级降级（手机端致命挤压）：先隐徽章，再隐标题，最后把对局设置收进「类型」按钮。
+           阈值按实测单行自然宽度定（含 padding：围棋全量 677 / 隐徽章后 572 / 收起后 332，取最宽模式 +10px 字体余量） */
+        @media (max-width: 687px) { .hp-badge { display: none; } }
+        @media (max-width: 582px) { .hp-title { display: none; } }
+        @media (max-width: 342px) {
           .hp-setup { display: none !important; }
           .hp-type-btn { display: inline-block; }
           header { padding: 8px 10px !important; }
+        }
+        /* 底部三卡切换（用户拍板 2026-09-07）：判定用容器查询——.play-stack 是容器
+           （brutal.css），stack 宽度跟随棋盘可用高度缩放，视口宽时 stack 也可能很窄，
+           媒体查询看不到这种「显示不下」。600px：宽卡并排放不下 → 收起显示 swap 卡 */
+        /* 底部三卡切换：600px（stack 实宽）以下宽卡放不下 → 收起显示 swap 卡 */
+        .bp-swap { display: none; }
+        @container (max-width: 600px) {
+          .bp-wide { display: none !important; }
+          .bp-swap { display: flex !important; }
+        }
+        @container (max-width: 300px) {
+          .bp-swap { padding: 10px !important; }
         }
       `}</style>
 
