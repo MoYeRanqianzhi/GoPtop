@@ -87,29 +87,36 @@ footer,
   background-size: 18px 18px;
 }
 
-/* 核心：整组等宽同步缩放 — play-stack 是唯一宽度锚点，其宽度同时受视口宽度和视口高度限制 */
+/* 核心：整组等宽同步缩放 — play-stack 是唯一宽度锚点，其宽度受视口宽度限制，
+   高度撑满 main（溢出安全居中），剩余垂直空间全部交给棋盘（见 .board-wrap） */
 .play-stack {
-  width: min(720px, 92vw, calc(100dvh - 360px), calc(100vh - 360px));
+  width: min(720px, 92vw);
   max-width: 92vw;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: clamp(8px, 1.4vh, 14px);
   flex: 0 1 auto;
   min-height: 0;
   align-items: stretch;
+  justify-content: safe center;
 }
 
-/* 棋盘：占满 play-stack 宽度，保持 1:1 正方形，保证与上下卡片左右边线对齐 */
+/* 棋盘：吃 play-stack 剩余高度，正方形取「可用宽 × 可用高」的较小者——
+   任何视口下棋盘完整、底部组件永不溢出（旧的 calc(100dvh-360px) 预留法
+   在页面 chrome 变高后失准，是底部被裁的根因） */
 .board-wrap {
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  flex-shrink: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  container-type: size;
 }
 .board-wrap > .brutal-card {
-  width: 100%;
+  width: min(100cqw, 100cqh);
   aspect-ratio: 1 / 1;
   height: auto;
   max-width: 100%;
