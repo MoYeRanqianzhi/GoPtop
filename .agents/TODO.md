@@ -34,6 +34,8 @@
 
 ## 下一步候选（未获指令，不动工）
 
+- **R2 残留（R2a/R2b，修复轮审查新发现，低）**：acceptReceipt 守卫补 `pwdRef.current !== r.pwd` 对比（防取消后同阶段开新局被骗过）；createInvite catch 分支补同款三重守卫（成功路径已有）。合计 ~6 行，见 review/2026-09-07-fix-round-review.md「修复记录审查」。
+
 - **D8 后续（可选）**：App.tsx 剩余 544 行中的页面拼装（menu/p2p/users/settings/user/watch JSX）可再拆 pages/*.tsx——纯机械移动，收益是文件更小，无行为面。
 - **D11 扩展（可选）**：useGameSession 状态机尚未有测试（需 renderHook 或拆纯函数）；DirectRtcPeer 集成路径未测（需真实 ICE）。
 - Cloudflare Pages 真实上线（用户预告过，未明确下令）。

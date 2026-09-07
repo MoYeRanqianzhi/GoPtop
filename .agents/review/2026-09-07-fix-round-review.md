@@ -97,3 +97,25 @@ R1/R2 建议下一轮立即修（各 ~10 分钟改动）；R3-R5 属注释/文�
 - **R6** genPwd 注释改为实测数字：36^6 与 2^32 偏差桶 2118184960/2^32（单值概率绝对差 ~2.3e-10）。审查报告给的 ~1.4% 与原注释 ~2.7% 均不准——正确口径是「低段值出现 2 次、其余 1 次」的分布差，对 6 位钥匙无实际影响。
 - 验证链：tsc 0 错、vitest 30/30、vite build 成功、Playwright 双窗口跨设备回执全流程（presence 屏蔽模拟跨设备）+ 落子同步。
 - R3 修复时发现 showNotice 内部 setTimeout 回调曾被批量替换成递归 showNotice(null)——行为等价但已改回直调 setNotice(null)（定义体内不受单入口约束）。
+
+## 修复记录审查（2026-09-07，审查人：主代理，commit 1c37671）
+
+### 逐项核实（不信任宣称，对照 diff 与代码）
+
+- **R1 ✓** `state/gameStore.ts` 已删（`frontend/src/state/` 仅剩 useGameSession.tsx）；architecture.md 死代码节改为「gameStore.ts 已删除」；game/board.ts 保留的历史教训注释（提及 gameStore 属历史引用，合理）。三方矛盾消除。
+- **R2 ✓（守卫已加，但模式不彻底，残留 R2a/R2b，见下）**
+- **R3 ✓** 两处 `setNotice(null)` → `showNotice(null)`；showNotice 定义体内 setTimeout 回调为直调 `setNotice(null)`——正确（定义体内清除是 timer 管理自身的一部分，若递归 showNotice(null) 反而多一次 clearTimeout）。全库 now 无绕过单入口的调用点。
+- **R4 ✓** components.tsx 头注释改「两刀完成后…已抽到 state/useGameSession.tsx」；App.tsx 头注释补 `.tsx` 后缀。
+- **R5 ✓** transport.ts:219 `<inviterId>`；p2p-protocol.md 邀请/回执两行 `<inviterId>`；test.ts 夹具 `u-inviter01`。grep 复核无残留（ICE host 候选按拍板保留）。
+- **R6 ✓** 注释改「低段 2118184960 个值出现 2 次、其余 1 次，单值概率绝对差 ~2.3e-10」。复核数字：2118184960 = 2^32 − 36^6 ✓；1/2^32 ≈ 2.33e-10 ✓。比我报告的 ~1.36% 口径（受影响值占比）更精确，正确。
+
+### R2 残留（同类竞态守卫不彻底，均为极窄窗口，低严重度）
+
+- **R2a（低）** `useGameSession.tsx:539` 守卫只查 `phase/role`：`if (phaseRef.current !== "waiting" || roleRef.current !== "inviter") return null;`。若 await 期间用户**取消并在续体执行前开了新局**（新局同样 waiting+inviter），守卫被新局骗过——旧回执续体将 join 旧 gameId、置 playing、清掉新局 pwd。createInvite 守卫（:422-425）已用 `pwdRef.current !== p` 三重校验，acceptReceipt 缺对称的 `pwdRef.current !== r.pwd`。**修：一行补 pwd 对比即可**（入口已校验 r.pwd==pwdRef，await 后它只可能被 backHome 清 null 或换新局，两种都该拒）。
+- **R2b（低）** createInvite 的 **catch 分支无守卫**：offer 生成失败（典型：CompressionStream 缺失 + waitGathering 走满 8s 超时）时，await 间隙取消后 catch 仍会写 `setInviteUrl(无rtc)` + `setDirectState("error")` + showNotice(「已生成同源链接…」)——写到主页/新局上的脏 state 与误导 notice。成功路径已有守卫，catch 路径漏对称处理。**修：catch 内加同款三重校验（含 pwdRef.current !== p），不满足则静默放弃。**
+
+两处合计约 6 行改动，建议随下一轮顺手修；不阻塞当前状态。
+
+### 验证链（本审查实测）
+
+tsc 0 错、vitest 30/30、cargo test 26/26、vite build 成功（258.54 kB）。浏览器 E2E 未复跑（原窗口已验证 R2 跨设备回执全流程）。
