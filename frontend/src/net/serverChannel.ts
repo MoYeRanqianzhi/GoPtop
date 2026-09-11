@@ -1,18 +1,17 @@
 /**
  * net/serverChannel — 信令服务器客户端（可选模式）。
  *
- * 与 Rust 服务器（crates/goptop-server）的 WebSocket 协议对接：
- * - 注册（hello→welcome，服务器分配 s- 短 ID）+ 25s 心跳（低于 CF 代理 100s 空闲阈值）
+ * 与 Rust 服务器（crates/goptop-server）的 WebSocket 协议对接。服务器是纯转发管道：
+ * - hello→welcome（服务器分配 s- 短 ID）+ 25s 心跳（低于 CF 代理 100s 空闲阈值）
  * - 在线名册（peers 全量广播）
- * - 短码邀请/观战（invite-create/resolve、watch-create/resolve）
- * - SDP 与 trickle ICE 转发（offer/answer/ice）
- * - 数据兜底中转（relay）——P2P 未建立时对局消息走这里，与直连双发按 (sender,seq) 去重
+ * - `signal`：任意点对点信令原样转发（服务器不解析不存储）——邀请 offer/answer/ice、
+ *   观战 join/offer/answer、大厅挑战、观战房间控制全走这里，语义由 useGameSession 解释
+ * - `relay`：数据兜底中转（P2P 未建立时对局消息走这里，与直连双发按 sender+seq 去重）
  *
  * 断线自动重连（指数退避封顶 10s）；重连成功后自动重放当前名册状态。
- * 不做消息持久化：服务器内存态、连接断即清（与服务器端约定一致）。
  */
-import type { GameKind, GameMsg, Size } from "./transport";
-import { BUILTIN_SERVERS, loadServerSelection, loadServers } from "./transport";
+import type { GameMsg } from "./transport";
+import { BUILTIN_SERVERS, loadServerSelection, loadServers, myUserId } from "./transport";
 
 export type ServerState = "off" | "connecting" | "ready" | "error";
 
@@ -22,17 +21,7 @@ export type ServerEvent =
   | { t: "state"; s: ServerState; detail?: string }
   | { t: "welcome"; id: string }
   | { t: "peers"; users: ServerUserInfo[] }
-  | { t: "invite-created"; code: string }
-  | { t: "invite-offer"; code: string; kind: GameKind; size: Size; offer: string; gameId: string; from: string; fromName: string }
-  | { t: "invitee-joined"; code: string; from: string }
-  | { t: "answer"; from: string; gameId: string; answer: string }
-  | { t: "offer"; from: string; gameId: string; role: string; offer: string }
-  | { t: "ice"; from: string; gameId: string; candidate: string }
-  | { t: "watch-created"; code: string }
-  | { t: "watch-accepted"; code: string; from: string; gameId: string }
-  | { t: "spectator-joined"; code: string; from: string }
-  | { t: "challenge"; from: string; kind: GameKind; size: Size; code: string; pwd: string }
-  | { t: "challenge-rejected"; from: string }
+  | { t: "signal"; from: string; kind: string; payload: Record<string, unknown> }
   | { t: "relayed"; from: string; payload: GameMsg }
   | { t: "error"; msg: string };
 
@@ -89,13 +78,16 @@ export class ServerChannel {
     }
     this.ws = ws;
     ws.onopen = () => {
-      ws.send(JSON.stringify({ t: "hello", name: this.displayName() }));
+      // 注册名册 ID：与邀请链接的 userId 一致（对端凭 URL 找人），重连同 ID 顶替旧连接。
+      // 注意服务器字段是 camelCase（rename_all_fields）。
+      ws.send(JSON.stringify({ t: "hello", name: this.displayName(), userId: myUserId() }));
       // 心跳：25s（CF 代理 WebSocket 空闲上限 100s，必须低于它）
       this.pingTimer = window.setInterval(() => {
         try { ws.send(JSON.stringify({ t: "ping" })); } catch { /* ignore */ }
       }, PING_MS);
     };
     ws.onmessage = (ev) => {
+      if (import.meta.env.DEV) console.log("[server<<]", String(ev.data).slice(0, 160));
       let m: ServerEvent | { t: string } | null = null;
       try { m = JSON.parse(String(ev.data)); } catch { return; }
       if (!m || typeof m.t !== "string") return;
@@ -176,42 +168,10 @@ export class ServerChannel {
     this.send({ t: "announce", status, gameId });
   }
 
-  /** 建短码邀请：kind/size/pwd/offer 存服务器换短码。 */
-  inviteCreate(kind: GameKind, size: Size, pwd: string, offer: string, gameId: string) {
-    this.send({ t: "invite-create", kind, size, pwd, offer, gameId });
-  }
-
-  inviteResolve(code: string, pwd: string) {
-    this.send({ t: "invite-resolve", code, pwd });
-  }
-
-  answer(to: string, gameId: string, answer: string) {
-    this.send({ t: "answer", to, gameId, answer });
-  }
-
-  offer(to: string, gameId: string, role: "player" | "spectator", offer: string) {
-    this.send({ t: "offer", to, gameId, role, offer });
-  }
-
-  ice(to: string, gameId: string, candidate: string) {
-    this.send({ t: "ice", to, gameId, candidate });
-  }
-
-  watchCreate(gameId: string) {
-    this.send({ t: "watch-create", gameId });
-  }
-
-  watchResolve(code: string) {
-    this.send({ t: "watch-resolve", code });
-  }
-
-  /** 大厅挑战：先建短码邀请，再把 code/pwd 随挑战信发给对方（对方同意后 resolve）。 */
-  challenge(to: string, kind: GameKind, size: Size, code: string, pwd: string) {
-    this.send({ t: "challenge", to, kind, size, code, pwd });
-  }
-
-  challengeReject(to: string) {
-    this.send({ t: "challenge-reject", to });
+  /** 通用点对点信令：kind 标注语义，payload 原样转发（服务器不解析不存储）。 */
+  signal(to: string, kind: string, payload: Record<string, unknown>) {
+    if (import.meta.env.DEV) console.log("[signal>>out]", to, kind);
+    this.send({ t: "signal", to, kind, payload });
   }
 
   /** 数据兜底中转：把一条 GameMsg 转给指定对端。 */

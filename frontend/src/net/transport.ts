@@ -47,8 +47,19 @@ export type MsgKind =
   | { type: "Ping" }
   | { type: "Pong" }
   | { type: "Reset"; kind: GameKind; size: Size }
+  // —— 协商类：请求 → 对方弹窗 → Ack；同意后双方各自执行确定性操作，
+  //    并补发 SyncState 让观战者对齐（协商消息观战者只忽略不应用）——
   | { type: "UndoReq" }
-  | { type: "UndoAck"; ok: boolean };
+  | { type: "UndoAck"; ok: boolean }
+  | { type: "ResetReq" }
+  | { type: "ResetAck"; ok: boolean }
+  | { type: "SwapReq" }
+  | { type: "SwapAck"; ok: boolean }
+  // 头像：圆形裁剪后的 dataURL（≤128px jpeg，几 KB），走 P2P 不经服务器
+  | { type: "Avatar"; dataUrl: string }
+  // 观战房间控制（房主 → 某观战者的定向信令，不经广播）：
+  // mute/unmute 禁言、kick 踢出、chat-approve/chat-reject 观战聊天申请的批复
+  | { type: "Ctl"; action: "mute" | "unmute" | "kick" | "chat-approve" | "chat-reject" };
 
 export type GameMsg = {
   seq: number;
@@ -186,12 +197,11 @@ export type UrlIntent =
   | { mode: "p2p" }
   | { mode: "users" }
   | { mode: "settings" }
-  | { mode: "user"; userId: string; pwd: string | null; kind: GameKind; size: Size; rtc: string | null }
-  | { mode: "watch"; gameId: string }
-  /** 服务器短码邀请：`/j/<code>?pwd=` ——点开即连（免回执，需选中同一台服务器） */
-  | { mode: "join"; code: string; pwd: string | null }
-  /** 服务器短码观战：`/s/<code>` ——点开即看 */
-  | { mode: "spectate"; code: string };
+  /** 用户主页/邀请/观战链接。`spec=1` 表示观战（pwd 为观战钥匙，整局有效）；
+   *  `rtc` 为无服务器跨设备信令（加密 offer）；服务器模式不带 rtc，pwd 经服务器
+   *  交互校验（错误转弹窗询问）。 */
+  | { mode: "user"; userId: string; pwd: string | null; kind: GameKind; size: Size; rtc: string | null; spec: boolean }
+  | { mode: "watch"; gameId: string };
 
 function kindSizeFromParams(sp: URLSearchParams): { kind: GameKind; size: Size } {
   const kind: GameKind = sp.get("kind") === "go" ? "go" : "gomoku";
@@ -213,7 +223,7 @@ export function parseUrl(): UrlIntent {
       const u = sp.get("u");
       if (u) {
         const { kind, size } = kindSizeFromParams(sp);
-        return { mode: "user", userId: u, pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
+        return { mode: "user", userId: u, pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc"), spec: sp.get("spec") === "1" };
       }
       const watch = sp.get("watch");
       if (watch) return { mode: "watch", gameId: watch };
@@ -225,11 +235,9 @@ export function parseUrl(): UrlIntent {
     if (first === "users" && segs.length === 1) return { mode: "users" };
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
     if (first === "watch" && second) return { mode: "watch", gameId: decodeURIComponent(second) };
-    if (first === "j" && second) return { mode: "join", code: decodeURIComponent(second), pwd: sp.get("pwd") };
-    if (first === "s" && second) return { mode: "spectate", code: decodeURIComponent(second) };
     if (segs.length === 1) {
       const { kind, size } = kindSizeFromParams(sp);
-      return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
+      return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc"), spec: sp.get("spec") === "1" };
     }
     return { mode: "menu" };
   } catch {
@@ -269,6 +277,16 @@ export function answerToUrl(inviterId: string, pwd: string, rtcAns: string, game
 export function userToUrl(userId: string): string {
   const url = new URL(shareOrigin());
   url.pathname = `/${encodeURIComponent(userId)}`;
+  return url.toString();
+}
+
+/** 观战链接：`<分享域名>/<userId>?pwd=<specPwd>&spec=1`（观战钥匙整局有效，
+ *  服务器模式点开即连房主；pwd 错/无 → 房主聊天区私有申请）。 */
+export function specLinkUrl(userId: string, specPwd: string): string {
+  const url = new URL(shareOrigin());
+  url.pathname = `/${encodeURIComponent(userId)}`;
+  url.searchParams.set("pwd", specPwd);
+  url.searchParams.set("spec", "1");
   return url.toString();
 }
 
@@ -408,7 +426,7 @@ export function parsePastedLink(text: string): UrlIntent | null {
     const u = sp.get("u");
     if (u) {
       const { kind, size } = kindSizeFromParams(sp);
-      return { mode: "user", userId: decodeURIComponent(u), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
+      return { mode: "user", userId: decodeURIComponent(u), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc"), spec: sp.get("spec") === "1" };
     }
     const watch = sp.get("watch");
     if (watch) return { mode: "watch", gameId: watch };
@@ -419,14 +437,12 @@ export function parsePastedLink(text: string): UrlIntent | null {
     if (first === "users" && segs.length === 1) return { mode: "users" };
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
     if (first === "watch" && second) return { mode: "watch", gameId: decodeURIComponent(second) };
-    if (first === "j" && second) return { mode: "join", code: decodeURIComponent(second), pwd: sp.get("pwd") };
-    if (first === "s" && second) return { mode: "spectate", code: decodeURIComponent(second) };
     if (segs.length === 1) {
       // 收紧识别：单段路径必须像用户链接（用户 ID 均为 u- 前缀，或带 pwd/rtc 邀请参数），
       // 否则视为普通文本/陌生网址——避免粘贴任意内容被误判成"用户主页"发起挑战。
       if (!first.startsWith("u-") && !sp.has("pwd") && !sp.has("rtc")) return null;
       const { kind, size } = kindSizeFromParams(sp);
-      return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
+      return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc"), spec: sp.get("spec") === "1" };
     }
     return null;
   } catch {
@@ -699,11 +715,13 @@ export class GameChannel {
   private dispatch(msg: GameMsg) {
     if (!msg || typeof msg.seq !== "number" || !msg.kind) return;
     if (msg.sender === this.myId) return;
-    // BroadcastChannel 与 WebRTC 双链路会送达同一消息：对会改变对局状态的 Move
-    // 按 (sender, seq) 单调去重，先到者应用、后到者丢弃。
-    // SyncState/SyncRequest 不去重——它们是幂等全量同步，且重连后发送方 seq 归零，
-    // 去重会错误丢弃重连同步。
-    if (msg.kind.type === "Move") {
+    // BroadcastChannel / WebRTC 直连 / 服务器 relay 三链路会送达同一条消息：
+    // 有副作用的类型（落子、协商请求与批复、头像）按 (sender, seq) 单调去重，
+    // 先到者应用、后到者丢弃——否则 SwapAck 这类「翻转」操作会被执行两次翻回去。
+    // SyncState/SyncRequest 不去重（幂等全量同步，重连后发送方 seq 归零，
+    // 去重会错误丢弃重连同步）；Chat 允许重复（仅显示层，且须容忍 seq 归零）。
+    const DEDUP = new Set(["Move", "UndoReq", "UndoAck", "ResetReq", "ResetAck", "SwapReq", "SwapAck", "Avatar"]);
+    if (DEDUP.has(msg.kind.type)) {
       const seen = this.lastSeq.get(msg.sender) ?? 0;
       if (msg.seq <= seen) return;
       this.lastSeq.set(msg.sender, msg.seq);

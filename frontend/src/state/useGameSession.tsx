@@ -19,7 +19,6 @@ import {
   genGameId,
   genPwd,
   inviteToUrl,
-  joinCodeUrl,
   loadServerSelection,
   myName,
   myUserId,
@@ -29,7 +28,6 @@ import {
   parseUrl,
   presence,
   setMyName,
-  spectateCodeUrl,
   transport,
   userToUrl,
   watchToUrl,
@@ -93,12 +91,36 @@ export function useGameSession() {
   /** 服务器模式的兜底中转目标（对手 + 观战者的 s- 短 ID）。 */
   const relayTargetsRef = useRef<Set<string>>(new Set());
   /** 服务器挑战信（对方点名邀请）：等用户同意/拒绝。 */
-  const [serverIncoming, setServerIncoming] = useState<{ from: string; fromName: string; kind: GameKind; size: Size; code: string; pwd: string } | null>(null);
-  /** 短码意图（/j /s 链接打开）：连接就绪后执行。 */
-  const pendingJoinRef = useRef<{ code: string; pwd: string | null } | null>(null);
-  const pendingWatchRef = useRef<{ code: string } | null>(null);
-  /** 大厅挑战：createInvite 完成短码生成后向该目标发挑战信。 */
+  const [serverIncoming, setServerIncoming] = useState<{ from: string; fromName: string; kind: GameKind; size: Size } | null>(null);
+  /** 大厅挑战：createInvite 完成后向该目标发挑战信。 */
   const pendingChallengeRef = useRef<string | null>(null);
+  /** userId 链接意图（服务器模式）：连接就绪后发 join/spec-join。 */
+  const pendingLinkRef = useRef<{ target: string; pwd: string | null; spec: boolean } | null>(null);
+  /** 观战钥匙（每局生成、整局有效）：服务器模式观战链接的 pwd。 */
+  const specPwdRef = useRef<string | null>(null);
+  const [spectateEnabled, setSpectateEnabled] = useState(true);
+  const spectateEnabledRef = useRef(true);
+  /** 观战房间名单（双方对局者共同维护，经 spec-sync 同步）。 */
+  const [spectators, setSpectators] = useState<{ id: string; name: string; host: string; muted: boolean }[]>([]);
+  /** 观战申请（pwd 错/无 → 私有申请，仅被申请的对局者可见，聊天区内处理）。 */
+  const [specRequests, setSpecRequests] = useState<{ from: string; fromName: string }[]>([]);
+  const specRequestsRef = useRef<{ from: string; fromName: string }[]>([]);
+  useEffect(() => { specRequestsRef.current = specRequests; }, [specRequests]);
+  /** 协商请求弹窗（悔棋/重开/换棋 + 观战发言批准 + 错钥匙连接询问）。 */
+  const [confirmReq, setConfirmReq] = useState<{ kind: "undo" | "reset" | "swap" | "spec-chat" | "wrong-pwd"; from: string; fromName: string } | null>(null);
+  /** 弹窗决定后的续体：同意走 resolve，拒绝走 reject（由发起方在 setConfirmReq 时挂上）。 */
+  const confirmResolveRef = useRef<(() => void) | null>(null);
+  const confirmRejectRef = useRef<(() => void) | null>(null);
+  /** 聊天记录（对局者 Chat 广播 + 观战者经 host 转发的 spec-chat 统一进这里）。 */
+  const [chatLog, setChatLog] = useState<{ userId: string; name: string; text: string; ts: number; self: boolean }[]>([]);
+  /** 对端头像（P2P 直连后互相发送；观战者头像经 host 转发）。 */
+  const [peerAvatars, setPeerAvatars] = useState<Record<string, string>>({});
+  const myAvatarRef = useRef<string | null>(null);
+  /** 观战者侧：发言批准状态（双 host 均 ack 才可发言；被拒则本局锁死）。 */
+  const [specCanChat, setSpecCanChat] = useState(false);
+  const specCanChatRef = useRef(false);
+  const specChatOkRef = useRef<Set<string>>(new Set());
+  const specRequestDeniedRef = useRef(false);
 
   /* ---------- 弹窗（所有信令消息统一走弹窗收发） ---------- */
   // kind:
@@ -252,11 +274,78 @@ export function useGameSession() {
         setHover(null);
         break;
       }
-      case "Chat":
+      case "Chat": {
+        // 聊天（无服务器模式走 GameMsg；服务器模式对局者走 signal——本 case 服务前者）
+        pushChat(msg.userId, msg.sender, k.text, false);
+        break;
+      }
+      case "Avatar": {
+        // 头像：P2P 直达，不经服务器（dataURL ≤128px）
+        if (typeof k.dataUrl === "string" && k.dataUrl.startsWith("data:image/") && k.dataUrl.length < 20_000) {
+          setPeerAvatars((m) => ({ ...m, [msg.userId]: k.dataUrl }));
+        }
+        break;
+      }
+      // —— 协商请求：对方同意制，弹窗处理 ——
+      case "UndoReq": {
+        if (phaseRef.current !== "playing") break;
+        setConfirmReq({ kind: "undo", from: msg.userId, fromName: resolvePeerName(msg.userId, msg.sender) });
+        confirmResolveRef.current = () => {
+          transport.send({ type: "UndoAck", ok: true });
+          applyUndoLocal();
+        };
+        confirmRejectRef.current = () => transport.send({ type: "UndoAck", ok: false });
+        break;
+      }
+      case "UndoAck": {
+        if (k.ok) {
+          applyUndoLocal();
+          showNotice("对方已同意悔棋", 2400);
+        } else {
+          showNotice("对方拒绝了悔棋", 2400);
+        }
+        break;
+      }
+      case "ResetReq": {
+        if (phaseRef.current !== "playing") break;
+        setConfirmReq({ kind: "reset", from: msg.userId, fromName: resolvePeerName(msg.userId, msg.sender) });
+        confirmResolveRef.current = () => {
+          transport.send({ type: "ResetAck", ok: true });
+          doResetLocal();
+        };
+        confirmRejectRef.current = () => transport.send({ type: "ResetAck", ok: false });
+        break;
+      }
+      case "ResetAck": {
+        if (k.ok) {
+          doResetLocal();
+          showNotice("对方已同意重开", 2400);
+        } else {
+          showNotice("对方拒绝了重开", 2400);
+        }
+        break;
+      }
+      case "SwapReq": {
+        if (phaseRef.current !== "playing") break;
+        setConfirmReq({ kind: "swap", from: msg.userId, fromName: resolvePeerName(msg.userId, msg.sender) });
+        confirmResolveRef.current = () => {
+          transport.send({ type: "SwapAck", ok: true });
+          doSwapLocal();
+        };
+        confirmRejectRef.current = () => transport.send({ type: "SwapAck", ok: false });
+        break;
+      }
+      case "SwapAck": {
+        if (k.ok) {
+          doSwapLocal();
+          showNotice("对方已同意换棋（黑白互换，已重开）", 3000);
+        } else {
+          showNotice("对方拒绝了换棋", 2400);
+        }
+        break;
+      }
       case "Ping":
       case "Pong":
-      case "UndoReq":
-      case "UndoAck":
         break;
     }
   }, []);
@@ -352,26 +441,44 @@ export function useGameSession() {
     else serverChannel.announce(role === "spectator" ? "idle" : "in-game", gameId);
   }, [phase, gameId, role, serverMode]);
 
-  /** 服务器短码意图是否已就绪可执行（连接 ready）。 */
+  /** userId 链接意图就绪执行（连接 ready 后发 join/spec-join）。
+   *  不在本地查名册判断在线：ready 与首份名册广播的先后不确定，
+   *  误判会把拿着有效邀请链接的人弹回主页——直接发信号，无人受理由超时兜底。 */
   function flushPendingServerIntents() {
-    const j = pendingJoinRef.current;
-    if (j && serverChannel.connected) {
-      pendingJoinRef.current = null;
-      serverChannel.inviteResolve(j.code, j.pwd ?? "");
-      showNotice("正在通过服务器建立直连…");
-    }
-    const w = pendingWatchRef.current;
-    if (w && serverChannel.connected) {
-      pendingWatchRef.current = null;
-      serverChannel.watchResolve(w.code);
+    const l = pendingLinkRef.current;
+    if (l && serverChannel.connected) {
+      pendingLinkRef.current = null;
+      if (l.spec) {
+        setRole("spectator");
+        roleRef.current = "spectator";
+        myHostRef.current = l.target;
+        nav("/p2p");
+        serverChannel.signal(l.target, "spec-join", { pwd: l.pwd ?? "", name: myName() });
+        showNotice("正在连接对局观战…");
+      } else {
+        setRole("invitee");
+        roleRef.current = "invitee";
+        setMyColor("white");
+        myColorRef.current = "white";
+        setPhase("waiting");
+        phaseRef.current = "waiting";
+        nav("/p2p");
+        serverChannel.signal(l.target, "join", { pwd: l.pwd ?? "", name: myName() });
+        showNotice("正在请求加入对局…");
+        // 无应答兜底：15s 内既没有 offer 也没有拒绝，多半是对方离线/已换局
+        window.setTimeout(() => {
+          if (roleRef.current === "invitee" && phaseRef.current === "waiting" && !gameIdRef.current) {
+            showNotice("对方不在线或未响应，请确认链接是否最新", 6000);
+          }
+        }, 15_000);
+      }
     }
   }
 
-  // 服务器通道生命周期与事件分发。事件直接调处理函数（不走 queue）：
-  // 服务器消息都是点对点定向信件，无 presence 那种「信件竞态」问题；
-  // 处理函数用 ref 判定当前状态（与文件其余处理逻辑同一模式）。
+  // 服务器通道生命周期与事件分发。信令语义（pwd 校验/同意弹窗/观战房间管理）
+  // 全在客户端解释，服务器只做点对点转发——与「服务器无储存」的承诺一致。
   useEffect(() => {
-    if (!serverMode) return;
+    if (!serverMode) { if (import.meta.env.DEV) console.log("[srv-effect] skipped, serverMode=false"); return; }
     serverChannel.connectFromSettings();
     serverChannel.onEvent = (e: ServerEvent) => {
       switch (e.t) {
@@ -391,64 +498,8 @@ export function useGameSession() {
             .filter((u) => u.id !== serverChannel.myServerId)
             .map((u) => ({ id: u.id, name: u.name, status: u.status, gameId: u.gameId, ts: Date.now() })));
           break;
-        case "invite-created": {
-          const p = pwdRef.current;
-          if (p) {
-            setInviteUrl(joinCodeUrl(e.code, p));
-            setDirectState("waiting-invitee");
-            showNotice(null);
-            if (pendingChallengeRef.current) {
-              serverChannel.challenge(pendingChallengeRef.current, kindRef.current, sizeRef.current, e.code, p);
-              pendingChallengeRef.current = null;
-            }
-          }
-          // 观战短码一并生成：对局/等待页可展示「观战」链接
-          serverChannel.watchCreate(gameIdRef.current ?? "");
-          break;
-        }
-        case "invite-offer":
-          void serverAcceptOffer(e);
-          break;
-        case "invitee-joined":
-          relayTargetsRef.current.add(e.from);
-          if (inviterRtcRef.current) inviterRtcRef.current.peerTag = e.from;
-          showNotice("对手已进入，直连建立中…");
-          break;
-        case "answer":
-          void serverAcceptAnswer(e.from, e.answer);
-          break;
-        case "offer":
-          void serverAcceptSpectatorOffer(e.from, e.offer, e.gameId);
-          break;
-        case "ice":
-          serverAcceptIce(e.from, e.candidate);
-          break;
-        case "watch-created":
-          setWatchUrl(spectateCodeUrl(e.code));
-          break;
-        case "watch-accepted":
-          relayTargetsRef.current.add(e.from);
-          joinAsSpectator(e.gameId);
-          nav("/p2p");
-          break;
-        case "spectator-joined":
-          void serverHostSpectator(e.from);
-          break;
-        case "challenge":
-          if (phaseRef.current === "playing") {
-            serverChannel.challengeReject(e.from);
-            break;
-          }
-          setServerIncoming({
-            from: e.from,
-            fromName: peers.find((u) => u.id === e.from)?.name ?? e.from,
-            kind: e.kind, size: e.size, code: e.code, pwd: e.pwd,
-          });
-          break;
-        case "challenge-rejected":
-          setServerIncoming(null);
-          showNotice("对方拒绝了对局", 2400);
-          backHome();
+        case "signal":
+          serverHandleSignal(e.from, e.kind, e.payload);
           break;
         case "relayed":
           try { transport.injectRemote(e.payload); } catch { /* ignore */ }
@@ -469,26 +520,29 @@ export function useGameSession() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  /** 按 URL 意图行动：观战加入 / 邀请自动挑战 / 服务器短码（免回执）。
+  /** 按 URL 意图行动：观战加入 / 邀请自动挑战 / 服务器模式 userId 链接（pwd 客户端校验）。
    *  回执不再走「打开链接」——新标签页身份不同且邀请者 RTC 状态不可迁移，
    *  曾导致同机两窗互弈；统一走等待页「输入回执」弹窗。 */
   function processIntent(it: UrlIntent) {
-    if (it.mode === "join" && phaseRef.current === "home") {
+    if (it.mode === "user" && it.spec === true && phaseRef.current === "home") {
+      // 服务器观战链接 `/<userId>?pwd=<specPwd>&spec=1`
       if (!serverMode) {
-        showNotice("这是服务器短码邀请：请在设置页选择与邀请者相同的服务器后再打开", 3600);
+        showNotice("跨设备观战需要连接服务器：请在设置页选择与房主相同的服务器", 4200);
         return;
       }
-        // 服务器可能还在连接中：挂起等 ready 后执行（flushPendingServerIntents）
-      pendingJoinRef.current = { code: it.code, pwd: it.pwd };
+      pendingLinkRef.current = { target: it.userId, pwd: it.pwd, spec: true };
       flushPendingServerIntents();
       return;
     }
-    if (it.mode === "spectate" && phaseRef.current === "home") {
-      if (!serverMode) {
-        showNotice("这是服务器短码观战链接：请在设置页选择与房主相同的服务器后再打开", 3600);
+    if (it.mode === "user" && it.pwd && serverMode && phaseRef.current === "home") {
+      // 服务器模式邀请链接 `/<userId>?pwd=...`：pwd 校验在对局者端（错误会转弹窗询问）
+      if (it.userId === tabUser) return;
+      if (it.rtc) {
+        // 带 rtc 的无服务器式链接：仍按旧路径处理（跨设备回执兼容）
+        acceptInvite(it.userId, it.pwd, it.kind, it.size, it.rtc);
         return;
       }
-      pendingWatchRef.current = { code: it.code };
+      pendingLinkRef.current = { target: it.userId, pwd: it.pwd, spec: false };
       flushPendingServerIntents();
       return;
     }
@@ -568,32 +622,24 @@ export function useGameSession() {
     // 旧实现先给无 rtc 链接：用户复制发出的链接跨设备永远连不上（审查 A5）。
     setInviteUrl(null);
     setWatchUrl(null);
-    // —— 服务器模式：offer/短码交给服务器，链接是 ~40 字符的短码链接（免回执）——
+    // —— 服务器模式：链接回归 /<userId>?pwd=（无 rtc，最短）；pwd 校验在收到 join
+    //    signal 时于本端进行（错误转弹窗询问），offer 在校验通过后才生成发送 ——
     if (serverMode) {
       if (!serverChannel.connected) {
         setDirectState("error");
         showNotice("服务器未连接：请检查设置页服务器配置或切换到无服务器模式");
         return;
       }
-      showNotice("正在生成直连邀请…");
-      setDirectState("making-invite");
+      setDirectState("waiting-invitee");
+      showNotice(null);
+      // 观战钥匙一并生成（整局有效），对局页可展示观战链接
+      specPwdRef.current = genPwd();
+      spectateEnabledRef.current = true;
+      setSpectateEnabled(true);
+      setInviteUrl(inviteToUrl(tabUser, p, kind, size));
       const peer = new DirectRtcPeer({ isInviter: true, role: "player" });
       attachPeer(peer);
-      try {
-        const offer = await peer.createOfferPlain();
-        if (phaseRef.current !== "waiting" || roleRef.current !== "inviter" || pwdRef.current !== p) {
-          try { peer.close(); } catch { /* ignore */ }
-          return;
-        }
-        inviterRtcRef.current = peer;
-        // offer 存服务器换短码；invite-created 事件回填短码邀请链接与观战短码
-        serverChannel.inviteCreate(kind, size, p, offer, g);
-      } catch {
-        inviterRtcRef.current = null;
-        try { peer.close(); } catch { /* ignore */ }
-        setDirectState("error");
-        showNotice("直连邀请生成失败：可取消后重开");
-      }
+      inviterRtcRef.current = peer;
       return;
     }
     showNotice("正在生成直连邀请…");
@@ -965,7 +1011,7 @@ export function useGameSession() {
     p.onRemote = (msg) => transport.injectRemote(msg);
     // 服务器模式 trickle：本端候选经服务器转发给该 peer 的对端
     p.onCandidate = (c) => {
-      if (p.peerTag && serverChannel.connected) serverChannel.ice(p.peerTag, gameIdRef.current ?? "", c);
+      if (p.peerTag && serverChannel.connected) serverChannel.signal(p.peerTag, "ice", { candidate: c });
     };
     p.onState = (s) => {
       setDirectState(s);
@@ -978,6 +1024,10 @@ export function useGameSession() {
         // 跨设备时 Presence 不可达（无 BroadcastChannel）：直连一旦打通，
         // 等待中的受邀者直接进对局，不再依赖邀请者的 accept 信件
         if (roleRef.current === "invitee" && phaseRef.current === "waiting") enterPlayingAsInvitee();
+        // 直连建立后互发头像（P2P，不经服务器）
+        if (myAvatarRef.current) {
+          setTimeout(() => transport.send({ type: "Avatar", dataUrl: myAvatarRef.current! }), 150);
+        }
         // 直连建立后主动同步一次
         setTimeout(() => {
           transport.send({
@@ -992,23 +1042,364 @@ export function useGameSession() {
     rtcPeersRef.current.push(p);
   }
 
-  /* ---------- 服务器模式（可选）：短码邀请 / 大厅挑战 / 短码观战 / trickle / 兜底中转 ---------- */
+  /* ---------- 服务器模式（可选）：userId 链接 + pwd 客户端校验 + 观战房间管理 ---------- */
+  // 链接模型回归 /<userId>?pwd=...：服务器模式下受邀者/观战者打开链接后经服务器
+  // signal 交互（join→offer→answer），pwd 由对局者本地校验——pwd 错误变成弹窗邀请，
+  // 而不是像无服务器模式那样直接解不开。服务器只转发，不落地任何数据。
 
-  /** 受邀者：服务器转来的 invite-offer——一切就绪后 acceptOfferPlain 回 answer。
-   *  与无服务器 acceptInvite 的差别：offer 经服务器直达，pwd 已由服务器校验，免回执。 */
-  async function serverAcceptOffer(e: Extract<ServerEvent, { t: "invite-offer" }>) {
-    if (phaseRef.current === "playing") return;
+  /** 观战房间名（双方对局者各维护一份全量名单，经 spec-sync 同步）。 */
+  const spectatorsRef = useRef<{ id: string; name: string; host: string; muted: boolean }[]>([]);
+  const myHostRef = useRef<string | null>(null); // 观战者自己连的对局者
+
+  function syncSpectators(list: { id: string; name: string; host: string; muted: boolean }[]) {
+    spectatorsRef.current = list;
+    setSpectators([...list]);
+  }
+
+  /** 房间名单变化后向对方对局者与全部观战者广播。 */
+  function pushSpecSync(extra?: Record<string, unknown>) {
+    const opp = relayTargetsRef.current.values().next().value as string | undefined;
+    const payload = { list: spectatorsRef.current, enabled: spectateEnabledRef.current, ...extra };
+    if (opp && serverChannel.connected) serverChannel.signal(opp, "spec-sync", payload);
+    for (const s of spectatorsRef.current) {
+      if (s.host === serverChannel.myServerId && serverChannel.connected) serverChannel.signal(s.id, "spec-sync", payload);
+    }
+  }
+
+  /** 对局者：受理一次观战（建 spectator 直连并发 offer）。 */
+  async function serverAdmitSpectator(sid: string, sname: string) {
+    if (phaseRef.current === "home") return;
+    relayTargetsRef.current.add(sid);
+    const peer = new DirectRtcPeer({ isInviter: true, role: "spectator" });
+    peer.peerTag = sid;
+    attachPeer(peer);
+    try {
+      const offer = await peer.createOfferPlain();
+      syncSpectators([...spectatorsRef.current, { id: sid, name: sname, host: serverChannel.myServerId ?? "", muted: false }]);
+      pushSpecSync();
+      serverChannel.signal(sid, "spec-offer", { gameId: gameIdRef.current ?? "", offer });
+    } catch {
+      try { peer.close(); } catch { /* ignore */ }
+    }
+  }
+
+  /** 对局者：处理服务器转发来的信令（kind 语义见各分支）。 */
+  function serverHandleSignal(from: string, kind: string, pl: Record<string, unknown>) {
+    const fromName = String(pl.name ?? peers.find((u) => u.id === from)?.name ?? from);
+    switch (kind) {
+      // —— 受邀者请求加入对局：pwd 校验在本端，错误转弹窗询问 ——
+      case "join": {
+        if (phaseRef.current !== "waiting" || roleRef.current !== "inviter" || !inviterRtcRef.current) {
+          serverChannel.signal(from, "reject", { name: myName(), reason: phaseRef.current === "playing" ? "正在对局中" : "对方不在等待对局" });
+          return;
+        }
+        const ok = typeof pl.pwd === "string" && pl.pwd === pwdRef.current;
+        const proceed = () => {
+          const host = inviterRtcRef.current;
+          if (!host) return;
+          serverChannel.signal(from, "accept", {});
+          void (async () => {
+            try {
+              const offer = await host.createOfferPlain();
+              if (inviterRtcRef.current !== host) return;
+              host.peerTag = from;
+              relayTargetsRef.current.add(from);
+              serverChannel.signal(from, "offer", { name: myName(), kind: kindRef.current, size: sizeRef.current, gameId: gameIdRef.current ?? "", offer });
+            } catch { /* offer 失败：对端等待超时自行退出 */ }
+          })();
+        };
+        if (ok) proceed();
+        else {
+          setConfirmReq({ kind: "wrong-pwd", from, fromName });
+          confirmResolveRef.current = proceed;
+          confirmRejectRef.current = () => serverChannel.signal(from, "reject", { name: myName(), reason: "邀请钥匙不正确" });
+        }
+        return;
+      }
+      // —— 受邀者/观战者回 answer：路由到 peerTag 匹配的 peer ——
+      case "answer": {
+        const main = inviterRtcRef.current;
+        const peer = (main && main.peerTag === from ? main : null)
+          ?? rtcPeersRef.current.find((q) => q.peerTag === from)
+          ?? null;
+        if (!peer) return;
+        void peer.acceptAnswerPlain(String(pl.answer ?? ""));
+        if (peer === main && phaseRef.current === "waiting" && roleRef.current === "inviter") {
+          setPhase("playing");
+          phaseRef.current = "playing";
+          setPwd(null);
+          pwdRef.current = null;
+          setInviteUrl(null);
+          setPeerConnected(false);
+          showNotice("对方已加入，对局开始");
+          setTimeout(() => {
+            transport.send({ type: "Hello", kind: kindRef.current, size: sizeRef.current });
+            transport.send({ type: "SyncRequest" });
+          }, 80);
+        }
+        return;
+      }
+      // —— 邀请者发来的 offer（受邀者视角）——
+      case "offer": {
+        const offKind: GameKind = pl.kind === "go" ? "go" : "gomoku";
+        const offSize: Size = pl.size === 9 || pl.size === 13 || pl.size === 19 ? pl.size : 15;
+        void serverAcceptOffer(from, String(pl.name ?? from), offKind, offSize, String(pl.gameId ?? ""), String(pl.offer ?? ""));
+        return;
+      }
+      // —— 拒绝与理由 ——
+      case "reject": {
+        showNotice(`对方拒绝：${String(pl.reason ?? "未说明")}`, 3600);
+        if (phaseRef.current === "waiting") backHome();
+        return;
+      }
+      // —— 大厅挑战 ——
+      case "challenge": {
+        if (phaseRef.current === "playing") {
+          serverChannel.signal(from, "reject", { name: myName(), reason: "正在对局中" });
+          return;
+        }
+        if (phaseRef.current !== "home") {
+          serverChannel.signal(from, "reject", { name: myName(), reason: "当前不可接受挑战" });
+          return;
+        }
+        const incKind: GameKind = pl.kind === "go" ? "go" : "gomoku";
+        const incSize: Size = pl.size === 9 || pl.size === 13 || pl.size === 19 ? pl.size : 15;
+        setServerIncoming({ from, fromName, kind: incKind, size: incSize });
+        return;
+      }
+      // —— 挑战被接受：发起者（执黑）建局并送出 offer ——
+      case "challenge-accepted": {
+        if (phaseRef.current !== "waiting" || roleRef.current !== "inviter") return;
+        serverAdmitChallenger(from);
+        return;
+      }
+      // —— 观战请求（spec=1 链接）：pwd 对自动同意，错/无转聊天区私有申请 ——
+      case "spec-join": {
+        if (!spectateEnabledRef.current) {
+          serverChannel.signal(from, "spec-reply", { name: myName(), ok: false, reason: "房主已关闭观战" });
+          return;
+        }
+        if (phaseRef.current === "home") {
+          serverChannel.signal(from, "spec-reply", { name: myName(), ok: false, reason: "对局不存在" });
+          return;
+        }
+        const ok = typeof pl.pwd === "string" && pl.pwd !== "" && pl.pwd === specPwdRef.current;
+        if (ok) {
+          void serverAdmitSpectator(from, fromName);
+        } else {
+          setSpecRequests((r) => (r.some((x) => x.from === from) ? r : [...r, { from, fromName }]));
+          serverChannel.signal(from, "spec-pending", { name: myName() });
+        }
+        return;
+      }
+      // —— 观战者收到房主 offer ——
+      case "spec-offer": {
+        void serverAcceptSpectatorOffer(from, String(pl.offer ?? ""), String(pl.gameId ?? ""));
+        return;
+      }
+      // —— 观战申请批复 ——
+      case "spec-reply": {
+        if (pl.ok === true) {
+          // 批准后马上会收到 spec-offer
+          showNotice("观战申请已通过，连接中…");
+        } else {
+          specRequestDeniedRef.current = true;
+          showNotice(`观战申请被拒绝：${String(pl.reason ?? "未说明")}（本局无法再次申请）`, 4200);
+          if (phaseRef.current === "home" && roleRef.current === "idle") backHome();
+        }
+        return;
+      }
+      case "spec-pending": {
+        showNotice("观战申请已送达，等待对方处理…");
+        return;
+      }
+      // —— 观战房间名单同步（名单/开关/禁言）——
+      case "spec-sync": {
+        if (Array.isArray(pl.list)) {
+          syncSpectators(pl.list as { id: string; name: string; host: string; muted: boolean }[]);
+          const meKicked = !spectatorsRef.current.some((s) => s.id === serverChannel.myServerId) && myHostRef.current !== null;
+          if (meKicked && roleRef.current === "spectator") {
+            myHostRef.current = null;
+            closeAllRtcPeers();
+            backHome();
+            showNotice("你已被移出观战", 3600);
+          }
+        }
+        if (typeof pl.enabled === "boolean") setSpectateEnabled(pl.enabled);
+        return;
+      }
+      // —— 踢出对方直连的观战者（先通知被踢者，再移除）——
+      case "spec-kick": {
+        const id = String(pl.id ?? "");
+        if (serverChannel.connected) serverChannel.signal(id, "spec-kicked", { name: myName() });
+        const target = rtcPeersRef.current.find((q) => q.peerTag === id);
+        if (target) {
+          try { target.close(); } catch { /* ignore */ }
+          rtcPeersRef.current = rtcPeersRef.current.filter((q) => q !== target);
+          syncSpectators(spectatorsRef.current.filter((s) => s.id !== id));
+          pushSpecSync();
+        }
+        return;
+      }
+      // —— 被踢者收到通知：断开并回主页 ——
+      case "spec-kicked": {
+        myHostRef.current = null;
+        closeAllRtcPeers();
+        backHome();
+        showNotice("你已被移出观战", 3600);
+        return;
+      }
+      // —— 观战者聊天（经 host 转发进双方聊天区）——
+      case "spec-chat": {
+        pushChat(String(pl.userId ?? from), String(pl.name ?? from), String(pl.text ?? ""), false);
+        // host 转发给另一位对局者；观战者之间互不可见（v1 简化）
+        const opp = [...relayTargetsRef.current].find((id) => id !== from);
+        if (opp && serverChannel.connected) serverChannel.signal(opp, "spec-chat", pl);
+        return;
+      }
+      // —— 观战者申请发言：弹窗批准，双方都同意才放开 ——
+      // 第一 host 批准后把申请转发给另一位对局者（applicant 带申请者 ID、relay=true），
+      // 第二 host 批准后只向申请者回 ack、不再转发——避免 A↔B 循环弹窗
+      case "spec-chat-req": {
+        if (phaseRef.current !== "playing") return;
+        const isRelay = pl.relay === true;
+        const applicant = isRelay ? String(pl.applicant ?? from) : from;
+        setConfirmReq({ kind: "spec-chat", from, fromName });
+        confirmResolveRef.current = () => {
+          serverChannel.signal(applicant, "spec-chat-ack", { ok: true, name: myName() });
+          if (!isRelay) {
+            const opp = [...relayTargetsRef.current].find((id) => id !== from);
+            if (opp && serverChannel.connected) serverChannel.signal(opp, "spec-chat-req", { name: fromName, relay: true, applicant: from });
+          }
+        };
+        confirmRejectRef.current = () => {
+          serverChannel.signal(applicant, "spec-chat-ack", { ok: false, name: myName() });
+        };
+        return;
+      }
+      // —— 发言批准回执：双方都批准才放开输入 ——
+      case "spec-chat-ack": {
+        if (pl.ok === true) {
+          specChatOkRef.current.add(from);
+          if (specChatOkRef.current.size >= 2) {
+            specRequestDeniedRef.current = false;
+            specCanChatRef.current = true;
+            setSpecCanChat(true);
+            showNotice("双方已同意，你可以参与聊天了", 3200);
+          }
+        } else {
+          specCanChatRef.current = false;
+          setSpecCanChat(false);
+          specRequestDeniedRef.current = true;
+          showNotice("发言申请被拒绝（本局无法再次申请）", 3600);
+        }
+        return;
+      }
+      // —— 观战者头像 ——
+      case "spec-avatar": {
+        const dataUrl = String(pl.dataUrl ?? "");
+        if (dataUrl.startsWith("data:image/") && dataUrl.length < 20_000) {
+          setPeerAvatars((m) => ({ ...m, [from]: dataUrl }));
+        }
+        return;
+      }
+      // —— 对局者聊天（服务器模式不经 GameChannel，直接 signal）——
+      case "chat": {
+        pushChat(String(pl.userId ?? from), String(pl.name ?? from), String(pl.text ?? ""), false);
+        return;
+      }
+    }
+  }
+
+  /** 大厅挑战被接受后：发起者（执黑）建局并送 offer（与 join 流共用 accept/offer 顺序）。 */
+  async function serverAdmitChallenger(from: string) {
     closeAllRtcPeers();
-    const g = e.gameId;
+    const g = genGameId();
+    const p = genPwd();
     setGameId(g);
     gameIdRef.current = g;
+    setPwd(p);
+    pwdRef.current = p;
+    setRole("inviter");
+    roleRef.current = "inviter";
+    setPhase("waiting");
+    phaseRef.current = "waiting";
+    setMyColor("black");
+    myColorRef.current = "black";
+    setPeerConnected(false);
+    resetBoardFor(kindRef.current, sizeRef.current);
+    transport.join(g);
+    setInviteUrl(inviteToUrl(tabUser, p, kindRef.current, sizeRef.current));
+    setWatchUrl(null);
+    nav("/p2p");
+    const peer = new DirectRtcPeer({ isInviter: true, role: "player" });
+    attachPeer(peer);
+    try {
+      const offer = await peer.createOfferPlain();
+      peer.peerTag = from;
+      relayTargetsRef.current.add(from);
+      inviterRtcRef.current = peer;
+      serverChannel.signal(from, "offer", { name: myName(), kind: kindRef.current, size: sizeRef.current, gameId: g, offer });
+      setDirectState("waiting-invitee");
+    } catch {
+      try { peer.close(); } catch { /* ignore */ }
+      setDirectState("error");
+      showNotice("直连邀请生成失败：可取消后重开");
+    }
+  }
+
+  /** 聊天统一入口：本地插入 + 服务器 signal（对局者）/定向转发（观战者）。 */
+  function sendChat(text: string) {
+    const t = text.trim();
+    if (!t) return;
+    pushChat(serverChannel.myServerId ?? tabUser, myName() || tabUser.slice(0, 8), t, true);
+    if (roleRef.current === "spectator") {
+      // 观战者只与自己 host 通信
+      if (myHostRef.current && serverChannel.connected) {
+        serverChannel.signal(myHostRef.current, "spec-chat", { userId: serverChannel.myServerId, name: myName() || "观战者", text: t });
+      }
+    } else if (serverMode && serverChannel.connected) {
+      const opp = relayTargetsRef.current.values().next().value as string | undefined;
+      if (opp) serverChannel.signal(opp, "chat", { userId: serverChannel.myServerId, name: myName() || tabUser.slice(0, 8), text: t });
+    } else {
+      transport.send({ type: "Chat", text: t });
+    }
+  }
+
+  function pushChat(userId: string, name: string, text: string, self: boolean) {
+    setChatLog((log) => [...log.slice(-199), { userId, name, text, ts: Date.now(), self }]);
+  }
+
+  /** 由内部 userId 解析显示名：优先聊天记录/名册，兜底「对方」。 */
+  function resolvePeerName(userId: string, fallback: string): string {
+    const fromChat = [...chatLog].reverse().find((c) => c.userId === userId);
+    if (fromChat) return fromChat.name;
+    const fromPeers = peersRefCache.current.get(userId);
+    if (fromPeers) return fromPeers;
+    return fallback === userId ? "对方" : fallback;
+  }
+  const peersRefCache = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    const m = new Map<string, string>();
+    for (const p of peers) m.set(p.id, p.name);
+    for (const s of spectators) m.set(s.id, s.name);
+    for (const c of chatLog) { if (!m.has(c.userId)) m.set(c.userId, c.name); }
+    peersRefCache.current = m;
+  }, [peers, spectators, chatLog]);
+
+  /** 受邀者：收到对局者发来的 offer（join/challenge 流共用）——受理进等待并回 answer。 */
+  async function serverAcceptOffer(from: string, fromName: string, k: GameKind, s: Size, gameId: string, offer: string) {
+    if (phaseRef.current === "playing") return;
+    closeAllRtcPeers();
+    setGameId(gameId);
+    gameIdRef.current = gameId;
     setRole("invitee");
     roleRef.current = "invitee";
     setMyColor("white");
     myColorRef.current = "white";
     setPeerConnected(false);
-    resetBoardFor(e.kind, e.size);
-    transport.join(g);
+    resetBoardFor(k, s);
+    transport.join(gameId);
     setPhase("waiting");
     phaseRef.current = "waiting";
     setPwd(null);
@@ -1016,15 +1407,15 @@ export function useGameSession() {
     setInviteUrl(null);
     setWatchUrl(null);
     setAnswerBackUrl(null);
-    relayTargetsRef.current = new Set([e.from]);
-    showNotice(`接受 ${e.fromName} 的邀请，正在建立直连…`);
+    relayTargetsRef.current = new Set([from]);
+    showNotice(`接受 ${fromName} 的邀请，正在建立直连…`);
     nav("/p2p");
     const peer = new DirectRtcPeer({ isInviter: false, role: "player" });
-    peer.peerTag = e.from;
+    peer.peerTag = from;
     attachPeer(peer);
     try {
-      const ans = await peer.acceptOfferPlain(e.offer);
-      serverChannel.answer(e.from, g, ans);
+      const ans = await peer.acceptOfferPlain(offer);
+      serverChannel.signal(from, "answer", { name: myName(), answer: ans });
       setDirectState("joining");
     } catch {
       setDirectState("error");
@@ -1032,92 +1423,213 @@ export function useGameSession() {
     }
   }
 
-  /** 房主：把对方（对手或观战者）发来的 answer 路由到对应 peer。
-   *  主对手的 answer 应用成功后切进对局（channel 自始至终是自己的，无需切换）。 */
-  async function serverAcceptAnswer(from: string, ans: string) {
-    const main = inviterRtcRef.current;
-    const peer = (main && main.peerTag === from ? main : null)
-      ?? rtcPeersRef.current.find((q) => q.peerTag === from)
-      ?? null;
-    if (!peer) return;
-    try {
-      await peer.acceptAnswerPlain(ans);
-    } catch { /* 竞态已在 acceptAnswerPayload 内部处理 */ }
-    if (peer === main && phaseRef.current === "waiting" && roleRef.current === "inviter") {
+  /** 观战者：收到房主发来的 spectator offer（spec-join 批准后到达）。 */
+  async function serverAcceptSpectatorOffer(from: string, offer: string, gameId: string) {
+    if (roleRef.current !== "spectator") return;
+    if (gameId) {
+      setGameId(gameId);
+      gameIdRef.current = gameId;
+      transport.join(gameId);
+    }
+    // 进观战态（UI 需 phase=playing 才渲染对局页；SyncState 到达后即可见棋局）
+    if (phaseRef.current !== "playing") {
       setPhase("playing");
       phaseRef.current = "playing";
       setPwd(null);
       pwdRef.current = null;
       setInviteUrl(null);
-      setPeerConnected(false);
-      showNotice("对方已加入，对局开始");
-      setTimeout(() => {
-        transport.send({ type: "Hello", kind: kindRef.current, size: sizeRef.current });
-        transport.send({ type: "SyncRequest" });
-      }, 80);
+      setWatchUrl(null);
+      showNotice("观战模式：只读同步，不可落子");
     }
-  }
-
-  /** 观战者：收房主发来的 spectator offer（watch-accepted 之后到达）。 */
-  async function serverAcceptSpectatorOffer(from: string, offer: string, gameId: string) {
-    if (roleRef.current !== "spectator") return;
     const peer = new DirectRtcPeer({ isInviter: false, role: "spectator" });
     peer.peerTag = from;
     attachPeer(peer);
     try {
       const ans = await peer.acceptOfferPlain(offer);
-      if (serverChannel.connected) serverChannel.answer(from, gameId, ans);
+      serverChannel.signal(from, "answer", { name: myName(), answer: ans });
     } catch {
       setDirectState("error");
       showNotice("观战直连建立失败，可刷新后重试");
     }
   }
 
-  /** 房主：观战者 resolve 短码后，主动为其生成 spectator offer。 */
-  async function serverHostSpectator(from: string) {
-    if (phaseRef.current !== "playing" && phaseRef.current !== "waiting") return;
-    relayTargetsRef.current.add(from);
-    const peer = new DirectRtcPeer({ isInviter: true, role: "spectator" });
-    peer.peerTag = from;
-    attachPeer(peer);
-    try {
-      const offer = await peer.createOfferPlain();
-      serverChannel.offer(from, gameIdRef.current ?? "", "spectator", offer);
-    } catch {
-      try { peer.close(); } catch { /* ignore */ }
-    }
-  }
-
-  /** 服务器模式：把对方经服务器转发来的 answer/候选路由到对应 peer。 */
-  function serverAcceptIce(from: string, candidate: string) {
-    const main = inviterRtcRef.current;
-    const peer = (main && main.peerTag === from ? main : null)
-      ?? rtcPeersRef.current.find((q) => q.peerTag === from)
-      ?? null;
-    if (!peer) return;
-    void peer.addRemoteCandidate(candidate);
-  }
-
-  /** 大厅挑战（服务器模式）：复用 createInvite 的短码邀请，短码生成后向对方发挑战信。
-   *  对方同意走 invite-resolve，拒绝回 challenge-rejected。 */
+  /** 大厅挑战（服务器模式）：直接向对方发挑战信（无 pwd，需对方手动同意）。 */
   function serverChallengePeer(to: string) {
-    pendingChallengeRef.current = to;
-    createInvite();
+    if (phaseRef.current !== "home") {
+      showNotice("当前状态不可发起挑战", 2400);
+      return;
+    }
+    serverChannel.signal(to, "challenge", { name: myName(), kind: kindRef.current, size: sizeRef.current });
+    showNotice("挑战已发出，等待对方同意…", 8000);
   }
 
+  /** 被挑战者同意：回 challenge-accepted，等对方建局送 offer。 */
   function serverAcceptChallenge() {
     const inc = serverIncoming;
     if (!inc) return;
     setServerIncoming(null);
-    serverChannel.inviteResolve(inc.code, inc.pwd);
+    serverChannel.signal(inc.from, "challenge-accepted", { name: myName() });
+    showNotice("已接受挑战，等待对方建立直连…", 6000);
   }
 
   function serverRejectChallenge() {
     const inc = serverIncoming;
     if (!inc) return;
     setServerIncoming(null);
-    serverChannel.challengeReject(inc.from);
+    serverChannel.signal(inc.from, "reject", { name: myName(), reason: "已拒绝挑战" });
     showNotice("已拒绝该挑战");
+  }
+
+  /* ---------- 协商：悔棋 / 重开 / 换棋（对方同意制） ---------- */
+
+  /** 撤销最后一手（确定性操作，双方一致）；完成后补发 SyncState 对齐观战者。 */
+  function applyUndoLocal() {
+    const h = historyRef.current;
+    if (h.length === 0) return;
+    const last = h[h.length - 1];
+    const next = boardRef.current.map((r) => [...r]);
+    next[last.y][last.x] = "empty";
+    setBoard(next);
+    setHistory(h.slice(0, -1));
+    setLastMove(h.length >= 2 ? h[h.length - 2] : null);
+    setWinner(null);
+    setToMove(h.length % 2 === 1 ? "black" : "white");
+    setTimeout(() => pushSyncState(), 60);
+  }
+
+  function requestUndo() {
+    if (phaseRef.current !== "playing" || historyRef.current.length === 0) return;
+    transport.send({ type: "UndoReq" });
+    showNotice("已请求悔棋，等待对方同意…", 6000);
+  }
+
+  function requestReset() {
+    if (phaseRef.current !== "playing") return;
+    transport.send({ type: "ResetReq" });
+    showNotice("已请求重开，等待对方同意…", 6000);
+  }
+
+  function requestSwap() {
+    if (phaseRef.current !== "playing") return;
+    transport.send({ type: "SwapReq" });
+    showNotice("已请求换棋（交换黑白并重开），等待对方同意…", 6000);
+  }
+
+  function pushSyncState() {
+    transport.send({
+      type: "SyncState",
+      board: boardRef.current, toMove: toMoveRef.current, winner: winnerRef.current,
+      history: historyRef.current, lastMove: lastMoveRef.current,
+      kind: kindRef.current, size: sizeRef.current,
+    });
+  }
+
+  /* ---------- 头像（圆形裁剪，本地存储，P2P 交换） ---------- */
+
+  function loadMyAvatar(): string | null {
+    try { return localStorage.getItem("goptop:avatar"); } catch { return null; }
+  }
+
+  function saveMyAvatar(dataUrl: string | null) {
+    myAvatarRef.current = dataUrl;
+    try {
+      if (dataUrl) localStorage.setItem("goptop:avatar", dataUrl);
+      else localStorage.removeItem("goptop:avatar");
+    } catch { /* ignore */ }
+  }
+
+  /* ---------- 观战房间管理（对局者权限）与观战者动作 ---------- */
+
+  /** 对局者：批准聊天区里的观战申请（pwd 错/无的请求）。 */
+  function approveSpecRequest(from: string) {
+    setSpecRequests((r) => r.filter((x) => x.from !== from));
+    const name = specRequestsRef.current.find((x) => x.from === from)?.fromName ?? from;
+    void serverAdmitSpectator(from, name);
+  }
+
+  function rejectSpecRequest(from: string) {
+    const req = specRequestsRef.current.find((x) => x.from === from);
+    setSpecRequests((r) => r.filter((x) => x.from !== from));
+    if (req) serverChannel.signal(from, "spec-reply", { name: myName(), ok: false, reason: "房主拒绝了观战申请" });
+  }
+
+  /** 对局者：踢出观战者（自己的直接关连接；对方直连的经 spec-kick 转移处理）。
+   *  先向被踢者发 spec-kicked 通知再从名单移除——移除后 spec-sync 就送不到它了。 */
+  function kickSpectator(id: string) {
+    const target = spectatorsRef.current.find((s) => s.id === id);
+    if (!target) return;
+    if (target.host === serverChannel.myServerId) {
+      if (serverChannel.connected) serverChannel.signal(id, "spec-kicked", { name: myName() });
+      const peer = rtcPeersRef.current.find((q) => q.peerTag === id);
+      if (peer) {
+        try { peer.close(); } catch { /* ignore */ }
+        rtcPeersRef.current = rtcPeersRef.current.filter((q) => q !== peer);
+      }
+    } else if (serverChannel.connected) {
+      serverChannel.signal(target.host, "spec-kick", { name: myName(), id });
+    }
+    syncSpectators(spectatorsRef.current.filter((s) => s.id !== id));
+    pushSpecSync();
+  }
+
+  /** 对局者：禁言/解除禁言。 */
+  function muteSpectator(id: string, muted: boolean) {
+    syncSpectators(spectatorsRef.current.map((s) => (s.id === id ? { ...s, muted } : s)));
+    pushSpecSync();
+  }
+
+  /** 对局者：关闭观战（本局所有人无法观战，全部踢出）。 */
+  function disableSpectate() {
+    setSpectateEnabled(false);
+    spectateEnabledRef.current = false;
+    specPwdRef.current = null;
+    // 踢出全部观战者
+    for (const s of spectatorsRef.current) {
+      if (s.host === serverChannel.myServerId) {
+        const peer = rtcPeersRef.current.find((q) => q.peerTag === s.id);
+        if (peer) {
+          try { peer.close(); } catch { /* ignore */ }
+          rtcPeersRef.current = rtcPeersRef.current.filter((q) => q !== peer);
+        }
+      } else if (serverChannel.connected) {
+        serverChannel.signal(s.host, "spec-kick", { name: myName(), id: s.id });
+      }
+    }
+    syncSpectators([]);
+    setWatchUrl(null);
+    pushSpecSync();
+    showNotice("已关闭本局观战", 3000);
+  }
+
+  /** 观战者：申请发言（一次机会，双 host 均批准才可发言）。 */
+  function requestSpecChat() {
+    if (roleRef.current !== "spectator") return;
+    if (specRequestDeniedRef.current) {
+      showNotice("本局发言申请已被拒绝，无法再次申请", 3000);
+      return;
+    }
+    const host = myHostRef.current;
+    if (host && serverChannel.connected) {
+      serverChannel.signal(host, "spec-chat-req", { name: myName() });
+      showNotice("发言申请已发送，等待双方同意…", 6000);
+    }
+  }
+
+  /** 弹窗统一处理：同意/拒绝走挂上的续体。 */
+  function confirmApprove() {
+    const r = confirmResolveRef.current;
+    confirmResolveRef.current = null;
+    confirmRejectRef.current = null;
+    setConfirmReq(null);
+    r?.();
+  }
+
+  function confirmDecline() {
+    const r = confirmRejectRef.current;
+    confirmResolveRef.current = null;
+    confirmRejectRef.current = null;
+    setConfirmReq(null);
+    r?.();
   }
 
   /* ---------- 落子 ---------- */
@@ -1155,8 +1667,34 @@ export function useGameSession() {
     setHistory([]);
     setHover(null);
     if (phase === "playing") {
+      // 本地对战：直接重开并广播；P2P：改为对方同意制（见 requestReset）
+      if (serverMode && (role === "inviter" || role === "invitee")) {
+        requestReset();
+        return;
+      }
       transport.send({ type: "Reset", kind: k, size: s });
     }
+  }
+
+  /** 协商重开的本地执行（双方各自执行 + SyncState 对齐观战者）。 */
+  function doResetLocal() {
+    setBoard(emptyBoard(sizeRef.current));
+    setToMove("black");
+    setWinner(null);
+    setLastMove(null);
+    setHistory([]);
+    setHover(null);
+    setTimeout(() => pushSyncState(), 60);
+  }
+
+  /** 协商换棋的本地执行：黑白互换并重开（观战者无需变色，颜色以消息 by 为准）。 */
+  function doSwapLocal() {
+    if (roleRef.current === "inviter" || roleRef.current === "invitee") {
+      const flipped = myColorRef.current === "black" ? "white" : "black";
+      setMyColor(flipped);
+      myColorRef.current = flipped;
+    }
+    doResetLocal();
   }
 
   function saveName() {
@@ -1229,12 +1767,19 @@ export function useGameSession() {
     directState, answerBackUrl, copyFb, modal, modalInput, modalErr,
     // 服务器模式（可选）
     serverMode, serverState, serverIncoming,
+    spectators, specRequests, spectateEnabled, specCanChat,
+    specPwd: specPwdRef.current,
+    chatLog, peerAvatars, confirmReq,
     // 渲染层直接写状态的 setter
     setModal, setModalInput, setModalErr, setName, setHover,
     // 动作
     submitModal, createInvite, acceptInvite, acceptChallenge, rejectChallenge,
     backHome, copyText, handlePlace, reset, saveName, pickKind, pickSize,
     serverChallengePeer, serverAcceptChallenge, serverRejectChallenge,
+    sendChat, requestUndo, requestReset, requestSwap,
+    approveSpecRequest, rejectSpecRequest, kickSpectator, muteSpectator,
+    disableSpectate, requestSpecChat, confirmApprove, confirmDecline,
+    loadMyAvatar, saveMyAvatar,
     // 派生
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
     rtcStatus, incomingBanner, mode, viewedUserId, viewedPeer, isSelfPage,

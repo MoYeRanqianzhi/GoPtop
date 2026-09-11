@@ -145,3 +145,47 @@ footer,
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* 聊天双栏：宽屏时对局居左、聊天停靠右侧；窄屏（显示不下）聊天只以弹窗出现。
+   必须占满 main 剩余高度：play-stack 的 height:100% 与 board-wrap 的
+   flex 高度都依赖这里给出的确定高度，否则棋盘高度塌缩、整组被算成最小宽 */
+.game-layout {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: 14px;
+}
+.chat-dock {
+  width: 300px;
+  flex-shrink: 0;
+  display: none;
+  min-height: 0;
+}
+@media (min-width: 1080px) {
+  .chat-dock--open { display: flex; flex-direction: column; }
+}
+/* 窄屏聊天弹窗 */
+.chat-modal-bg {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 10, 0.45);
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.chat-modal {
+  width: min(420px, 100%);
+  height: min(560px, 88dvh);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+@media (min-width: 1080px) {
+  /* 宽屏下弹窗形态隐藏（用停靠栏） */
+  .chat-modal-bg { display: none; }
+}

@@ -5,12 +5,14 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useGameSession } from "./state/useGameSession";
-import { nav } from "./net/transport";
+import { nav, specLinkUrl } from "./net/transport";
 import type { Size } from "./net/transport";
-import { BoardPanel, PeerList, ServerSettings, StunSettings } from "./pages/components";
+import { AvatarSettings, BoardPanel, ChatPanel, PeerList, ServerSettings, StunSettings } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
 export default function App() {
   const [typeOpen, setTypeOpen] = useState(false);
+  // 聊天面板开合：宽屏=右侧停靠栏，窄屏=弹窗（CSS .chat-dock/.chat-modal 控制形态）
+  const [chatOpen, setChatOpen] = useState(false);
   const mainRef = useRef<HTMLElement | null>(null);
 
   /* 等宽同步缩放（Phase 2 设计的实测版）：board-wrap 以 flex 吃掉剩余高度，
@@ -54,15 +56,22 @@ export default function App() {
     inviteUrl, watchUrl, notice, answerBackUrl, copyFb,
     modal, modalInput, modalErr,
     serverMode, serverState, serverIncoming,
+    spectators, specRequests, spectateEnabled, specCanChat, specPwd,
+    chatLog, peerAvatars, confirmReq,
     setModal, setModalInput, setModalErr, setName, setHover,
     showNotice,
     submitModal, createInvite, acceptInvite, backHome, copyText,
     handlePlace, reset, saveName, pickKind, pickSize,
     serverChallengePeer, serverAcceptChallenge, serverRejectChallenge,
+    sendChat, requestUndo, requestReset, requestSwap,
+    approveSpecRequest, rejectSpecRequest, kickSpectator, muteSpectator,
+    disableSpectate, requestSpecChat, confirmApprove, confirmDecline,
+    loadMyAvatar, saveMyAvatar,
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
     rtcStatus, incomingBanner, mode, viewedUserId, viewedPeer, isSelfPage,
     topLocked, topLockedTitle,
   } = useGameSession();
+  const myAvatar = loadMyAvatar();
 
   const serverIncomingBanner = serverIncoming && (
     <div className="brutal-card" style={{ padding: "8px 10px", background: "#fff", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -72,6 +81,66 @@ export default function App() {
       <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={serverAcceptChallenge}>同意</button>
       <button className="brutal-btn brutal-btn--sm" onClick={serverRejectChallenge}>拒绝</button>
     </div>
+  );
+
+  // 服务器模式观战链接（观战钥匙整局有效；关闭观战后不再展示）
+  const specUrl = serverMode && spectateEnabled && specPwd && (phase === "playing" || phase === "waiting") && role !== "spectator"
+    ? specLinkUrl(tabUser, specPwd)
+    : null;
+
+  // 协商/审批弹窗（悔棋、重开、换棋、错钥匙连接、观战发言批准）
+  const confirmBanner = confirmReq && (
+    <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", zIndex: 50 }}>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
+        {confirmReq.kind === "undo" && `${confirmReq.fromName} 请求悔棋，是否同意？`}
+        {confirmReq.kind === "reset" && `${confirmReq.fromName} 请求重开对局，是否同意？`}
+        {confirmReq.kind === "swap" && `${confirmReq.fromName} 请求换棋（黑白互换并重开），是否同意？`}
+        {confirmReq.kind === "wrong-pwd" && `${confirmReq.fromName} 请求连接（邀请钥匙不正确），是否接受？`}
+        {confirmReq.kind === "spec-chat" && `${confirmReq.fromName} 申请参与聊天，是否同意？`}
+      </span>
+      <span style={{ flex: 1 }} />
+      <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={confirmApprove}>同意</button>
+      <button className="brutal-btn brutal-btn--sm" onClick={confirmDecline}>拒绝</button>
+    </div>
+  );
+
+  // 聊天面板（宽屏右侧停靠；窄屏弹窗，形态由 CSS 控制）
+  const chatPanel = (
+    <ChatPanel
+      role={role}
+      chatLog={chatLog}
+      peerAvatars={peerAvatars}
+      spectators={spectators}
+      specRequests={specRequests}
+      specCanChat={specCanChat}
+      spectateEnabled={spectateEnabled}
+      onSend={sendChat}
+      onUndo={requestUndo}
+      onReset={requestReset}
+      onSwap={requestSwap}
+      onKick={kickSpectator}
+      onMute={muteSpectator}
+      onDisableSpectate={disableSpectate}
+      onRequestSpecChat={requestSpecChat}
+      onApproveSpec={approveSpecRequest}
+      onRejectSpec={rejectSpecRequest}
+    />
+  );
+  const chatDockOpen = chatOpen && mode === "p2p" && phase === "playing";
+  const chatDock = chatDockOpen && (
+    <>
+      <aside className="brutal-card chat-dock chat-dock--open" style={{ padding: 12 }}>
+        {chatPanel}
+      </aside>
+      {/* 窄屏：同内容以弹窗覆盖 */}
+      {chatOpen && mode === "p2p" && phase === "playing" && (
+        <div className="chat-modal-bg" onClick={() => setChatOpen(false)}>
+          <div className="brutal-card chat-modal" onClick={(e) => e.stopPropagation()} style={{ padding: 12 }}>
+            {chatPanel}
+          </div>
+        </div>
+      )}
+    </>
   );
 
   return (
@@ -204,28 +273,12 @@ export default function App() {
         </div>
       </header>
 
-      <main ref={mainRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: 760, margin: "0 auto", overflow: "hidden" }}>
+      <main ref={mainRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: "none", margin: "0 auto", overflow: "hidden" }}>
+        <div className="game-layout">
+        {confirmBanner}
         <div className="play-stack">
           {incomingBanner}
           {serverIncomingBanner}
-
-          {/* —— 服务器短码落地页 `/j/<code>` `/s/<code>`：连接服务器并自动加入（免回执）—— */}
-          {(mode === "join" || mode === "spectate") && phase === "home" && (
-            <div className="brutal-card" style={{ padding: "14px 16px", background: "#fff", display: "flex", flexDirection: "column", gap: 10 }}>
-              <span className="brutal-label">{mode === "join" ? "服务器短码邀请" : "服务器短码观战"}</span>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>
-                {serverState === "ready" ? (mode === "join" ? "正在加入对局，建立直连…" : "正在连接房主，进入观战…")
-                  : serverState === "connecting" ? "正在连接服务器…"
-                  : serverState === "error" ? "服务器连接失败：请在设置页确认与邀请者使用同一台服务器"
-                  : "未选择服务器：请在设置页选择与邀请者相同的服务器"}
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/settings")}>打开设置</button>
-                <button className="brutal-btn brutal-btn--sm" onClick={backHome}>回主页</button>
-              </div>
-              {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
-            </div>
-          )}
 
           {/* —— 菜单页 `/` —— */}
           {mode === "menu" && (
@@ -291,7 +344,10 @@ export default function App() {
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <code style={{ flex: 1, minWidth: 0, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inviteUrl}</code>
                     <button className="brutal-btn brutal-btn--sm" style={{ flexShrink: 0 }} onClick={() => copyText(inviteUrl, "邀请链接已复制")}>复制</button>
-                    <button className="brutal-btn brutal-btn--sm brutal-btn--accent" style={{ flexShrink: 0 }} onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>回执</button>
+                    {/* 服务器模式信令经服务器直达（免回执）；回执仅无服务器跨设备需要 */}
+                    {!serverMode && (
+                      <button className="brutal-btn brutal-btn--sm brutal-btn--accent" style={{ flexShrink: 0 }} onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>回执</button>
+                    )}
                     <button className="brutal-btn brutal-btn--sm" style={{ flexShrink: 0 }} onClick={backHome}>取消</button>
                     {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
                   </div>
@@ -339,10 +395,10 @@ export default function App() {
                   <span className="brutal-label">对局 · 直连</span>
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: peerConnected ? "#0a7a2e" : "var(--muted)" }}>{p2pStatusText}</span>
                 </div>
-                {watchUrl && role !== "spectator" && (
+                {(watchUrl || specUrl) && role !== "spectator" && (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <code style={{ flex: "1 1 220px", minWidth: 180, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{watchUrl}</code>
-                    <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(watchUrl, "观战链接已复制")}>邀请观战</button>
+                    <code style={{ flex: "1 1 220px", minWidth: 180, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{specUrl ?? watchUrl}</code>
+                    <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl ?? watchUrl ?? "", "观战链接已复制")}>邀请观战</button>
                     <button className="brutal-btn brutal-btn--sm" onClick={backHome}>离开对局</button>
                     {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
                   </div>
@@ -356,9 +412,15 @@ export default function App() {
                 statusText={statusText} statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
                 moveCount={moveCount} history={history}
                 onUndo={null} onReset={reset}
-                actions={watchUrl
-                  ? <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(watchUrl, "观战链接已复制")}>复制观战链接</button>
-                  : undefined}
+                chatButton={
+                  <button className="brutal-btn brutal-btn--sm" onClick={() => setChatOpen(true)} title="聊天 / 悔棋 / 重开 / 换棋">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" style={{ display: "block" }}>
+                      <path d="M21 12a8 8 0 0 1-8 8H4l2.4-3A8 8 0 1 1 21 12z" strokeLinejoin="round" />
+                      <circle cx="9" cy="12" r="0.6" fill="currentColor" /><circle cx="13" cy="12" r="0.6" fill="currentColor" /><circle cx="17" cy="12" r="0.6" fill="currentColor" />
+                    </svg>
+                  </button>
+                }
+                actions={specUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl, "观战链接已复制")}>复制观战链接</button>}
               />
               {rtcStatus}
             </>
@@ -396,14 +458,6 @@ export default function App() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span className="brutal-label">设置</span>
                 <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")}>回菜单页</button>
-              </div>
-              <div>
-                <div className="brutal-label" style={{ marginBottom: 6 }}>昵称（在线用户列表中显示）</div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <input placeholder="给自己起个昵称" value={name} onChange={(e) => setName(e.target.value)}
-                    style={{ flex: "1 1 160px", minWidth: 140, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
-                  <button className="brutal-btn brutal-btn--sm" onClick={saveName}>保存昵称</button>
-                </div>
               </div>
               <div>
                 <div className="brutal-label" style={{ marginBottom: 6 }}>默认规则与尺寸（新对局/开页时使用）</div>
@@ -444,6 +498,15 @@ export default function App() {
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                     <span className="brutal-label">我的主页</span>
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>{tabUser}</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div className="brutal-label">头像与昵称（对局/聊天中展示）</div>
+                    <AvatarSettings dataUrl={myAvatar} onSave={saveMyAvatar} />
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                      <input placeholder="给自己起个昵称" value={name} onChange={(e) => setName(e.target.value)}
+                        style={{ flex: "1 1 160px", minWidth: 140, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
+                      <button className="brutal-btn brutal-btn--sm" onClick={saveName}>保存昵称</button>
+                    </div>
                   </div>
                   {phase === "waiting" && role === "inviter" && inviteUrl ? (
                     <>
@@ -553,6 +616,8 @@ export default function App() {
               {rtcStatus}
             </div>
           )}
+        </div>
+        {chatDock}
         </div>
       </main>
 

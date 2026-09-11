@@ -5,7 +5,7 @@
  * BoardPanel / loadDefaults / Role/Phase 类型。
  * 页面级 JSX 在 pages/ 下；对局状态机与信令编排已抽到 state/useGameSession.tsx。
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { Coord, StoneColor } from "../components/BoardSvg";
 import { BoardSvg } from "../components/BoardSvg";
@@ -15,6 +15,184 @@ import {
   saveServerSelection, saveServers,
 } from "../net/transport";
 import type { GameKind, PeerInfo, ServerEntry, Size, StunLine } from "../net/transport";
+
+/* ---------------- 头像（圆形，本地存储，P2P 交换） ---------------- */
+
+/** 圆形头像：有图显示图，无图显示首字。dataUrl 由调用方保证已圆形裁剪。 */
+export function Avatar(props: { dataUrl: string | null; name: string; size: number }) {
+  const { dataUrl, name, size } = props;
+  if (dataUrl) {
+    return <img src={dataUrl} alt={name} style={{ width: size, height: size, borderRadius: "50%", border: "2px solid var(--ink)", objectFit: "cover", flexShrink: 0, background: "#fff" }} />;
+  }
+  return (
+    <span style={{ width: size, height: size, borderRadius: "50%", border: "2px solid var(--ink)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, background: "#fff" }}>
+      {(name || "?").slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
+/** 选图 → 居中方形裁剪 → 圆形 mask → 128px PNG dataURL。 */
+export async function cropAvatarToCircle(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const sx = (bitmap.width - side) / 2;
+  const sy = (bitmap.height - side) / 2;
+  const OUT = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = OUT;
+  canvas.height = OUT;
+  const ctx = canvas.getContext("2d")!;
+  ctx.beginPath();
+  ctx.arc(OUT / 2, OUT / 2, OUT / 2, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, OUT, OUT);
+  bitmap.close();
+  return canvas.toDataURL("image/png");
+}
+
+/** 头像设置块（我的主页）：上传即裁剪保存，可清除。 */
+export function AvatarSettings(props: { dataUrl: string | null; onSave: (dataUrl: string | null) => void }) {
+  const { dataUrl, onSave } = props;
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <Avatar dataUrl={dataUrl} name="我" size={56} />
+      <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          if (f) onSave(await cropAvatarToCircle(f));
+          e.target.value = "";
+        }} />
+      <button className="brutal-btn brutal-btn--sm" onClick={() => fileRef.current?.click()}>上传头像</button>
+      {dataUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => onSave(null)}>清除</button>}
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>圆形裁剪 · 存本地 · 对局开始后自动发给对手</span>
+    </div>
+  );
+}
+
+/* ---------------- 聊天面板（对局侧栏 / 窄屏弹窗共用） ---------------- */
+
+export type ChatEntry = { userId: string; name: string; text: string; ts: number; self: boolean };
+
+/** 单局聊天面板：消息流 + 输入 + 协商动作 + 观战房间管理。 */
+export function ChatPanel(props: {
+  role: "idle" | "inviter" | "invitee" | "spectator";
+  chatLog: ChatEntry[];
+  peerAvatars: Record<string, string>;
+  spectators: { id: string; name: string; host: string; muted: boolean }[];
+  specRequests: { from: string; fromName: string }[];
+  specCanChat: boolean;
+  spectateEnabled: boolean;
+  onSend: (text: string) => void;
+  onUndo: () => void;
+  onReset: () => void;
+  onSwap: () => void;
+  onKick: (id: string) => void;
+  onMute: (id: string, muted: boolean) => void;
+  onDisableSpectate: () => void;
+  onRequestSpecChat: () => void;
+  onApproveSpec: (from: string) => void;
+  onRejectSpec: (from: string) => void;
+}) {
+  const { role, chatLog, peerAvatars, spectators, specRequests, specCanChat, spectateEnabled } = props;
+  const [text, setText] = useState("");
+  const isPlayer = role === "inviter" || role === "invitee";
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [chatLog.length]);
+
+  function send() {
+    const t = text.trim();
+    if (!t) return;
+    props.onSend(t);
+    setText("");
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, height: "100%", minHeight: 0 }}>
+      {/* 协商动作（仅对局者） */}
+      {isPlayer && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button className="brutal-btn brutal-btn--sm" onClick={props.onUndo}>悔棋</button>
+          <button className="brutal-btn brutal-btn--sm" onClick={props.onReset}>重开</button>
+          <button className="brutal-btn brutal-btn--sm" onClick={props.onSwap}>换棋</button>
+        </div>
+      )}
+      {/* 观战者：申请发言 / 已批准可发言 */}
+      {role === "spectator" && (
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>
+          {specCanChat ? "双方已同意，可参与聊天" : "观战模式：只读，可申请发言（一次机会，需双方同意）"}
+        </div>
+      )}
+      {role === "spectator" && !specCanChat && (
+        <button className="brutal-btn brutal-btn--sm" onClick={props.onRequestSpecChat}>申请发言</button>
+      )}
+      {/* 消息流 */}
+      <div ref={listRef} style={{ flex: 1, minHeight: 120, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, padding: "4px 2px" }}>
+        {chatLog.length === 0 && (
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>暂无消息</div>
+        )}
+        {chatLog.map((m, i) => (
+          <div key={`${m.ts}-${i}`} style={{ display: "flex", gap: 6, alignItems: "flex-start", flexDirection: m.self ? "row-reverse" : "row" }}>
+            <Avatar dataUrl={m.self ? null : peerAvatars[m.userId] ?? null} name={m.name} size={22} />
+            <div style={{ maxWidth: "78%" }}>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color: "var(--muted)", textAlign: m.self ? "right" : "left" }}>{m.name}</div>
+              <div style={{ display: "inline-block", border: "2px solid var(--ink)", padding: "3px 7px", fontSize: 12, fontWeight: 600, background: m.self ? "#fffbeb" : "#fff", overflowWrap: "anywhere" }}>{m.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {/* 观战申请（对局者处理，聊天区私有消息） */}
+      {isPlayer && specRequests.length > 0 && (
+        <div style={{ border: "2px solid var(--ink)", background: "#fffbeb", padding: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+          {specRequests.map((r) => (
+            <div key={r.from} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800 }}>{r.fromName} 申请观战（钥匙不正确）</span>
+              <span style={{ flex: 1 }} />
+              <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => props.onApproveSpec(r.from)}>同意</button>
+              <button className="brutal-btn brutal-btn--sm" onClick={() => props.onRejectSpec(r.from)}>拒绝</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* 观战房间管理（对局者） */}
+      {isPlayer && (
+        <div style={{ borderTop: "2px solid var(--ink)", paddingTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span className="brutal-label">观战（{spectators.length}）</span>
+            <span style={{ flex: 1 }} />
+            {spectateEnabled ? (
+              <button className="brutal-btn brutal-btn--sm" onClick={props.onDisableSpectate}>关闭观战</button>
+            ) : (
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color: "#b00020" }}>已关闭</span>
+            )}
+          </div>
+          {spectators.map((s) => (
+            <div key={s.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <Avatar dataUrl={peerAvatars[s.id] ?? null} name={s.name} size={20} />
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800 }}>{s.name}</span>
+              {s.muted && <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color: "#b00020" }}>已禁言</span>}
+              <span style={{ flex: 1 }} />
+              <button className="brutal-btn brutal-btn--sm" onClick={() => props.onMute(s.id, !s.muted)}>{s.muted ? "解除禁言" : "禁言"}</button>
+              <button className="brutal-btn brutal-btn--sm" onClick={() => props.onKick(s.id)}>踢出</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* 输入框：观战者需批准；禁言/关闭后不可发 */}
+      {role === "spectator" && (!specCanChat || !spectateEnabled) ? null : (
+        <div style={{ display: "flex", gap: 6 }}>
+          <input value={text} onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+            placeholder="说点什么…"
+            style={{ flex: 1, minWidth: 0, border: "3px solid var(--ink)", padding: "6px 9px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
+          <button className="brutal-btn brutal-btn--sm" onClick={send} disabled={!text.trim()}>发送</button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export type Role = "idle" | "inviter" | "invitee" | "spectator";
 export type Phase = "home" | "waiting" | "playing";
@@ -219,6 +397,8 @@ export function BoardPanel(props: {
   statusText: string; statusNote: string; moveCount: number; history: Coord[];
   onUndo: (() => void) | null; onReset: () => void;
   actions?: ReactNode;
+  /** P2P 对局：原悔棋/重开按钮位替换为聊天入口（协商动作移入聊天面板）。 */
+  chatButton?: ReactNode;
 }) {
   const { kind, size, board, toMove, winner, lastMove, hover, onHover, disabled, onPlace } = props;
   /* 底部三卡（2026-09-07 用户拍板）：宽时「规则」「对局」并排；显示不下时两宽卡收起，
@@ -267,8 +447,12 @@ export function BoardPanel(props: {
           </span>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {props.onUndo && <button className="brutal-btn brutal-btn--sm" onClick={props.onUndo}>悔棋</button>}
-          <button className="brutal-btn brutal-btn--sm brutal-btn--primary" onClick={props.onReset}>重开</button>
+          {props.chatButton ?? (
+            <>
+              {props.onUndo && <button className="brutal-btn brutal-btn--sm" onClick={props.onUndo}>悔棋</button>}
+              <button className="brutal-btn brutal-btn--sm brutal-btn--primary" onClick={props.onReset}>重开</button>
+            </>
+          )}
           {props.actions}
         </div>
       </div>
