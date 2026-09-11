@@ -3,7 +3,7 @@
 # frontend/ 为独立 npm 包，不纳入 Cargo workspace。
 
 [workspace]
-members = ["crates/goptop-core", "crates/goptop-transport", "src-tauri"]
+members = ["crates/goptop-core", "crates/goptop-transport", "crates/goptop-server", "src-tauri"]
 resolver = "2"
 
 # 共享依赖版本，便于各 crate 对齐。core/transport/tauri 三处复用 serde 等基础库。

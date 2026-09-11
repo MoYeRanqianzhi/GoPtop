@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { useGameSession } from "./state/useGameSession";
 import { nav } from "./net/transport";
 import type { Size } from "./net/transport";
-import { BoardPanel, PeerList, StunSettings } from "./pages/components";
+import { BoardPanel, PeerList, ServerSettings, StunSettings } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
 export default function App() {
   const [typeOpen, setTypeOpen] = useState(false);
@@ -53,18 +53,30 @@ export default function App() {
     intent, tabUser, name, peers, role, phase, myColor, peerConnected,
     inviteUrl, watchUrl, notice, answerBackUrl, copyFb,
     modal, modalInput, modalErr,
+    serverMode, serverState, serverIncoming,
     setModal, setModalInput, setModalErr, setName, setHover,
     showNotice,
     submitModal, createInvite, acceptInvite, backHome, copyText,
     handlePlace, reset, saveName, pickKind, pickSize,
+    serverChallengePeer, serverAcceptChallenge, serverRejectChallenge,
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
     rtcStatus, incomingBanner, mode, viewedUserId, viewedPeer, isSelfPage,
     topLocked, topLockedTitle,
   } = useGameSession();
 
+  const serverIncomingBanner = serverIncoming && (
+    <div className="brutal-card" style={{ padding: "8px 10px", background: "#fff", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
+        {serverIncoming.fromName} 邀请你加入对局（{serverIncoming.kind === "gomoku" ? "五子棋" : "围棋"} {serverIncoming.size}×{serverIncoming.size}）
+      </span>
+      <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={serverAcceptChallenge}>同意</button>
+      <button className="brutal-btn brutal-btn--sm" onClick={serverRejectChallenge}>拒绝</button>
+    </div>
+  );
+
   return (
     <div style={{ height: "100dvh", minHeight: "100dvh", display: "flex", flexDirection: "column", background: "var(--bg-page)", overflow: "hidden" }}>
-      <div className="poster-strip">GoPtop · P2P Gomoku & Go · Neubrutalism · 用户直连 · 无服务器无中转</div>
+      <div className="poster-strip">GoPtop · P2P Gomoku & Go · Neubrutalism · 优先直连 · 服务器可选中转</div>
 
       <header
         data-kind={kind}
@@ -195,6 +207,25 @@ export default function App() {
       <main ref={mainRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: 760, margin: "0 auto", overflow: "hidden" }}>
         <div className="play-stack">
           {incomingBanner}
+          {serverIncomingBanner}
+
+          {/* —— 服务器短码落地页 `/j/<code>` `/s/<code>`：连接服务器并自动加入（免回执）—— */}
+          {(mode === "join" || mode === "spectate") && phase === "home" && (
+            <div className="brutal-card" style={{ padding: "14px 16px", background: "#fff", display: "flex", flexDirection: "column", gap: 10 }}>
+              <span className="brutal-label">{mode === "join" ? "服务器短码邀请" : "服务器短码观战"}</span>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>
+                {serverState === "ready" ? (mode === "join" ? "正在加入对局，建立直连…" : "正在连接房主，进入观战…")
+                  : serverState === "connecting" ? "正在连接服务器…"
+                  : serverState === "error" ? "服务器连接失败：请在设置页确认与邀请者使用同一台服务器"
+                  : "未选择服务器：请在设置页选择与邀请者相同的服务器"}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/settings")}>打开设置</button>
+                <button className="brutal-btn brutal-btn--sm" onClick={backHome}>回主页</button>
+              </div>
+              {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
+            </div>
+          )}
 
           {/* —— 菜单页 `/` —— */}
           {mode === "menu" && (
@@ -226,12 +257,14 @@ export default function App() {
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span className="brutal-label">P2P 对战大厅</span>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>{tabUser}</span>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>
+                  {serverMode ? (serverState === "ready" ? "服务器已连接" : serverState === "connecting" ? "服务器连接中…" : "服务器未连接") : tabUser}
+                </span>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={createInvite}>开启对战（等对手）</button>
                 <button className="brutal-btn brutal-btn--sm" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-invite"); }}>粘贴邀请链接</button>
-                <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(myHomeUrl, "主页链接已复制")}>复制我的主页</button>
+                {!serverMode && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(myHomeUrl, "主页链接已复制")}>复制我的主页</button>}
                 {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
               </div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
@@ -239,10 +272,10 @@ export default function App() {
               </div>
               <PeerList
                 peers={peers}
-                emptyHint="暂无其他在线用户。"
+                emptyHint={serverMode ? "暂无其他在线用户（同服务器的用户会出现在这里）。" : "暂无其他在线用户。"}
                 actionLabel={() => "挑战"}
-                onAction={(p) => acceptInvite(p.id, null, kind, size)}
-                extraAction={(p) => (
+                onAction={(p) => (serverMode ? serverChallengePeer(p.id) : acceptInvite(p.id, null, kind, size))}
+                extraAction={serverMode ? undefined : (p) => (
                   <button className="brutal-btn brutal-btn--sm" onClick={() => nav(`/${encodeURIComponent(p.id)}`)}>主页</button>
                 )}
               />
@@ -396,6 +429,7 @@ export default function App() {
                   {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
                 </div>
               </div>
+              <ServerSettings />
               <StunSettings />
               {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
             </div>
@@ -616,7 +650,7 @@ export default function App() {
       )}
 
       <footer style={{ flexShrink: 0, padding: "10px 16px", borderTop: "3px solid var(--ink)", background: "#fff", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center" }}>
-        GoPtop · P2P Gomoku & Go · 用户直连 · 无服务器无中转
+        GoPtop · P2P Gomoku & Go · 优先直连 · 服务器可选中转
       </footer>
     </div>
   );

@@ -10,7 +10,11 @@ import type { ReactNode } from "react";
 import type { Coord, StoneColor } from "../components/BoardSvg";
 import { BoardSvg } from "../components/BoardSvg";
 import { loadStunLines, saveStunLines } from "../net/transport";
-import type { GameKind, PeerInfo, Size, StunLine } from "../net/transport";
+import {
+  BUILTIN_SERVERS, SERVER_NONE, loadServerSelection, loadServers,
+  saveServerSelection, saveServers,
+} from "../net/transport";
+import type { GameKind, PeerInfo, ServerEntry, Size, StunLine } from "../net/transport";
 
 export type Role = "idle" | "inviter" | "invitee" | "spectator";
 export type Phase = "home" | "waiting" | "playing";
@@ -123,6 +127,69 @@ export function StunSettings() {
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
         至少保留一条启用线路。
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- 设置页：信令服务器（单选切换） ---------------- */
+
+/** 服务器选择（单选，非开关）：无服务器 / 官方服务器 / 用户自建。
+ *  同一时刻只连一台；切换即保存并刷新页面生效。 */
+export function ServerSettings() {
+  const [customLabel, setCustomLabel] = useState("");
+  const [customUrl, setCustomUrl] = useState("");
+  const custom = loadServers();
+  const selected = loadServerSelection();
+  const all: (ServerEntry | { id: typeof SERVER_NONE; label: string; url: string; builtin: boolean })[] = [
+    { id: SERVER_NONE, label: "无服务器（纯直连）", url: "", builtin: true },
+    ...BUILTIN_SERVERS,
+    ...custom,
+  ];
+
+  function pick(id: string) {
+    if (id === selected) return;
+    saveServerSelection(id);
+    window.location.reload();
+  }
+
+  function addCustom() {
+    const url = customUrl.trim();
+    if (!/^wss?:\/\//.test(url)) return;
+    const entry: ServerEntry = { id: `srv-${Date.now().toString(36)}`, label: customLabel.trim() || url, url, builtin: false };
+    saveServers([...custom, entry]);
+    setCustomLabel("");
+    setCustomUrl("");
+  }
+
+  return (
+    <div>
+      <div className="brutal-label" style={{ marginBottom: 6 }}>服务器（单选切换，同一时刻只连一台）</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {all.map((s) => (
+          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: "3px solid var(--ink)", padding: "6px 8px", background: selected === s.id ? "#fffbeb" : "#fff" }}>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>{s.label}</span>
+            {s.url && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", overflowWrap: "anywhere" }}>{s.url}</span>}
+            <span style={{ flex: 1 }} />
+            {!s.builtin && (
+              <button className="brutal-btn brutal-btn--sm" onClick={() => { saveServers(custom.filter((c) => c.id !== s.id)); if (selected === s.id) saveServerSelection(SERVER_NONE); window.location.reload(); }}>删除</button>
+            )}
+            <button className={`brutal-btn brutal-btn--sm ${selected === s.id ? "brutal-btn--active" : ""}`}
+              onClick={() => pick(s.id)} aria-pressed={selected === s.id}>
+              {selected === s.id ? "使用中" : "切换"}
+            </button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+        <input placeholder="名称（可选）" value={customLabel} onChange={(e) => setCustomLabel(e.target.value)}
+          style={{ flex: "1 1 120px", minWidth: 120, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
+        <input placeholder="wss://服务器地址/ws" value={customUrl} onChange={(e) => setCustomUrl(e.target.value)}
+          style={{ flex: "2 1 200px", minWidth: 180, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
+        <button className="brutal-btn brutal-btn--sm" onClick={addCustom} disabled={!/^wss?:\/\//.test(customUrl.trim())}>添加服务器</button>
+      </div>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
+        选服务器：在线名册 + 短码邀请/观战（免回执）+ 连不上时的加密中转；不同服务器之间无法对战。
       </div>
     </div>
   );

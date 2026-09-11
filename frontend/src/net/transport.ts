@@ -105,24 +105,31 @@ export function genGameId(): string {
 
 /* ---------------- STUN 线路（仅 NAT 地址发现，不转发数据） ----------------
  *
- * - 国服 A 区：`stun:stun.miwifi.com:3478`（默认启用）
- * - 国服 B 区：`stun:stun.chat.bilibili.com:3478`（默认启用）
- * - 外服（谷歌）：`stun:stun.l.google.com:19302`（默认关闭，国内不可用时可手动打开）
- * - 用户可在设置页开关各线路、添加自定义 STUN，保存在 localStorage。
+ * 免费公共发现服务商池（2026-09 三地实测存活）：部分默认启用、其余默认关闭，
+ * 用户可在设置页逐条开关或添加自定义线路，保存在 localStorage。
  */
 
 export type StunLine = { id: string; label: string; urls: string; builtin: boolean; enabled: boolean };
 
 export const BUILTIN_STUN: Omit<StunLine, "enabled">[] = [
-  { id: "cn-a", label: "国服A区", urls: "stun:stun.miwifi.com:3478", builtin: true },
-  { id: "cn-b", label: "国服B区", urls: "stun:stun.chat.bilibili.com:3478", builtin: true },
-  { id: "foreign", label: "外服", urls: "stun:stun.l.google.com:19302", builtin: true },
+  { id: "miwifi", label: "小米", urls: "stun:stun.miwifi.com:3478", builtin: true },
+  { id: "bilibili", label: "哔哩哔哩", urls: "stun:stun.chat.bilibili.com:3478", builtin: true },
+  { id: "cloudflare", label: "Cloudflare", urls: "stun:stun.cloudflare.com:3478", builtin: true },
+  { id: "google", label: "Google", urls: "stun:stun.l.google.com:19302", builtin: true },
+  { id: "twilio", label: "Twilio", urls: "stun:global.stun.twilio.com:3478", builtin: true },
+  { id: "nextcloud", label: "Nextcloud", urls: "stun:stun.nextcloud.com:443", builtin: true },
+  { id: "sipnet", label: "Sipnet", urls: "stun:stun.sipnet.ru:3478", builtin: true },
+  { id: "cope", label: "Cope", urls: "stun:stun.cope.es:3478", builtin: true },
+  { id: "wtfismyip", label: "wtfismyip", urls: "stun:stun.wtfismyip.com:3478", builtin: true },
 ];
+
+/** 默认启用的线路：其余内置项默认关闭，用户可随时打开。 */
+const STUN_DEFAULT_ON = new Set(["miwifi", "bilibili", "cloudflare"]);
 
 const STUN_KEY = "goptop:stun";
 
 function defaultStunLines(): StunLine[] {
-  return BUILTIN_STUN.map((b) => ({ ...b, enabled: b.id !== "foreign" }));
+  return BUILTIN_STUN.map((b) => ({ ...b, enabled: STUN_DEFAULT_ON.has(b.id) }));
 }
 
 /** 当前启用的 STUN 线路（含用户自定义）。 */
@@ -132,10 +139,16 @@ export function loadStunLines(): StunLine[] {
     if (!raw) return defaultStunLines();
     const arr = JSON.parse(raw) as StunLine[];
     if (!Array.isArray(arr) || arr.length === 0) return defaultStunLines();
-    // 与内置线路合并：保留用户新增，补齐新增内置项
-    const byId = new Map(arr.filter((l) => l && typeof l.urls === "string").map((l) => [l.id, l]));
+    // 与内置线路合并：保留用户新增，补齐新增内置项；旧 id（cn-a/cn-b/foreign）映射到新 id
+    const LEGACY: Record<string, string> = { "cn-a": "miwifi", "cn-b": "bilibili", foreign: "google" };
+    const byId = new Map(
+      arr
+        .filter((l) => l && typeof l.urls === "string")
+        .map((l) => ({ ...l, id: LEGACY[l.id] ?? l.id }))
+        .map((l) => [l.id, l]),
+    );
     for (const b of BUILTIN_STUN) {
-      if (!byId.has(b.id)) byId.set(b.id, { ...b, enabled: b.id !== "foreign" });
+      if (!byId.has(b.id)) byId.set(b.id, { ...b, enabled: STUN_DEFAULT_ON.has(b.id) });
     }
     return [...byId.values()];
   } catch {
@@ -174,7 +187,11 @@ export type UrlIntent =
   | { mode: "users" }
   | { mode: "settings" }
   | { mode: "user"; userId: string; pwd: string | null; kind: GameKind; size: Size; rtc: string | null }
-  | { mode: "watch"; gameId: string };
+  | { mode: "watch"; gameId: string }
+  /** 服务器短码邀请：`/j/<code>?pwd=` ——点开即连（免回执，需选中同一台服务器） */
+  | { mode: "join"; code: string; pwd: string | null }
+  /** 服务器短码观战：`/s/<code>` ——点开即看 */
+  | { mode: "spectate"; code: string };
 
 function kindSizeFromParams(sp: URLSearchParams): { kind: GameKind; size: Size } {
   const kind: GameKind = sp.get("kind") === "go" ? "go" : "gomoku";
@@ -208,6 +225,8 @@ export function parseUrl(): UrlIntent {
     if (first === "users" && segs.length === 1) return { mode: "users" };
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
     if (first === "watch" && second) return { mode: "watch", gameId: decodeURIComponent(second) };
+    if (first === "j" && second) return { mode: "join", code: decodeURIComponent(second), pwd: sp.get("pwd") };
+    if (first === "s" && second) return { mode: "spectate", code: decodeURIComponent(second) };
     if (segs.length === 1) {
       const { kind, size } = kindSizeFromParams(sp);
       return { mode: "user", userId: decodeURIComponent(first), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc") };
@@ -260,6 +279,21 @@ export function watchToUrl(gameId: string): string {
   return url.toString();
 }
 
+/** 服务器短码邀请链接：`<分享域名>/j/<code>?pwd=<pwd>`（~40 字符，免回执）。 */
+export function joinCodeUrl(code: string, pwd: string): string {
+  const url = new URL(shareOrigin());
+  url.pathname = `/j/${encodeURIComponent(code)}`;
+  url.searchParams.set("pwd", pwd);
+  return url.toString();
+}
+
+/** 服务器短码观战链接：`<分享域名>/s/<code>`。 */
+export function spectateCodeUrl(code: string): string {
+  const url = new URL(shareOrigin());
+  url.pathname = `/s/${encodeURIComponent(code)}`;
+  return url.toString();
+}
+
 /** 回菜单页。 */
 export function homeUrl(): string {
   return `${window.location.origin}/`;
@@ -291,6 +325,71 @@ export function shareOrigin(): string {
   return isTauri() ? SHARE_ORIGIN_NATIVE : window.location.origin;
 }
 
+/* ---------------- 信令服务器（可选；单选切换，不用开关） ----------------
+ *
+ * 两种使用方式：
+ * - 无服务器（`none`）：现状纯 P2P，URL 信令 + 回执，无任何在线设施。
+ * - 选中某台服务器：连上后获得在线名册、短码邀请/观战（链接大幅缩短、免回执）、
+ *   trickle ICE 与数据兜底中转。**同一时刻只连一台**，不同服务器之间不能对战。
+ * 官方服务器是内置默认项；用户可自行添加更多服务器（如自建部署）。
+ */
+
+export type ServerEntry = { id: string; label: string; url: string; builtin: boolean };
+
+/** 内置官方服务器。换地址只改这一处。 */
+export const BUILTIN_SERVERS: ServerEntry[] = [
+  { id: "official", label: "官方服务器", url: "wss://goptopserver.meowoo.org/ws", builtin: true },
+];
+
+/** 「无服务器」的特殊选择值：不连任何服务器，行为与旧版完全一致。 */
+export const SERVER_NONE = "none";
+
+const SERVERS_KEY = "goptop:servers";
+const SERVER_SEL_KEY = "goptop:server-sel";
+
+/** 用户自定义服务器（builtin 项不入此列）。 */
+export function loadServers(): ServerEntry[] {
+  try {
+    const raw = localStorage.getItem(SERVERS_KEY);
+    const arr = raw ? (JSON.parse(raw) as ServerEntry[]) : [];
+    return Array.isArray(arr) ? arr.filter((s) => s && typeof s.url === "string" && !s.builtin) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveServers(list: ServerEntry[]) {
+  try {
+    localStorage.setItem(SERVERS_KEY, JSON.stringify(list.filter((s) => !s.builtin)));
+  } catch { /* ignore */ }
+}
+
+/** 当前选中的服务器（ServerSelection）："none" 或某个服务器 id。默认官方服务器。 */
+export function loadServerSelection(): string {
+  try {
+    const raw = localStorage.getItem(SERVER_SEL_KEY);
+    if (raw === SERVER_NONE) return SERVER_NONE;
+    if (raw) {
+      const all = [...BUILTIN_SERVERS, ...loadServers()];
+      if (all.some((s) => s.id === raw)) return raw;
+    }
+  } catch { /* ignore */ }
+  return BUILTIN_SERVERS[0]?.id ?? SERVER_NONE;
+}
+
+export function saveServerSelection(sel: string) {
+  try {
+    localStorage.setItem(SERVER_SEL_KEY, sel);
+  } catch { /* ignore */ }
+}
+
+/** 当前选中服务器的连接地址；无服务器返回 null。 */
+export function selectedServerUrl(): string | null {
+  const sel = loadServerSelection();
+  if (sel === SERVER_NONE) return null;
+  return [...BUILTIN_SERVERS, ...loadServers()].find((s) => s.id === sel)?.url ?? null;
+}
+
 /** 从粘贴的任意 URL 中提取站内意图（路径 + 查询参数），与域名无关。
  *  兼容旧 query 风格（`?u=` `?room=` `?watch=`）与路径风格（`/<userId>` `/watch/<id>`）。
  *  返回 null 表示这段文本不是可识别的 GoPtop 链接。 */
@@ -320,6 +419,8 @@ export function parsePastedLink(text: string): UrlIntent | null {
     if (first === "users" && segs.length === 1) return { mode: "users" };
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
     if (first === "watch" && second) return { mode: "watch", gameId: decodeURIComponent(second) };
+    if (first === "j" && second) return { mode: "join", code: decodeURIComponent(second), pwd: sp.get("pwd") };
+    if (first === "s" && second) return { mode: "spectate", code: decodeURIComponent(second) };
     if (segs.length === 1) {
       // 收紧识别：单段路径必须像用户链接（用户 ID 均为 u- 前缀，或带 pwd/rtc 邀请参数），
       // 否则视为普通文本/陌生网址——避免粘贴任意内容被误判成"用户主页"发起挑战。
@@ -727,8 +828,14 @@ export class DirectRtcPeer {
   state: RtcState = "idle";
   isInviter: boolean;
   role: "player" | "spectator";
+  /** 对端标识（服务器模式 = 对端 s- 短 ID）：多连接（对手+多名观战者）时
+   *  邀请者凭它把 answer 路由到正确的 peer；无服务器模式不使用。 */
+  peerTag: string | null = null;
   onRemote: ((msg: GameMsg) => void) | null = null;
   onState: ((s: RtcState) => void) | null = null;
+  /** trickle ICE：本端收集到的候选（服务器模式经服务器转发；无服务器模式不使用）。
+   *  candidate 为 RTCIceCandidateInit 的 JSON 字符串。 */
+  onCandidate: ((candidate: string) => void) | null = null;
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
   /** answer 是否已成功应用（setRemoteDescription 成功后才置位）。
@@ -755,6 +862,11 @@ export class DirectRtcPeer {
     pc.ondatachannel = (ev) => {
       this.attachChannel(ev.channel);
     };
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        try { this.onCandidate?.(JSON.stringify(ev.candidate.toJSON())); } catch { /* ignore */ }
+      }
+    };
     pc.onconnectionstatechange = () => {
       const st = pc.connectionState;
       if (st === "connected") this.setState("open");
@@ -764,6 +876,14 @@ export class DirectRtcPeer {
     };
     this.pc = pc;
     return pc;
+  }
+
+  /** 对端经服务器转发来的 trickle 候选（服务器模式专用）。 */
+  async addRemoteCandidate(candidateJson: string) {
+    if (!this.pc) return;
+    try {
+      await this.pc.addIceCandidate(JSON.parse(candidateJson));
+    } catch { /* 候选乱序/无效由 ICE 自身容错 */ }
   }
 
   private attachChannel(ch: RTCDataChannel) {
@@ -807,6 +927,17 @@ export class DirectRtcPeer {
   /** 邀请者：预生成邀请用 offer（role 固定 player），编进邀请 URL 的 `&rtc=` 参数。
    *  `pwd` 为本局钥匙，同时充当信令编码密钥（两端一致即可解码）。 */
   async createOffer(pwd: string): Promise<string> {
+    const desc = await this.prepareOffer();
+    return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
+  }
+
+  /** 邀请者（服务器模式）：offer 以明文 JSON 走 WSS（传输层已有 TLS，pwd 只在服务器侧校验）。 */
+  async createOfferPlain(): Promise<string> {
+    const desc = await this.prepareOffer();
+    return JSON.stringify({ s: desc.sdp, t: desc.type, r: this.role });
+  }
+
+  private async prepareOffer(): Promise<RTCSessionDescription> {
     this.close();
     this.setState("making-invite");
     const pc = this.makePc();
@@ -818,31 +949,51 @@ export class DirectRtcPeer {
     const desc = pc.localDescription!;
     DirectRtcPeer.all.add(this);
     this.setState("waiting-invitee");
-    return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
+    return desc;
   }
 
   /** 受邀者：用邀请 URL 的 offer 生成 answer 返回（随后自动回传邀请者，无需用户操作）。 */
   async acceptOffer(token: string, pwd: string): Promise<string> {
+    const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType; r?: string };
+    const desc = await this.acceptOfferInner(payload);
+    return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
+  }
+
+  /** 受邀者（服务器模式）：offer/answer 均为明文 JSON（WSS 已加密，pwd 只在服务器侧校验）。 */
+  async acceptOfferPlain(payloadJson: string): Promise<string> {
+    const desc = await this.acceptOfferInner(JSON.parse(payloadJson));
+    return JSON.stringify({ s: desc.sdp, t: desc.type, r: this.role });
+  }
+
+  private async acceptOfferInner(payload: { s: string; t: RTCSdpType; r?: string }): Promise<RTCSessionDescription> {
     this.close();
     this.setState("joining");
     const pc = this.makePc();
-    const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType; r?: string };
     if (payload.r === "spectator") this.role = "spectator";
     await pc.setRemoteDescription({ type: payload.t, sdp: payload.s });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await this.waitGathering(pc);
-    const desc = pc.localDescription!;
     DirectRtcPeer.all.add(this);
-    return encodeRtcPayload({ s: desc.sdp, t: desc.type, r: this.role }, pwd);
+    return pc.localDescription!;
   }
 
   /** 邀请者：用受邀者回传的 answer 完成直连（同源经 Presence 自动回传；跨设备由弹窗粘贴回执触发）。
    *  幂等位在「应用成功」后才置位：坏回执解码失败不锁死，邀请者可再贴正确回执。 */
   async acceptAnswer(token: string, pwd: string): Promise<void> {
+    const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType };
+    await this.acceptAnswerPayload(payload);
+  }
+
+  /** 邀请者（服务器模式）：answer 为明文 JSON。 */
+  async acceptAnswerPlain(payloadJson: string): Promise<void> {
+    const payload = JSON.parse(payloadJson) as { s: string; t: RTCSdpType };
+    await this.acceptAnswerPayload(payload);
+  }
+
+  private async acceptAnswerPayload(payload: { s: string; t: RTCSdpType }): Promise<void> {
     if (!this.pc) throw new Error("no pending offer");
     if (this.answered) return;
-    const payload = await decodeRtcPayload(token, pwd) as { s: string; t: RTCSdpType };
     try {
       await this.pc.setRemoteDescription({ type: payload.t, sdp: payload.s });
       this.answered = true;

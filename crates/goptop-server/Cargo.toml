@@ -1,0 +1,19 @@
+[package]
+name = "goptop-server"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop 官方信令服务器：在线名册 + 短码邀请/观战 + SDP 转发 + 数据兜底中转"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# 服务器协议测试用 tokio test 宏
+tokio = { workspace = true, features = ["macros", "rt"] }

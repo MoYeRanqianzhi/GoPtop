@@ -11,12 +11,16 @@ import type { Coord, StoneColor } from "../components/BoardSvg";
 import { checkFive, emptyBoard } from "../game/board";
 import { loadDefaults, RtcStatusLine } from "../pages/components";
 import type { Phase, Role } from "../pages/components";
+import { serverChannel } from "../net/serverChannel";
+import type { ServerEvent, ServerState } from "../net/serverChannel";
 import {
   answerToUrl,
   DirectRtcPeer,
   genGameId,
   genPwd,
   inviteToUrl,
+  joinCodeUrl,
+  loadServerSelection,
   myName,
   myUserId,
   nav,
@@ -25,6 +29,7 @@ import {
   parseUrl,
   presence,
   setMyName,
+  spectateCodeUrl,
   transport,
   userToUrl,
   watchToUrl,
@@ -80,6 +85,20 @@ export function useGameSession() {
   const [directState, setDirectState] = useState<string>("idle");
   const [answerBackUrl, setAnswerBackUrl] = useState<string | null>(null);
   const [copyFb, setCopyFb] = useState<string | null>(null);
+
+  // —— 服务器模式（可选）—— //
+  // 启动时按设置选中项决定（设置页切换后 reload 生效）：none=无服务器，其余=连服务器。
+  const serverMode = loadServerSelection() !== "none";
+  const [serverState, setServerState] = useState<ServerState>(serverMode ? "connecting" : "off");
+  /** 服务器模式的兜底中转目标（对手 + 观战者的 s- 短 ID）。 */
+  const relayTargetsRef = useRef<Set<string>>(new Set());
+  /** 服务器挑战信（对方点名邀请）：等用户同意/拒绝。 */
+  const [serverIncoming, setServerIncoming] = useState<{ from: string; fromName: string; kind: GameKind; size: Size; code: string; pwd: string } | null>(null);
+  /** 短码意图（/j /s 链接打开）：连接就绪后执行。 */
+  const pendingJoinRef = useRef<{ code: string; pwd: string | null } | null>(null);
+  const pendingWatchRef = useRef<{ code: string } | null>(null);
+  /** 大厅挑战：createInvite 完成短码生成后向该目标发挑战信。 */
+  const pendingChallengeRef = useRef<string | null>(null);
 
   /* ---------- 弹窗（所有信令消息统一走弹窗收发） ---------- */
   // kind:
@@ -325,6 +344,124 @@ export function useGameSession() {
     else presence.setStatus(role === "spectator" ? "idle" : "in-game", gameId);
   }, [phase, gameId, role]);
 
+  // 服务器模式状态上报（与 presence 并行；announce 内部有重连重放）
+  useEffect(() => {
+    if (!serverMode) return;
+    if (phase === "home") serverChannel.announce("idle", null);
+    else if (phase === "waiting") serverChannel.announce("waiting", gameId);
+    else serverChannel.announce(role === "spectator" ? "idle" : "in-game", gameId);
+  }, [phase, gameId, role, serverMode]);
+
+  /** 服务器短码意图是否已就绪可执行（连接 ready）。 */
+  function flushPendingServerIntents() {
+    const j = pendingJoinRef.current;
+    if (j && serverChannel.connected) {
+      pendingJoinRef.current = null;
+      serverChannel.inviteResolve(j.code, j.pwd ?? "");
+      showNotice("正在通过服务器建立直连…");
+    }
+    const w = pendingWatchRef.current;
+    if (w && serverChannel.connected) {
+      pendingWatchRef.current = null;
+      serverChannel.watchResolve(w.code);
+    }
+  }
+
+  // 服务器通道生命周期与事件分发。事件直接调处理函数（不走 queue）：
+  // 服务器消息都是点对点定向信件，无 presence 那种「信件竞态」问题；
+  // 处理函数用 ref 判定当前状态（与文件其余处理逻辑同一模式）。
+  useEffect(() => {
+    if (!serverMode) return;
+    serverChannel.connectFromSettings();
+    serverChannel.onEvent = (e: ServerEvent) => {
+      switch (e.t) {
+        case "state":
+          setServerState(e.s);
+          if (e.s === "ready") {
+            showNotice(null);
+            flushPendingServerIntents();
+          } else if (e.s === "error") {
+            showNotice(`服务器连接失败：${e.detail ?? "请检查设置页服务器配置"}`, 3000);
+          }
+          break;
+        case "welcome":
+          break;
+        case "peers":
+          setPeers(e.users
+            .filter((u) => u.id !== serverChannel.myServerId)
+            .map((u) => ({ id: u.id, name: u.name, status: u.status, gameId: u.gameId, ts: Date.now() })));
+          break;
+        case "invite-created": {
+          const p = pwdRef.current;
+          if (p) {
+            setInviteUrl(joinCodeUrl(e.code, p));
+            setDirectState("waiting-invitee");
+            showNotice(null);
+            if (pendingChallengeRef.current) {
+              serverChannel.challenge(pendingChallengeRef.current, kindRef.current, sizeRef.current, e.code, p);
+              pendingChallengeRef.current = null;
+            }
+          }
+          // 观战短码一并生成：对局/等待页可展示「观战」链接
+          serverChannel.watchCreate(gameIdRef.current ?? "");
+          break;
+        }
+        case "invite-offer":
+          void serverAcceptOffer(e);
+          break;
+        case "invitee-joined":
+          relayTargetsRef.current.add(e.from);
+          if (inviterRtcRef.current) inviterRtcRef.current.peerTag = e.from;
+          showNotice("对手已进入，直连建立中…");
+          break;
+        case "answer":
+          void serverAcceptAnswer(e.from, e.answer);
+          break;
+        case "offer":
+          void serverAcceptSpectatorOffer(e.from, e.offer, e.gameId);
+          break;
+        case "ice":
+          serverAcceptIce(e.from, e.candidate);
+          break;
+        case "watch-created":
+          setWatchUrl(spectateCodeUrl(e.code));
+          break;
+        case "watch-accepted":
+          relayTargetsRef.current.add(e.from);
+          joinAsSpectator(e.gameId);
+          nav("/p2p");
+          break;
+        case "spectator-joined":
+          void serverHostSpectator(e.from);
+          break;
+        case "challenge":
+          if (phaseRef.current === "playing") {
+            serverChannel.challengeReject(e.from);
+            break;
+          }
+          setServerIncoming({
+            from: e.from,
+            fromName: peers.find((u) => u.id === e.from)?.name ?? e.from,
+            kind: e.kind, size: e.size, code: e.code, pwd: e.pwd,
+          });
+          break;
+        case "challenge-rejected":
+          setServerIncoming(null);
+          showNotice("对方拒绝了对局", 2400);
+          backHome();
+          break;
+        case "relayed":
+          try { transport.injectRemote(e.payload); } catch { /* ignore */ }
+          break;
+        case "error":
+          showNotice(`服务器：${e.msg}`, 3000);
+          break;
+      }
+    };
+    return () => { serverChannel.onEvent = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverMode]);
+
   // 路由变化监听（站内 nav / 前进后退）
   useEffect(() => {
     const onPop = () => setIntent(parseUrl());
@@ -332,9 +469,29 @@ export function useGameSession() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  /** 按 URL 意图行动：观战加入 / 邀请自动挑战。回执不再走「打开链接」——
-   *  新标签页身份不同且邀请者 RTC 状态不可迁移，曾导致同机两窗互弈；统一走等待页「输入回执」弹窗。 */
+  /** 按 URL 意图行动：观战加入 / 邀请自动挑战 / 服务器短码（免回执）。
+   *  回执不再走「打开链接」——新标签页身份不同且邀请者 RTC 状态不可迁移，
+   *  曾导致同机两窗互弈；统一走等待页「输入回执」弹窗。 */
   function processIntent(it: UrlIntent) {
+    if (it.mode === "join" && phaseRef.current === "home") {
+      if (!serverMode) {
+        showNotice("这是服务器短码邀请：请在设置页选择与邀请者相同的服务器后再打开", 3600);
+        return;
+      }
+        // 服务器可能还在连接中：挂起等 ready 后执行（flushPendingServerIntents）
+      pendingJoinRef.current = { code: it.code, pwd: it.pwd };
+      flushPendingServerIntents();
+      return;
+    }
+    if (it.mode === "spectate" && phaseRef.current === "home") {
+      if (!serverMode) {
+        showNotice("这是服务器短码观战链接：请在设置页选择与房主相同的服务器后再打开", 3600);
+        return;
+      }
+      pendingWatchRef.current = { code: it.code };
+      flushPendingServerIntents();
+      return;
+    }
     if (it.mode === "watch" && phaseRef.current === "home") {
       joinAsSpectator(it.gameId);
     } else if (it.mode === "user" && phaseRef.current === "home") {
@@ -389,8 +546,9 @@ export function useGameSession() {
     setHover(null);
   }
 
-  /** 邀请者：开启对战（waiting），生成每局轮换 pwd + gameId，后台预生成直连 offer 编进邀请链接。 */
-  function createInvite() {
+  /** 邀请者：开启对战（waiting），生成每局轮换 pwd + gameId，后台预生成直连 offer 编进邀请链接。
+   *  服务器模式下 offer 需异步生成后再交给服务器换短码，故整体 async。 */
+  async function createInvite() {
     closeAllRtcPeers();
     const g = genGameId();
     const p = genPwd();
@@ -410,6 +568,34 @@ export function useGameSession() {
     // 旧实现先给无 rtc 链接：用户复制发出的链接跨设备永远连不上（审查 A5）。
     setInviteUrl(null);
     setWatchUrl(null);
+    // —— 服务器模式：offer/短码交给服务器，链接是 ~40 字符的短码链接（免回执）——
+    if (serverMode) {
+      if (!serverChannel.connected) {
+        setDirectState("error");
+        showNotice("服务器未连接：请检查设置页服务器配置或切换到无服务器模式");
+        return;
+      }
+      showNotice("正在生成直连邀请…");
+      setDirectState("making-invite");
+      const peer = new DirectRtcPeer({ isInviter: true, role: "player" });
+      attachPeer(peer);
+      try {
+        const offer = await peer.createOfferPlain();
+        if (phaseRef.current !== "waiting" || roleRef.current !== "inviter" || pwdRef.current !== p) {
+          try { peer.close(); } catch { /* ignore */ }
+          return;
+        }
+        inviterRtcRef.current = peer;
+        // offer 存服务器换短码；invite-created 事件回填短码邀请链接与观战短码
+        serverChannel.inviteCreate(kind, size, p, offer, g);
+      } catch {
+        inviterRtcRef.current = null;
+        try { peer.close(); } catch { /* ignore */ }
+        setDirectState("error");
+        showNotice("直连邀请生成失败：可取消后重开");
+      }
+      return;
+    }
     showNotice("正在生成直连邀请…");
     setDirectState("making-invite");
     // 后台预生成 offer：用户只需复制最终邀请链接，无需触碰 offer 文本
@@ -710,6 +896,9 @@ export function useGameSession() {
     for (const p of rtcPeersRef.current) { try { p.close(); } catch { /* ignore */ } }
     rtcPeersRef.current = [];
     inviterRtcRef.current = null;
+    relayTargetsRef.current = new Set();
+    pendingChallengeRef.current = null;
+    setServerIncoming(null);
     setModal(null);
     setModalInput("");
     setModalErr(null);
@@ -755,19 +944,29 @@ export function useGameSession() {
 
   /* ---------- P2P 直连（邀请链接自动信令，无服务器、无手动输入） ---------- */
 
-  // 广播注入：GameChannel.send 单入口，同一条消息同时发 BroadcastChannel 与所有
-  // WebRTC 直连；接收端对 Move 按 (sender, seq) 去重，双链路只应用一次。
+  // 广播注入：GameChannel.send 单入口，同一条消息同时发 BroadcastChannel、所有
+  // WebRTC 直连，以及（服务器模式）对每个对局相关人的兜底中转；
+  // 接收端对 Move 按 (sender, seq) 去重，多链路重复送达只应用一次。
   useEffect(() => {
     wireRtcBroadcast((msg) => {
       for (const q of rtcPeersRef.current) {
         try { q.send(msg); } catch { /* ignore */ }
       }
+      if (serverMode && serverChannel.connected) {
+        for (const t of relayTargetsRef.current) {
+          serverChannel.relay(t, msg);
+        }
+      }
     });
     return () => wireRtcBroadcast(null);
-  }, []);
+  }, [serverMode]);
 
   function attachPeer(p: DirectRtcPeer) {
     p.onRemote = (msg) => transport.injectRemote(msg);
+    // 服务器模式 trickle：本端候选经服务器转发给该 peer 的对端
+    p.onCandidate = (c) => {
+      if (p.peerTag && serverChannel.connected) serverChannel.ice(p.peerTag, gameIdRef.current ?? "", c);
+    };
     p.onState = (s) => {
       setDirectState(s);
       // 关闭/失败即出列：rtcPeersRef 只装活连接，防止跨局累积（审查 D7）
@@ -793,6 +992,134 @@ export function useGameSession() {
     rtcPeersRef.current.push(p);
   }
 
+  /* ---------- 服务器模式（可选）：短码邀请 / 大厅挑战 / 短码观战 / trickle / 兜底中转 ---------- */
+
+  /** 受邀者：服务器转来的 invite-offer——一切就绪后 acceptOfferPlain 回 answer。
+   *  与无服务器 acceptInvite 的差别：offer 经服务器直达，pwd 已由服务器校验，免回执。 */
+  async function serverAcceptOffer(e: Extract<ServerEvent, { t: "invite-offer" }>) {
+    if (phaseRef.current === "playing") return;
+    closeAllRtcPeers();
+    const g = e.gameId;
+    setGameId(g);
+    gameIdRef.current = g;
+    setRole("invitee");
+    roleRef.current = "invitee";
+    setMyColor("white");
+    myColorRef.current = "white";
+    setPeerConnected(false);
+    resetBoardFor(e.kind, e.size);
+    transport.join(g);
+    setPhase("waiting");
+    phaseRef.current = "waiting";
+    setPwd(null);
+    pwdRef.current = null;
+    setInviteUrl(null);
+    setWatchUrl(null);
+    setAnswerBackUrl(null);
+    relayTargetsRef.current = new Set([e.from]);
+    showNotice(`接受 ${e.fromName} 的邀请，正在建立直连…`);
+    nav("/p2p");
+    const peer = new DirectRtcPeer({ isInviter: false, role: "player" });
+    peer.peerTag = e.from;
+    attachPeer(peer);
+    try {
+      const ans = await peer.acceptOfferPlain(e.offer);
+      serverChannel.answer(e.from, g, ans);
+      setDirectState("joining");
+    } catch {
+      setDirectState("error");
+      showNotice("直连建立失败，可检查设置页线路后重试");
+    }
+  }
+
+  /** 房主：把对方（对手或观战者）发来的 answer 路由到对应 peer。
+   *  主对手的 answer 应用成功后切进对局（channel 自始至终是自己的，无需切换）。 */
+  async function serverAcceptAnswer(from: string, ans: string) {
+    const main = inviterRtcRef.current;
+    const peer = (main && main.peerTag === from ? main : null)
+      ?? rtcPeersRef.current.find((q) => q.peerTag === from)
+      ?? null;
+    if (!peer) return;
+    try {
+      await peer.acceptAnswerPlain(ans);
+    } catch { /* 竞态已在 acceptAnswerPayload 内部处理 */ }
+    if (peer === main && phaseRef.current === "waiting" && roleRef.current === "inviter") {
+      setPhase("playing");
+      phaseRef.current = "playing";
+      setPwd(null);
+      pwdRef.current = null;
+      setInviteUrl(null);
+      setPeerConnected(false);
+      showNotice("对方已加入，对局开始");
+      setTimeout(() => {
+        transport.send({ type: "Hello", kind: kindRef.current, size: sizeRef.current });
+        transport.send({ type: "SyncRequest" });
+      }, 80);
+    }
+  }
+
+  /** 观战者：收房主发来的 spectator offer（watch-accepted 之后到达）。 */
+  async function serverAcceptSpectatorOffer(from: string, offer: string, gameId: string) {
+    if (roleRef.current !== "spectator") return;
+    const peer = new DirectRtcPeer({ isInviter: false, role: "spectator" });
+    peer.peerTag = from;
+    attachPeer(peer);
+    try {
+      const ans = await peer.acceptOfferPlain(offer);
+      if (serverChannel.connected) serverChannel.answer(from, gameId, ans);
+    } catch {
+      setDirectState("error");
+      showNotice("观战直连建立失败，可刷新后重试");
+    }
+  }
+
+  /** 房主：观战者 resolve 短码后，主动为其生成 spectator offer。 */
+  async function serverHostSpectator(from: string) {
+    if (phaseRef.current !== "playing" && phaseRef.current !== "waiting") return;
+    relayTargetsRef.current.add(from);
+    const peer = new DirectRtcPeer({ isInviter: true, role: "spectator" });
+    peer.peerTag = from;
+    attachPeer(peer);
+    try {
+      const offer = await peer.createOfferPlain();
+      serverChannel.offer(from, gameIdRef.current ?? "", "spectator", offer);
+    } catch {
+      try { peer.close(); } catch { /* ignore */ }
+    }
+  }
+
+  /** 服务器模式：把对方经服务器转发来的 answer/候选路由到对应 peer。 */
+  function serverAcceptIce(from: string, candidate: string) {
+    const main = inviterRtcRef.current;
+    const peer = (main && main.peerTag === from ? main : null)
+      ?? rtcPeersRef.current.find((q) => q.peerTag === from)
+      ?? null;
+    if (!peer) return;
+    void peer.addRemoteCandidate(candidate);
+  }
+
+  /** 大厅挑战（服务器模式）：复用 createInvite 的短码邀请，短码生成后向对方发挑战信。
+   *  对方同意走 invite-resolve，拒绝回 challenge-rejected。 */
+  function serverChallengePeer(to: string) {
+    pendingChallengeRef.current = to;
+    createInvite();
+  }
+
+  function serverAcceptChallenge() {
+    const inc = serverIncoming;
+    if (!inc) return;
+    setServerIncoming(null);
+    serverChannel.inviteResolve(inc.code, inc.pwd);
+  }
+
+  function serverRejectChallenge() {
+    const inc = serverIncoming;
+    if (!inc) return;
+    setServerIncoming(null);
+    serverChannel.challengeReject(inc.from);
+    showNotice("已拒绝该挑战");
+  }
+
   /* ---------- 落子 ---------- */
   function handlePlace(c: Coord) {
     if (winner) return;
@@ -800,7 +1127,8 @@ export function useGameSession() {
     if (role === "spectator") return;
     if (phase === "waiting") return;
     if (phase === "playing" && peerConnected && toMove !== myColor) return;
-    if (phase === "playing" && !peerConnected) return;
+    // 直连未建立时：服务器模式可经兜底中转落子（relay 双发去重），无服务器模式不可
+    if (phase === "playing" && !peerConnected && !(serverMode && relayTargetsRef.current.size > 0)) return;
 
     const mover = toMove;
     const next = board.map((row) => [...row]);
@@ -847,17 +1175,20 @@ export function useGameSession() {
   const p2pStatusText = useMemo(() => {
     if (phase === "home") return role === "spectator" ? "观战中" : "主页 · 选择对手或等待被挑战";
     if (phase === "waiting") return `等待对手 · 执${myColor === "black" ? "黑" : "白"}`;
+    // 直连未通但有中转目标：服务器模式已可对弈（走兜底中转）
+    if (!peerConnected && serverMode && relayTargetsRef.current.size > 0) return `经服务器中转 · 执${myColor === "black" ? "黑" : "白"}`;
     if (!peerConnected) return `连接中 · 执${myColor === "black" ? "黑" : "白"}`;
     return `已直连 · 执${myColor === "black" ? "黑" : "白"}${role === "spectator" ? "（观战）" : toMove === myColor ? " · 轮到你" : " · 等待对手"}`;
-  }, [phase, role, peerConnected, myColor, toMove]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, role, peerConnected, myColor, toMove, serverMode]);
 
   const boardDisabled = useMemo(() => {
     if (winner) return true;
     if (role === "spectator") return true;
     if (phase !== "playing") return phase === "waiting";
-    if (!peerConnected) return true;
+    if (!peerConnected && !(serverMode && relayTargetsRef.current.size > 0)) return true;
     return toMove !== myColor;
-  }, [winner, role, phase, peerConnected, toMove, myColor]);
+  }, [winner, role, phase, peerConnected, toMove, myColor, serverMode]);
 
   const rtcStatus = <RtcStatusLine directState={directState} />;
 
@@ -896,11 +1227,14 @@ export function useGameSession() {
     intent, tabUser, name, peers, role, phase, gameId, myColor,
     peerConnected, pwd, inviteUrl, watchUrl, incoming, notice,
     directState, answerBackUrl, copyFb, modal, modalInput, modalErr,
+    // 服务器模式（可选）
+    serverMode, serverState, serverIncoming,
     // 渲染层直接写状态的 setter
     setModal, setModalInput, setModalErr, setName, setHover,
     // 动作
     submitModal, createInvite, acceptInvite, acceptChallenge, rejectChallenge,
     backHome, copyText, handlePlace, reset, saveName, pickKind, pickSize,
+    serverChallengePeer, serverAcceptChallenge, serverRejectChallenge,
     // 派生
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
     rtcStatus, incomingBanner, mode, viewedUserId, viewedPeer, isSelfPage,
