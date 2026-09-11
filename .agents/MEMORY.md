@@ -6,3 +6,4 @@
 - [2026-09-07 回执与观战设计](memory/2026-09-07-receipt-ui-and-spectator-design.md) — 同浏览器双窗口是极端情况不考虑；回执按钮常驻、确认文案去「开局」、回执类型按链接属性自动识别；观战者只与邀请者直连；此前开发无记忆是违规，今后拍板必落记忆
 - [2026-09-07 禁多代理并发](memory/2026-09-07-no-parallel-agents-single-serial.md) — 并发 Workflow 打爆 API 中断；审查/修复一律单代理串行，禁 parallel() 扇出
 - [2026-09-10 P2P 跨网实测](memory/2026-09-10-p2p-crossnet-stun-turn.md) — 代码无 bug；失败根因=移动丢国际来向 UDP+阿里云安全组；STUN-only 天花板已实测，TURN 兜底方向待拍板；三台测试机部署位置与网络特性
+- [2026-09-12 userId 链接+协商+聊天+观战房间](memory/2026-09-12-userid-link-negotiation-chat-spectator.md) — 链接回归 /userId?pwd=；服务器纯转发不落地；协商消息必须三链路去重；名册 ID=客户端持久 userId
