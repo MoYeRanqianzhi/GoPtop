@@ -21,9 +21,13 @@
 - 测试部署：两台服务器 ~/web（dist 静态 + spa.py SPA fallback，端口 8000；remote 另有 8001 作第二源）；~/pw/bot.js（playwright chromium + HTTP 控制 9310：/invite /accept /receipt /status /ice）。
 - 本机系统代理会把美国 IP 的 HTTP 交给代理节点导致 ERR_HTTP_RESPONSE_CODE_FAILURE——本机浏览器测试时用 localhost 源绕开。
 
-## TURN 方向（用户拍板中，参考 RustDesk 模式）
-- RustDesk 模式：打洞优先 + 公共 relay 兜底 + 可自建。映射到 GoPtop：
-  1. Cloudflare Calls TURN（免费 1TB/月）+ Cloudflare Worker 签发短期凭据（HMAC，secret 不进前端；Pages 同生态，仍无自建常驻后端）
-  2. coturn 自建支持（设置页加自定义 TURN 条目）
-  3. 客户端 iceServers 加 TURN 后 libwebrtc 自动打洞优先、relay 兜底，直连成功时 TURN 零流量
-- 需用户拍板：「无服务器无中转」产品承诺改为「优先直连，失败时加密中转」+ poster-strip 文案变更。
+## TURN 方向 → 最终拍板（2026-09-11）：自建信令服务器模式（已落地）
+用户拍板弃 Cloudflare TURN 路线，改为 RustDesk 式自建信令服务器（更完整）：
+- 新增 crates/goptop-server（axum+WS）：名册/短码邀请/短码观战/SDP 转发/relay 兜底；
+  官服 wss://goptopserver.meowoo.org/ws → free28（192.228.105.26，1Panel openresty 反代，
+  acme.sh 自动续期证书，systemd 常驻 127.0.0.1:9527）
+- 前端 serverChannel.ts + 双模式编排：无服务器（原样保留）/服务器（单选切换，默认官服）
+- STUN 三线路改九条免费池；设置页两区块；/j /s 短码链接；免回执
+- 关键坑：服务器空闲超时必须远大于客户端心跳（曾 10s<25s 导致连接被误杀、短码失效）
+- 部署细节：free28 的 DNS 由用户在 Cloudflare 加（橙色云代理）；openresty conf 在
+  /opt/1panel/www/conf.d/；acme.sh webroot=/opt/1panel/www/sites/goptopserver.meowoo.org/acme
