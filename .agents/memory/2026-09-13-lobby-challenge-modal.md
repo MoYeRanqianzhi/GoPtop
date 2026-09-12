@@ -1,5 +1,24 @@
 # 2026-09-13 · 大厅挑战修复与邀请弹窗拍板
 
+## UI 审查轮（同日晚，用户拍板：按钮去重、指示灯、截图验证即可不需 E2E）
+- 对局卡重构：去「对局 · 直连」行与 notice 行，改**指示灯**（绿已连接/橙黄等待对手/红已中断）；
+  connLost 只在「已 open 过的连接」断掉且 phase=playing 时置位（建局主动 close 不亮红灯）。
+  URL 栏 minWidth:0 优先被挤压（按钮不换行）；「离开对局」→「离开」；等待卡同样带灯。
+- BoardPanel.onReset 改可空：null 不渲染重开按钮。等待/观战/用户页等待态的死重开按钮全部移除；
+  等待态不显示执黑执白。悔棋/重开/换棋只在聊天面板（对局者），棋盘头不再重复。
+- footer 限一行硬截断（与 poster-strip 同款 nowrap+overflow hidden）。
+- 审查发现并修复三个真 bug：
+  1. serverAdmitChallenger 不生成 specPwd → 挑战成局无观战链接（补 genPwd + spectateEnabled 复位）；
+  2. backHome 不清 specPwdRef → 取消等待后旧观战钥匙泄漏进后续对局（backHome 清理）；
+  3. 服务器模式下被挑战方卡片挂 /watch/ 链接（跨设备无效旧通道）→ enterPlayingAsInvitee 仅无服务器模式设置。
+- **测试方法教训（血泪）**：① 脚本里 curl -d 中文=GBK 乱码，必须 UTF-8 文件 + --data-binary @file；
+  ② 对脚本做 sed/字符串手术极易把脚本改烂（clickBtn 被替换成 NaN 导致假故障排査了一小时）——
+  改测试脚本一律整文件重写；③ newPage 设 localStorage 后必须整页 reload 才换服务器
+  （pushState 导航不重读配置，曾导致 A 连官服 B 连本地互不可见）；④ Playwright 跨 context
+  BroadcastChannel 隔离，同源双页互访要用同 context 双 tab 或走服务器；⑤ 排查连接问题先看
+  服务器 tracing 日志（join/left 时间线）+ Playwright 原生 context.on('websocket') 事件，
+  不要靠页面内 wrapper（page.goto 后 evaluate 注入的 wrapper 会随文档销毁）。
+
 ## 用户报障与拍板
 1. Bug：对战中/主页从用户列表挑战，对方同意后双方都不自动进对局页。
 2. 拍板：对局邀请改成**居中弹窗**（原 play-stack 顶部横幅不够明显）。

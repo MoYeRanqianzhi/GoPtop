@@ -67,8 +67,8 @@ export default function App() {
     approveSpecRequest, rejectSpecRequest, kickSpectator, muteSpectator,
     disableSpectate, requestSpecChat, confirmApprove, confirmDecline,
     loadMyAvatar, saveMyAvatar,
-    moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
-    rtcStatus, incoming, mode, viewedUserId, viewedPeer, isSelfPage,
+    moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled, linkLamp,
+    incoming, mode, viewedUserId, viewedPeer, isSelfPage,
     topLocked, topLockedTitle,
   } = useGameSession();
   const myAvatar = loadMyAvatar();
@@ -346,6 +346,10 @@ export default function App() {
           {mode === "p2p" && phase === "waiting" && (
             <>
             <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 11, height: 11, borderRadius: 999, background: linkLamp.color, border: "2px solid var(--ink)", flexShrink: 0, display: "inline-block" }} />
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, color: linkLamp.color }}>{linkLamp.text}</span>
+              </div>
               {role === "inviter" && inviteUrl ? (
                 <>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -387,9 +391,9 @@ export default function App() {
                 kind={kind} size={size} board={board} toMove={toMove} winner={winner}
                 lastMove={lastMove} hover={hover} onHover={setHover}
                 disabled onPlace={() => undefined}
-                statusText="等待对手加入…" statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
+                statusText="等待对手加入…" statusNote=""
                 moveCount={moveCount} history={history}
-                onUndo={null} onReset={() => undefined}
+                onUndo={null} onReset={null}
               />
             )}
             </>
@@ -398,19 +402,19 @@ export default function App() {
           {mode === "p2p" && phase === "playing" && (
             <>
               <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                  <span className="brutal-label">对局 · 直连</span>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: peerConnected ? "#0a7a2e" : "var(--muted)" }}>{p2pStatusText}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 11, height: 11, borderRadius: 999, background: linkLamp.color, border: "2px solid var(--ink)", flexShrink: 0, display: "inline-block" }} />
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, color: linkLamp.color }}>{linkLamp.text}</span>
                 </div>
                 {(watchUrl || specUrl) && role !== "spectator" && (
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <code style={{ flex: "1 1 220px", minWidth: 180, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{specUrl ?? watchUrl}</code>
-                    <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl ?? watchUrl ?? "", "观战链接已复制")}>邀请观战</button>
-                    <button className="brutal-btn brutal-btn--sm" onClick={backHome}>离开对局</button>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    {/* 窄屏时优先挤压 URL 栏（minWidth 0），按钮不换行 */}
+                    <code style={{ flex: 1, minWidth: 0, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, background: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{specUrl ?? watchUrl}</code>
+                    <button className="brutal-btn brutal-btn--sm" style={{ flexShrink: 0 }} onClick={() => copyText(specUrl ?? watchUrl ?? "", "观战链接已复制")}>邀请观战</button>
+                    <button className="brutal-btn brutal-btn--sm" style={{ flexShrink: 0 }} onClick={backHome}>离开</button>
                     {copyFb && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 800, color: "#0a7a2e" }}>{copyFb}</span>}
                   </div>
                 )}
-                {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
               </div>
               <BoardPanel
                 kind={kind} size={size} board={board} toMove={toMove} winner={winner}
@@ -418,7 +422,7 @@ export default function App() {
                 disabled={boardDisabled} onPlace={handlePlace}
                 statusText={statusText} statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
                 moveCount={moveCount} history={history}
-                onUndo={null} onReset={reset}
+                onUndo={null} onReset={null}
                 chatButton={
                   <button className="brutal-btn brutal-btn--sm" onClick={() => setChatOpen(true)} title="聊天 / 悔棋 / 重开 / 换棋">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" style={{ display: "block" }}>
@@ -429,7 +433,6 @@ export default function App() {
                 }
                 actions={specUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl, "观战链接已复制")}>复制观战链接</button>}
               />
-              {rtcStatus}
             </>
           )}
 
@@ -596,9 +599,9 @@ export default function App() {
                 lastMove={lastMove} hover={hover} onHover={setHover}
                 disabled={phase === "waiting" ? true : boardDisabled} onPlace={phase === "waiting" ? () => undefined : handlePlace}
                 statusText={phase === "waiting" ? "等待对手加入…" : statusText}
-                statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
+                statusNote={phase === "waiting" ? "" : `${myColor === "black" ? "执黑" : "执白"}`}
                 moveCount={moveCount} history={history}
-                onUndo={null} onReset={phase === "waiting" ? () => undefined : reset}
+                onUndo={null} onReset={phase === "waiting" ? null : reset}
               />
             )}
             </>
@@ -624,9 +627,8 @@ export default function App() {
                 disabled onPlace={() => undefined}
                 statusText={statusText} statusNote="观战 · 只读"
                 moveCount={moveCount} history={history}
-                onUndo={null} onReset={() => undefined}
+                onUndo={null} onReset={null}
               />
-              {rtcStatus}
             </div>
           )}
         </div>
@@ -743,7 +745,8 @@ export default function App() {
         </div>
       )}
 
-      <footer style={{ flexShrink: 0, padding: "10px 16px", borderTop: "3px solid var(--ink)", background: "#fff", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center" }}>
+      {/* 装饰行限一行：显示不下硬截断（与顶部 poster-strip 同款处理，不换行不省略号） */}
+      <footer style={{ flexShrink: 0, padding: "10px 16px", borderTop: "3px solid var(--ink)", background: "#fff", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden" }}>
         GoPtop · P2P Gomoku & Go · 优先直连 · 服务器可选中转
       </footer>
     </div>

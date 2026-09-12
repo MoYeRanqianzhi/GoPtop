@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Coord, StoneColor } from "../components/BoardSvg";
 import { checkFive, emptyBoard } from "../game/board";
-import { loadDefaults, RtcStatusLine } from "../pages/components";
+import { loadDefaults } from "../pages/components";
 import type { Phase, Role } from "../pages/components";
 import { serverChannel } from "../net/serverChannel";
 import type { ServerEvent, ServerState } from "../net/serverChannel";
@@ -58,6 +58,8 @@ export function useGameSession() {
   const [gameId, setGameId] = useState<string | null>(null);
   const [myColor, setMyColor] = useState<StoneColor>("black");
   const [peerConnected, setPeerConnected] = useState(false);
+  /** 连接中断标记：已 open 的直连断掉才置位（对局卡红灯「已中断」）。 */
+  const [connLost, setConnLost] = useState(false);
   const [pwd, setPwd] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [watchUrl, setWatchUrl] = useState<string | null>(null);
@@ -80,7 +82,6 @@ export function useGameSession() {
       }, ms);
     }
   }
-  const [directState, setDirectState] = useState<string>("idle");
   const [answerBackUrl, setAnswerBackUrl] = useState<string | null>(null);
   const [copyFb, setCopyFb] = useState<string | null>(null);
 
@@ -626,11 +627,9 @@ export function useGameSession() {
     //    signal 时于本端进行（错误转弹窗询问），offer 在校验通过后才生成发送 ——
     if (serverMode) {
       if (!serverChannel.connected) {
-        setDirectState("error");
         showNotice("服务器未连接：请检查设置页服务器配置或切换到无服务器模式");
         return;
       }
-      setDirectState("waiting-invitee");
       showNotice(null);
       // 观战钥匙一并生成（整局有效），对局页可展示观战链接
       specPwdRef.current = genPwd();
@@ -643,7 +642,6 @@ export function useGameSession() {
       return;
     }
     showNotice("正在生成直连邀请…");
-    setDirectState("making-invite");
     // 后台预生成 offer：用户只需复制最终邀请链接，无需触碰 offer 文本
     void (async () => {
       const peer = new DirectRtcPeer({ isInviter: true, role: "player" });
@@ -657,14 +655,12 @@ export function useGameSession() {
         }
         inviterRtcRef.current = peer;
         setInviteUrl(inviteToUrl(tabUser, p, kind, size, offer));
-        setDirectState("waiting-invitee");
         showNotice(null);
       } catch {
         inviterRtcRef.current = null;
         try { peer.close(); } catch { /* ignore */ }
         // offer 生成失败：退化为无 rtc 链接（仅同源可玩），如实告知跨设备不可用
         setInviteUrl(inviteToUrl(tabUser, p, kind, size));
-        setDirectState("error");
         showNotice("直连邀请生成失败：已生成同源链接（跨设备不可用），可取消后重开");
       }
     })();
@@ -695,7 +691,6 @@ export function useGameSession() {
       // 跨设备一键直连：邀请链接自带邀请者 offer，受邀者后台自动生成 answer。
       // 同源页面间 answer 经 Presence 自动回传；跨设备时生成回执链接由受邀者发回邀请者。
       showNotice("邀请已受理，正在建立 P2P 直连…");
-      setDirectState("joining");
       nav("/p2p");
       void (async () => {
         const peer = new DirectRtcPeer({ isInviter: false, role: "player" });
@@ -711,7 +706,6 @@ export function useGameSession() {
             if (peer.state !== "open") setModal("receipt");
           }, 1200);
         } catch {
-          setDirectState("error");
           showNotice("直连建立失败，可检查设置页线路后重试");
         }
       })();
@@ -739,7 +733,6 @@ export function useGameSession() {
     } catch (err) {
       // 双路径竞态：弹窗与 Presence 同时送达时，后到路径遇到已成功应用不算失败
       if (peer.answered) return null;
-      setDirectState("error");
       const msg = err instanceof Error && err.message === "unknown rtc token"
         ? "回执无法解码（可能不是本程序生成的回执）"
         : "回执解码或直连建立失败，请让对方重新发送回执";
@@ -905,7 +898,8 @@ export function useGameSession() {
     phaseRef.current = "playing";
     setPwd(null);
     pwdRef.current = null;
-    setWatchUrl(watchToUrl(gameIdRef.current ?? ""));
+    // 服务器模式观战走 spec 链接（spec 钥匙）；/watch/ 是同源旧通道，跨设备无效不展示
+    if (!serverMode) setWatchUrl(watchToUrl(gameIdRef.current ?? ""));
     showNotice("对方已同意，对局开始（你执白）");
     setTimeout(() => {
       transport.send({ type: "Hello", kind: kindRef.current, size: sizeRef.current });
@@ -952,6 +946,10 @@ export function useGameSession() {
 
   function backHome() {
     closeAllRtcPeers();
+    // 观战钥匙不清理会泄漏到下一局：取消等待后被挑战进局，卡片会挂上过期钥匙的 spec 链接
+    specPwdRef.current = null;
+    spectateEnabledRef.current = true;
+    setSpectateEnabled(true);
     setRole("idle");
     roleRef.current = "idle";
     setPhase("home");
@@ -968,7 +966,6 @@ export function useGameSession() {
     myColorRef.current = "black";
     showNotice(null);
     setAnswerBackUrl(null);
-    setDirectState("idle");
     nav("/");
     setBoard(emptyBoard(sizeRef.current));
     setToMove("black");
@@ -1008,18 +1005,22 @@ export function useGameSession() {
   }, [serverMode]);
 
   function attachPeer(p: DirectRtcPeer) {
+    // 只有「已 open 过的连接」断掉才算中断：建局/换局时的主动 close 不亮红灯
+    let wasOpen = false;
     p.onRemote = (msg) => transport.injectRemote(msg);
     // 服务器模式 trickle：本端候选经服务器转发给该 peer 的对端
     p.onCandidate = (c) => {
       if (p.peerTag && serverChannel.connected) serverChannel.signal(p.peerTag, "ice", { candidate: c });
     };
     p.onState = (s) => {
-      setDirectState(s);
       // 关闭/失败即出列：rtcPeersRef 只装活连接，防止跨局累积（审查 D7）
       if (s === "closed" || s === "error") {
         rtcPeersRef.current = rtcPeersRef.current.filter((q) => q !== p);
+        if (wasOpen && phaseRef.current === "playing") setConnLost(true);
       }
       if (s === "open") {
+        wasOpen = true;
+        setConnLost(false);
         setPeerConnected(true);
         // 跨设备时 Presence 不可达（无 BroadcastChannel）：直连一旦打通，
         // 等待中的受邀者直接进对局，不再依赖邀请者的 accept 信件
@@ -1320,6 +1321,10 @@ export function useGameSession() {
     closeAllRtcPeers();
     const g = genGameId();
     const p = genPwd();
+    // 挑战成局同样要发观战钥匙：缺了它对局卡整个观战区块都不渲染
+    specPwdRef.current = genPwd();
+    spectateEnabledRef.current = true;
+    setSpectateEnabled(true);
     setGameId(g);
     gameIdRef.current = g;
     setPwd(p);
@@ -1344,10 +1349,8 @@ export function useGameSession() {
       relayTargetsRef.current.add(from);
       inviterRtcRef.current = peer;
       serverChannel.signal(from, "offer", { name: myName(), kind: kindRef.current, size: sizeRef.current, gameId: g, offer });
-      setDirectState("waiting-invitee");
     } catch {
       try { peer.close(); } catch { /* ignore */ }
-      setDirectState("error");
       showNotice("直连邀请生成失败：可取消后重开");
     }
   }
@@ -1420,9 +1423,7 @@ export function useGameSession() {
     try {
       const ans = await peer.acceptOfferPlain(offer);
       serverChannel.signal(from, "answer", { name: myName(), answer: ans });
-      setDirectState("joining");
     } catch {
-      setDirectState("error");
       showNotice("直连建立失败，可检查设置页线路后重试");
     }
   }
@@ -1452,7 +1453,6 @@ export function useGameSession() {
       const ans = await peer.acceptOfferPlain(offer);
       serverChannel.signal(from, "answer", { name: myName(), answer: ans });
     } catch {
-      setDirectState("error");
       showNotice("观战直连建立失败，可刷新后重试");
     }
   }
@@ -1724,6 +1724,13 @@ export function useGameSession() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, role, peerConnected, myColor, toMove, serverMode]);
 
+  /** 对局卡连接指示灯：绿=可对弈（直连或服务器中转），橙黄=连接未就绪，红=连接中断。 */
+  const linkLamp: { color: string; text: string } = connLost
+    ? { color: "#b00020", text: "已中断" }
+    : phase === "playing" && (peerConnected || (serverMode && relayTargetsRef.current.size > 0))
+      ? { color: "#0a7a2e", text: "已连接" }
+      : { color: "#FF8C1A", text: "等待对手" };
+
   const boardDisabled = useMemo(() => {
     if (winner) return true;
     if (role === "spectator") return true;
@@ -1731,8 +1738,6 @@ export function useGameSession() {
     if (!peerConnected && !(serverMode && relayTargetsRef.current.size > 0)) return true;
     return toMove !== myColor;
   }, [winner, role, phase, peerConnected, toMove, myColor, serverMode]);
-
-  const rtcStatus = <RtcStatusLine directState={directState} />;
 
   const mode = intent.mode;
   const viewedUserId = mode === "user" ? intent.userId : null;
@@ -1757,7 +1762,7 @@ export function useGameSession() {
     kind, size, board, toMove, winner, lastMove, hover, history,
     intent, tabUser, name, peers, role, phase, gameId, myColor,
     peerConnected, pwd, inviteUrl, watchUrl, incoming, notice,
-    directState, answerBackUrl, copyFb, modal, modalInput, modalErr,
+    answerBackUrl, copyFb, modal, modalInput, modalErr,
     // 服务器模式（可选）
     serverMode, serverState, serverIncoming,
     spectators, specRequests, spectateEnabled, specCanChat,
@@ -1774,8 +1779,8 @@ export function useGameSession() {
     disableSpectate, requestSpecChat, confirmApprove, confirmDecline,
     loadMyAvatar, saveMyAvatar,
     // 派生
-    moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
-    rtcStatus, mode, viewedUserId, viewedPeer, isSelfPage,
+    moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled, linkLamp,
+    mode, viewedUserId, viewedPeer, isSelfPage,
     topLocked, topLockedTitle, showNotice,
   };
 }

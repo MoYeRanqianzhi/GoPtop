@@ -1,7 +1,7 @@
 /**
  * App 拆分（D1 两刀完成后）——跨页面复用的展示组件与纯函数。
  *
- * 从 App.tsx 原样搬出（禁止行为变化）：PeerList / StunSettings / RtcStatusLine /
+ * 从 App.tsx 原样搬出（禁止行为变化）：PeerList / StunSettings /
  * BoardPanel / loadDefaults / Role/Phase 类型。
  * 页面级 JSX 在 pages/ 下；对局状态机与信令编排已抽到 state/useGameSession.tsx。
  */
@@ -373,29 +373,13 @@ export function ServerSettings() {
   );
 }
 
-export function RtcStatusLine(props: { directState: string }) {
-  const { directState } = props;
-  const text = directState === "open" ? "直连已建立"
-    : directState === "making-invite" ? "正在准备直连邀请…"
-    : directState === "waiting-invitee" ? "邀请已就绪 · 等待对方打开邀请链接"
-    : directState === "joining" ? "正在通过邀请链接直连…"
-    : directState === "error" ? "直连失败（可检查设置页线路）"
-    : directState === "closed" ? "直连已关闭" : "同源直传中";
-  return (
-    <div className="brutal-card" style={{ padding: "8px 10px", background: "#fff", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <span className="brutal-label">P2P 直连</span>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: directState === "open" ? "#0a7a2e" : directState === "error" ? "#b00020" : "var(--muted)" }}>{text}</span>
-    </div>
-  );
-}
-
 export function BoardPanel(props: {
   kind: GameKind; size: Size;
   board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null;
   lastMove: Coord | null; hover: Coord | null; onHover: (c: Coord | null) => void;
   disabled: boolean; onPlace: (c: Coord) => void;
   statusText: string; statusNote: string; moveCount: number; history: Coord[];
-  onUndo: (() => void) | null; onReset: () => void;
+  onUndo: (() => void) | null; onReset: (() => void) | null;
   actions?: ReactNode;
   /** P2P 对局：原悔棋/重开按钮位替换为聊天入口（协商动作移入聊天面板）。 */
   chatButton?: ReactNode;
@@ -450,7 +434,7 @@ export function BoardPanel(props: {
           {props.chatButton ?? (
             <>
               {props.onUndo && <button className="brutal-btn brutal-btn--sm" onClick={props.onUndo}>悔棋</button>}
-              <button className="brutal-btn brutal-btn--sm brutal-btn--primary" onClick={props.onReset}>重开</button>
+              {props.onReset && <button className="brutal-btn brutal-btn--sm brutal-btn--primary" onClick={props.onReset}>重开</button>}
             </>
           )}
           {props.actions}
