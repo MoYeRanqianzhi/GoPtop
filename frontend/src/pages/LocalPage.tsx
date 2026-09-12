@@ -3,10 +3,10 @@
  * 从 App.tsx 原样搬出，禁止行为变化。规则/尺寸由顶部选择器统一控制。
  */
 import { useEffect, useState } from "react";
-import type { Coord, StoneColor } from "../components/BoardSvg";
+import type { Coord, StoneColor } from "../net/protocol";
 import { checkFive, emptyBoard } from "../game/board";
 import { BoardPanel } from "./components";
-import type { GameKind, Size } from "../net/transport";
+import type { GameKind, Size } from "../net/protocol";
 
 export function LocalPage(props: { kind: GameKind; size: Size }) {
   const { kind, size } = props;

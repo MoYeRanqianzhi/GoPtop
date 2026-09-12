@@ -6,7 +6,7 @@
  * 且 gameStore 那份对围棋规则残缺——重复实现被静默漂移过。改规则前先确认
  * 本文件与 Rust 侧 crates/goptop-core 的语义一致（未来规则下沉 WASM 的对齐点）。
  */
-import type { Coord, StoneColor } from "../components/BoardSvg";
+import type { Coord, StoneColor } from "../net/protocol";
 
 /** 四连珠方向（右、下、右下、左下），配合 ±dir 双向扫描。 */
 export const DIRS: [number, number][] = [[1, 0], [0, 1], [1, 1], [1, -1]];

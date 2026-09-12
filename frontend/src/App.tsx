@@ -5,8 +5,8 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useGameSession } from "./state/useGameSession";
-import { nav, specLinkUrl } from "./net/transport";
-import type { Size } from "./net/transport";
+import { nav, specLinkUrl } from "./net/links";
+import type { Size } from "./net/protocol";
 import { AvatarSettings, BoardPanel, ChatPanel, PeerList, ServerSettings, StunSettings } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
 export default function App() {

@@ -7,14 +7,16 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { Coord, StoneColor } from "../components/BoardSvg";
+import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 import { BoardSvg } from "../components/BoardSvg";
-import { loadStunLines, saveStunLines } from "../net/transport";
+import { loadStunLines, saveStunLines } from "../net/stun";
+import type { StunLine } from "../net/stun";
 import {
   BUILTIN_SERVERS, SERVER_NONE, loadServerSelection, loadServers,
   saveServerSelection, saveServers,
-} from "../net/transport";
-import type { GameKind, PeerInfo, ServerEntry, Size, StunLine } from "../net/transport";
+} from "../net/servers";
+import type { ServerEntry } from "../net/servers";
+import type { PeerInfo } from "../net/presence";
 
 /* ---------------- 头像（圆形，本地存储，P2P 交换） ---------------- */
 

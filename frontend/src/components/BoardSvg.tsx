@@ -1,9 +1,13 @@
 /**
  * BoardSvg — 棋盘 SVG 组件（Gomoku 15 / Go 9/13/19 通用）
  * 纸面暖黄、粗黑网格、坐标外移防重合、星位实心、棋子纯色无边框无阴影、悬停橙色高亮。
+ *
+ * StoneColor/Coord 的唯一真源在 net/protocol（线格式同构，统一防漂移）；
+ * 此处 re-export 兼容既有下游 import。
  */
-export type StoneColor = "empty" | "black" | "white";
-export type Coord = { x: number; y: number };
+import type { Coord, StoneColor } from "../net/protocol";
+
+export type { Coord, StoneColor } from "../net/protocol";
 
 function goStarPoints(size: number): Coord[] {
   if (size === 19) return [

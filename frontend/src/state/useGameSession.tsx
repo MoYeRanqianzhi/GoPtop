@@ -7,33 +7,30 @@
  * hook 与 transport 单例（transport/presence/DirectRtc）交互，与原先完全一致。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Coord, StoneColor } from "../components/BoardSvg";
 import { checkFive, emptyBoard } from "../game/board";
 import { loadDefaults } from "../pages/components";
 import type { Phase, Role } from "../pages/components";
 import { serverChannel } from "../net/serverChannel";
 import type { ServerEvent, ServerState } from "../net/serverChannel";
+import { presence } from "../net/presence";
+import type { PeerInfo } from "../net/presence";
+import { transport } from "../net/gameChannel";
+import type { GameMsg } from "../net/gameChannel";
 import {
   answerToUrl,
-  DirectRtcPeer,
-  genGameId,
-  genPwd,
   inviteToUrl,
-  loadServerSelection,
-  myName,
-  myUserId,
   nav,
   parsePastedAnswer,
   parsePastedLink,
   parseUrl,
-  presence,
-  setMyName,
-  transport,
   userToUrl,
   watchToUrl,
-  wireRtcBroadcast,
-} from "../net/transport";
-import type { GameKind, GameMsg, PeerInfo, Size, UrlIntent } from "../net/transport";
+} from "../net/links";
+import type { UrlIntent } from "../net/links";
+import { genGameId, genPwd, myName, myUserId, setMyName } from "../net/identity";
+import { loadServerSelection } from "../net/servers";
+import { DirectRtcPeer, wireRtcBroadcast } from "../net/rtc";
+import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 
 export function useGameSession() {
   const defs = useMemo(loadDefaults, []);
@@ -1008,10 +1005,6 @@ export function useGameSession() {
     // 只有「已 open 过的连接」断掉才算中断：建局/换局时的主动 close 不亮红灯
     let wasOpen = false;
     p.onRemote = (msg) => transport.injectRemote(msg);
-    // 服务器模式 trickle：本端候选经服务器转发给该 peer 的对端
-    p.onCandidate = (c) => {
-      if (p.peerTag && serverChannel.connected) serverChannel.signal(p.peerTag, "ice", { candidate: c });
-    };
     p.onState = (s) => {
       // 关闭/失败即出列：rtcPeersRef 只装活连接，防止跨局累积（审查 D7）
       if (s === "closed" || s === "error") {

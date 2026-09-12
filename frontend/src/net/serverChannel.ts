@@ -4,14 +4,15 @@
  * 与 Rust 服务器（crates/goptop-server）的 WebSocket 协议对接。服务器是纯转发管道：
  * - hello→welcome（服务器分配 s- 短 ID）+ 25s 心跳（低于 CF 代理 100s 空闲阈值）
  * - 在线名册（peers 全量广播）
- * - `signal`：任意点对点信令原样转发（服务器不解析不存储）——邀请 offer/answer/ice、
+ * - `signal`：任意点对点信令原样转发（服务器不解析不存储）——邀请 offer/answer、
  *   观战 join/offer/answer、大厅挑战、观战房间控制全走这里，语义由 useGameSession 解释
  * - `relay`：数据兜底中转（P2P 未建立时对局消息走这里，与直连双发按 sender+seq 去重）
  *
  * 断线自动重连（指数退避封顶 10s）；重连成功后自动重放当前名册状态。
  */
-import type { GameMsg } from "./transport";
-import { BUILTIN_SERVERS, loadServerSelection, loadServers, myUserId } from "./transport";
+import type { GameMsg } from "./protocol";
+import { myUserId } from "./identity";
+import { BUILTIN_SERVERS, loadServerSelection, loadServers } from "./servers";
 
 export type ServerState = "off" | "connecting" | "ready" | "error";
 
