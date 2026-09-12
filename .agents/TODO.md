@@ -38,7 +38,6 @@
 
 - **D8 后续（可选）**：App.tsx 剩余 544 行中的页面拼装（menu/p2p/users/settings/user/watch JSX）可再拆 pages/*.tsx——纯机械移动，收益是文件更小，无行为面。
 - **D11 扩展（可选）**：useGameSession 状态机尚未有测试（需 renderHook 或拆纯函数）；DirectRtcPeer 集成路径未测（需真实 ICE）。
-- Cloudflare Pages 真实上线（用户预告过，未明确下令）。
 
 ## 已完成（历史）
 
