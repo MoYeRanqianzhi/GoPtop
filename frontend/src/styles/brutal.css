@@ -146,6 +146,53 @@ footer,
   -webkit-user-select: none;
 }
 
+/* Tauri 标题栏融合（tauri-native-chrome 技能，decorations:false 路径，2026-09-13）：
+   黑条即拖拽区（data-tauri-drag-region）。最大化键命中归 OS（titlebar.rs 覆盖层，
+   真实 Snap Layouts）；最小化/关闭经 Tauri API 转发。三键不透明底（用户要求）：
+   窄窗时遮住滑到按钮下方的文字，不与文字叠写。Web 端无三键，黑条纯装饰。 */
+.poster-strip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 文字中心区避让三键（3×42 + 12 间隙），仅 Tauri（有键）时生效 */
+html.app-tauri .poster-strip { padding-right: 138px; }
+.window-controls {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  display: flex;
+  align-items: stretch;
+}
+.wc-btn {
+  width: 42px;
+  border: none;
+  background: var(--ink);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.wc-btn:hover { background: #2b2b2b; }
+/* 最大化键的悬停底色：其 mousemove 被覆盖层吞掉，由 titlebar://max-hover 事件
+   驱动（PosterStrip 手动挂类），非 CSS :hover */
+.wc-btn--hover { background: #2b2b2b; }
+.wc-btn--close:hover { background: var(--bg-2); color: #fff; }
+/* Windows caption 字形：与系统按钮同源字体（Segoe Fluent Icons，MDL2 兜底） */
+.wc-glyph--win {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+}
+
 /* 聊天双栏：宽屏时对局居左、聊天停靠右侧；窄屏（显示不下）聊天只以弹窗出现。
    必须占满 main 剩余高度：play-stack 的 height:100% 与 board-wrap 的
    flex 高度都依赖这里给出的确定高度，否则棋盘高度塌缩、整组被算成最小宽 */

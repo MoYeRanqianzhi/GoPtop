@@ -20,3 +20,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+
+# Windows Snap Layouts 覆盖层（src-tauri/src/titlebar.rs）：透明子窗口 + HTMAXBUTTON。
+# 只需 Win32 最小面：Foundation/LibraryLoader/WindowsAndMessaging。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_Controls",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }

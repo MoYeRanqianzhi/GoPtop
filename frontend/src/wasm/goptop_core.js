@@ -31,13 +31,13 @@ export class WasmGame {
      * @returns {boolean}
      */
     adopt(board_json, to_move, winner, history_json) {
-        const ptr0 = passStringToWasm0(board_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr0 = passStringToWasm0(board_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(to_move, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr1 = passStringToWasm0(to_move, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(winner, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr2 = passStringToWasm0(winner, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(history_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr3 = passStringToWasm0(history_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len3 = WASM_VECTOR_LEN;
         const ret = wasm.wasmgame_adopt(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         return ret !== 0;
@@ -58,7 +58,7 @@ export class WasmGame {
      * @returns {WasmGame | undefined}
      */
     static new_game(kind_json) {
-        const ptr0 = passStringToWasm0(kind_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr0 = passStringToWasm0(kind_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmgame_new_game(ptr0, len0);
         return ret === 0 ? undefined : WasmGame.__wrap(ret);
@@ -72,6 +72,7 @@ export class WasmGame {
     /**
      * 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负；
      * 非法（占据/越界/自杀/终局）返回 ok:false，内部状态不变。
+     * 越界/占据/终局判定都在 GameState::try_play 内。
      * @param {number} x
      * @param {number} y
      * @returns {string}
@@ -80,12 +81,16 @@ export class WasmGame {
         let deferred1_0;
         let deferred1_1;
         try {
-            const ret = wasm.wasmgame_try_place(this.__wbg_ptr, x, y);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmgame_try_place(retptr, this.__wbg_ptr, x, y);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
         } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export3(deferred1_0, deferred1_1, 1);
         }
     }
     /**
@@ -97,12 +102,16 @@ export class WasmGame {
         let deferred1_0;
         let deferred1_1;
         try {
-            const ret = wasm.wasmgame_undo_last(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmgame_undo_last(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
         } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export3(deferred1_0, deferred1_1, 1);
         }
     }
 }
@@ -112,15 +121,6 @@ function __wbg_get_imports() {
         __proto__: null,
         __wbg___wbindgen_throw_bb96b2010945f0bc: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
-        },
-        __wbindgen_init_externref_table: function() {
-            const table = wasm.__wbindgen_externrefs;
-            const offset = table.grow(4);
-            table.set(0, undefined);
-            table.set(offset + 0, undefined);
-            table.set(offset + 1, null);
-            table.set(offset + 2, true);
-            table.set(offset + 3, false);
         },
     };
     return {
@@ -132,6 +132,14 @@ function __wbg_get_imports() {
 const WasmGameFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmgame_free(ptr, 1));
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
@@ -216,8 +224,8 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
     cachedUint8ArrayMemory0 = null;
-    wasm.__wbindgen_start();
     return wasm;
 }
 

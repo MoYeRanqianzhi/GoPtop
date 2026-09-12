@@ -6,6 +6,16 @@
 members = ["crates/goptop-core", "crates/goptop-server", "src-tauri"]
 resolver = "2"
 
+# 发布体积优化（用户拍板 2026-09-13：release 二进制报真实尺寸）：
+# fat LTO + 单 codegen unit + abort panic + strip 符号；opt-level "s" 折中体积与速度。
+# 该 profile 同时作用于 wasm32 构建（scripts/build-wasm.sh 的 --release 同享）。
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
 # 共享依赖版本，便于各 crate 对齐。core/transport/tauri 三处复用 serde 等基础库。
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

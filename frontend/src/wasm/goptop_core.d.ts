@@ -31,6 +31,7 @@ export class WasmGame {
     /**
      * 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负；
      * 非法（占据/越界/自杀/终局）返回 ok:false，内部状态不变。
+     * 越界/占据/终局判定都在 GameState::try_play 内。
      */
     try_place(x: number, y: number): string;
     /**
@@ -49,13 +50,12 @@ export interface InitOutput {
     readonly wasmgame_boardSize: (a: number) => number;
     readonly wasmgame_new_game: (a: number, b: number) => number;
     readonly wasmgame_reset: (a: number) => void;
-    readonly wasmgame_try_place: (a: number, b: number, c: number) => [number, number];
-    readonly wasmgame_undo_last: (a: number) => [number, number];
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_start: () => void;
+    readonly wasmgame_try_place: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmgame_undo_last: (a: number, b: number) => void;
+    readonly __wbindgen_export: (a: number, b: number) => number;
+    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
+    readonly __wbindgen_export3: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

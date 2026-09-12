@@ -21,6 +21,7 @@ import { ConfirmBanner } from "./components/ConfirmBanner";
 import { InviteModal } from "./components/InviteModal";
 import { KindSizePicker } from "./components/KindSizePicker";
 import { PasteModal } from "./components/PasteModal";
+import { PosterStrip } from "./components/PosterStrip";
 
 export default function App() {
   // 聊天面板开合：宽屏=右侧停靠栏，窄屏=弹窗（CSS .chat-dock/.chat-modal 控制形态）
@@ -135,7 +136,7 @@ export default function App() {
 
   return (
     <div style={{ height: "100dvh", minHeight: "100dvh", display: "flex", flexDirection: "column", background: "var(--bg-page)", overflow: "hidden" }}>
-      <div className="poster-strip">GoPtop · P2P Gomoku & Go · Neubrutalism · 优先直连 · 服务器可选中转</div>
+      <PosterStrip />
 
       <header
         data-kind={kind}
