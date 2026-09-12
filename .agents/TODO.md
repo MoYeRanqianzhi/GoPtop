@@ -34,6 +34,8 @@
 
 ## 下一步候选（未获指令，不动工）
 
+- **用户主页挑战入口（2026-09-13 修复轮范围外）**：`/<userId>` 的无 pwd「挑战」按钮仍走 acceptInvite（presence 路径，服务器模式跨设备不可达）；需按 serverMode 分派到 serverChallengePeer，~3 行。详见 memory/2026-09-13-lobby-challenge-modal.md。
+
 - **R2 残留（R2a/R2b，修复轮审查新发现，低）**：acceptReceipt 守卫补 `pwdRef.current !== r.pwd` 对比（防取消后同阶段开新局被骗过）；createInvite catch 分支补同款三重守卫（成功路径已有）。合计 ~6 行，详见 review/archive/2026-09-07-fix-round-review.md「修复记录审查」节。
 
 - **D8 后续（可选）**：App.tsx 剩余 544 行中的页面拼装（menu/p2p/users/settings/user/watch JSX）可再拆 pages/*.tsx——纯机械移动，收益是文件更小，无行为面。

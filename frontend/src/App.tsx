@@ -60,7 +60,7 @@ export default function App() {
     chatLog, peerAvatars, confirmReq,
     setModal, setModalInput, setModalErr, setName, setHover,
     showNotice,
-    submitModal, createInvite, acceptInvite, backHome, copyText,
+    submitModal, createInvite, acceptInvite, acceptChallenge, rejectChallenge, backHome, copyText,
     handlePlace, reset, saveName, pickKind, pickSize,
     serverChallengePeer, serverAcceptChallenge, serverRejectChallenge,
     sendChat, requestUndo, requestReset, requestSwap,
@@ -68,20 +68,29 @@ export default function App() {
     disableSpectate, requestSpecChat, confirmApprove, confirmDecline,
     loadMyAvatar, saveMyAvatar,
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
-    rtcStatus, incomingBanner, mode, viewedUserId, viewedPeer, isSelfPage,
+    rtcStatus, incoming, mode, viewedUserId, viewedPeer, isSelfPage,
     topLocked, topLockedTitle,
   } = useGameSession();
   const myAvatar = loadMyAvatar();
 
-  const serverIncomingBanner = serverIncoming && (
-    <div className="brutal-card" style={{ padding: "8px 10px", background: "#fff", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
-        {serverIncoming.fromName} 邀请你加入对局（{serverIncoming.kind === "gomoku" ? "五子棋" : "围棋"} {serverIncoming.size}×{serverIncoming.size}）
-      </span>
-      <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={serverAcceptChallenge}>同意</button>
-      <button className="brutal-btn brutal-btn--sm" onClick={serverRejectChallenge}>拒绝</button>
-    </div>
-  );
+  // 对局邀请统一弹窗（用户拍板 2026-09-13：横幅不够明显）。服务器挑战（serverIncoming）
+  // 与同源 presence 挑战（incoming）同一形态；只在主页状态出现，必须明确同意/拒绝，
+  // 不设背景点击关闭——静默忽略会让挑战方停在「等待对方同意」。
+  const inviteReq = serverIncoming
+    ? {
+        fromName: serverIncoming.fromName,
+        desc: `${serverIncoming.kind === "gomoku" ? "五子棋" : "围棋"} ${serverIncoming.size}×${serverIncoming.size}`,
+        accept: serverAcceptChallenge,
+        reject: serverRejectChallenge,
+      }
+    : incoming
+      ? {
+          fromName: incoming.fromName,
+          desc: `${incoming.kind === "gomoku" ? "五子棋" : "围棋"} ${incoming.size}×${incoming.size}`,
+          accept: () => acceptChallenge(incoming.from, incoming.kind, incoming.size, incoming.gameId, false),
+          reject: () => rejectChallenge(incoming.from, incoming.gameId),
+        }
+      : null;
 
   // 服务器模式观战链接（观战钥匙整局有效；关闭观战后不再展示）
   const specUrl = serverMode && spectateEnabled && specPwd && (phase === "playing" || phase === "waiting") && role !== "spectator"
@@ -277,8 +286,6 @@ export default function App() {
         <div className="game-layout">
         {confirmBanner}
         <div className="play-stack">
-          {incomingBanner}
-          {serverIncomingBanner}
 
           {/* —— 菜单页 `/` —— */}
           {mode === "menu" && (
@@ -443,7 +450,13 @@ export default function App() {
                 peers={peers}
                 emptyHint="暂无其他在线用户。"
                 actionLabel={() => "挑战"}
-                onAction={(p) => { if (phase === "home") acceptInvite(p.id, null, kind, size); }}
+                onAction={(p) => {
+                  // 服务器模式必须走服务器信令（跨设备可达）；acceptInvite 的 presence
+                  // 挑战只在同源 BroadcastChannel 有效，曾导致服务器模式下挑战发不出去。
+                  // serverChallengePeer 自带 phase 守卫（非主页发起时提示而非静默无效）
+                  if (serverMode) serverChallengePeer(p.id);
+                  else if (phase === "home") acceptInvite(p.id, null, kind, size);
+                }}
                 extraAction={(p) => (
                   <button className="brutal-btn brutal-btn--sm" onClick={() => nav(`/${encodeURIComponent(p.id)}`)}>主页</button>
                 )}
@@ -651,6 +664,22 @@ export default function App() {
           .bp-swap { padding: 10px !important; }
         }
       `}</style>
+
+      {/* —— 对局邀请弹窗（服务器挑战 / 同源挑战统一；必须明确选择） —— */}
+      {inviteReq && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(10,10,10,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div className="brutal-card" style={{ width: "min(440px, 92vw)", background: "#fff", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+            <span className="brutal-label">对局邀请</span>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 800, lineHeight: 1.5 }}>
+              {inviteReq.fromName} 邀请你加入对局（{inviteReq.desc}）
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="brutal-btn brutal-btn--accent" onClick={inviteReq.accept}>同意</button>
+              <button className="brutal-btn" onClick={inviteReq.reject}>拒绝</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* —— 弹窗（信令消息统一经弹窗收发：粘贴邀请 / 输入回执 / 展示回执） —— */}
       {modal && (

@@ -1169,7 +1169,11 @@ export function useGameSession() {
       }
       // —— 挑战被接受：发起者（执黑）建局并送出 offer ——
       case "challenge-accepted": {
-        if (phaseRef.current !== "waiting" || roleRef.current !== "inviter") return;
+        // 挑战者发 challenge 时处于 home（serverChallengePeer 仅主页可发起且不改状态），
+        // 同意信到达时仍是 home。旧守卫要求 waiting+inviter——该状态在本流程不可达，
+        // 导致对方同意后建局被静默跳过、双方都停在原地。保留 waiting+inviter 分支：
+        // 「先挑战、又点了开启对战」的边缘顺序下，被接受的挑战优先成局。
+        if (phaseRef.current !== "home" && !(phaseRef.current === "waiting" && roleRef.current === "inviter")) return;
         serverAdmitChallenger(from);
         return;
       }
@@ -1730,17 +1734,6 @@ export function useGameSession() {
 
   const rtcStatus = <RtcStatusLine directState={directState} />;
 
-  const incomingBanner = incoming && (
-    <div className="brutal-card" style={{ padding: "8px 10px", background: "#fff", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
-        {incoming.fromName} 向你发起对局（{incoming.kind === "gomoku" ? "五子棋" : "围棋"} {incoming.size}×{incoming.size}）
-      </span>
-      <button className="brutal-btn brutal-btn--sm brutal-btn--accent"
-        onClick={() => acceptChallenge(incoming.from, incoming.kind, incoming.size, incoming.gameId, false)}>同意</button>
-      <button className="brutal-btn brutal-btn--sm" onClick={() => rejectChallenge(incoming.from, incoming.gameId)}>拒绝</button>
-    </div>
-  );
-
   const mode = intent.mode;
   const viewedUserId = mode === "user" ? intent.userId : null;
   const viewedPeer = viewedUserId && viewedUserId !== tabUser ? peers.find((p) => p.id === viewedUserId) ?? null : null;
@@ -1782,7 +1775,7 @@ export function useGameSession() {
     loadMyAvatar, saveMyAvatar,
     // 派生
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled,
-    rtcStatus, incomingBanner, mode, viewedUserId, viewedPeer, isSelfPage,
+    rtcStatus, mode, viewedUserId, viewedPeer, isSelfPage,
     topLocked, topLockedTitle, showNotice,
   };
 }

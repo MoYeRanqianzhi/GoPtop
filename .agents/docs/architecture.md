@@ -47,6 +47,7 @@ role:  idle / inviter / invitee / spectator
 - **acceptInvite(inviterId,pwd,kind,size,inviteOffer?)**：生成**受邀者自己的** gameId（对局 channel 以受邀者的为准）→ waiting；若带 inviteOffer 则 `acceptOffer` 生成 answer：先 `presence.challenge(...ans)`（同源自动送达），并备好回执链接；跨设备时回执弹窗延迟 1.2s 弹出（若同源通道已送达、直连已 open 就不打扰）。
 - **acceptChallenge()**（同源路径，邀请者收到 pwd 正确的 challenge 自动调用）：join 受邀者 gameId → playing → Hello+SyncRequest。
 - **acceptReceipt()**（跨设备路径，邀请者弹窗粘贴回执）：校验 inviterId==自己、pwd==本局 → `applyAnswer(ans,pwd)` → join 受邀者 gameId → playing。与 acceptChallenge 是平行路径，**都**使 pwd 失效。
+- **serverChallengePeer() / challenge-accepted**（服务器模式大厅挑战，/p2p 与 /users 列表同一入口）：挑战仅主页可发起 → signal `challenge`（不改本端状态）；被挑战方弹**邀请弹窗**（与同源 presence 挑战共用同一弹窗，serverIncoming/incoming 二选一展示）→ 同意回 `challenge-accepted` → 发起方守卫 phase=home（保留 waiting+inviter 分支：「先挑战又点开启对战」的边缘顺序下被接受的挑战优先成局）→ `serverAdmitChallenger()` 建局送 offer，双方自动进对局。/users 页曾误走 presence 路径（跨设备不可达），已改走服务器信令。
 - **enterPlayingAsInvitee()**：两个触发源——同源 presence accept 信件，或 **RTC open 事件**（跨设备无 presence，直连一通直接进）。双触发幂等（phaseRef 判断）。
 - **backHome()**：清一切（含 modal、rtcPeers、inviterRtc）。
 
