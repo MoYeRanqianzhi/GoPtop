@@ -406,6 +406,9 @@ export default function App() {
                   <span style={{ width: 11, height: 11, borderRadius: 999, background: linkLamp.color, border: "2px solid var(--ink)", flexShrink: 0, display: "inline-block" }} />
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, color: linkLamp.color }}>{linkLamp.text}</span>
                 </div>
+                {/* 对局中的提示面（悔棋/重开/换棋结果、观战批复）：卡片瘦身时曾随
+                    「对局·直连」行一并消失，对局内反馈无处显示——恢复为条件渲染单行 */}
+                {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "#0a7a2e" }}>{notice}</div>}
                 {(watchUrl || specUrl) && role !== "spectator" && (
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     {/* 窄屏时优先挤压 URL 栏（minWidth 0），按钮不换行 */}
@@ -569,7 +572,13 @@ export default function App() {
                       </span>
                       <span style={{ flex: 1 }} />
                       <button className="brutal-btn brutal-btn--sm brutal-btn--accent"
-                        onClick={() => acceptInvite(viewedUserId, intent.mode === "user" ? intent.pwd : null, kind, size, intent.mode === "user" ? intent.rtc : null)}
+                        onClick={() => {
+                          // 服务器模式跨设备走 presence 的 acceptInvite 不可达（TODO 2026-09-13
+                          // 记录的漏改入口）：无 rtc 的挑战/无钥匙请求改发服务器挑战信；
+                          // 带 rtc 的旧链接仍走回执兼容路径
+                          if (serverMode && !(intent.mode === "user" && intent.rtc)) serverChallengePeer(viewedUserId);
+                          else acceptInvite(viewedUserId, intent.mode === "user" ? intent.pwd : null, kind, size, intent.mode === "user" ? intent.rtc : null);
+                        }}
                         disabled={viewedPeer.status === "in-game"}
                         title={viewedPeer.status === "in-game" ? "对方对局中，不可挑战" : "向其发起对局"}>
                         {intent.mode === "user" && intent.pwd ? "接受邀请进入对局" : "挑战"}
@@ -582,7 +591,11 @@ export default function App() {
                       </div>
                       <div>
                         <button className="brutal-btn brutal-btn--sm brutal-btn--accent"
-                          onClick={() => acceptInvite(viewedUserId, intent.mode === "user" ? intent.pwd : null, kind, size, intent.mode === "user" ? intent.rtc : null)}>
+                          onClick={() => {
+                            // 同上：服务器模式无 rtc 时改发服务器挑战信（对方离线由超时提示兜底）
+                            if (serverMode && !(intent.mode === "user" && intent.rtc)) serverChallengePeer(viewedUserId);
+                            else acceptInvite(viewedUserId, intent.mode === "user" ? intent.pwd : null, kind, size, intent.mode === "user" ? intent.rtc : null);
+                          }}>
                           {intent.mode === "user" && intent.pwd ? "接受邀请进入对局" : "挑战"}
                         </button>
                       </div>

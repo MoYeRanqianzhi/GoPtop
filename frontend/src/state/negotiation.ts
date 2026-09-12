@@ -13,13 +13,13 @@ import type { SessionCtx } from "./sessionContext";
 export function createNegotiation(ctx: Pick<
   SessionCtx,
   | "boardRef" | "historyRef" | "kindRef" | "lastMoveRef" | "myColorRef" | "phaseRef" | "roleRef"
-  | "sizeRef" | "toMoveRef" | "winnerRef"
+  | "sizeRef" | "toMoveRef" | "winnerRef" | "syncEpochRef"
   | "setBoard" | "setHistory" | "setHover" | "setLastMove" | "setMyColor" | "setToMove" | "setWinner"
   | "showNotice"
 >) {
   const {
     boardRef, historyRef, kindRef, lastMoveRef, myColorRef, phaseRef, roleRef,
-    sizeRef, toMoveRef, winnerRef,
+    sizeRef, toMoveRef, winnerRef, syncEpochRef,
     setBoard, setHistory, setHover, setLastMove, setMyColor, setToMove, setWinner,
     showNotice,
   } = ctx;
@@ -38,6 +38,8 @@ export function createNegotiation(ctx: Pick<
     setLastMove(h.length >= 2 ? h[h.length - 2] : null);
     setWinner(null);
     setToMove(h.length % 2 === 1 ? "black" : "white");
+    // 回退推进纪元：否则补发的更短快照会被接收端守卫当旧快照丢弃（审计 B1）
+    syncEpochRef.current += 1;
     setTimeout(() => pushSyncState(), 60);
   }
 
@@ -61,7 +63,7 @@ export function createNegotiation(ctx: Pick<
 
   function pushSyncState() {
     transport.send({
-      type: "SyncState",
+      type: "SyncState", sv: syncEpochRef.current,
       board: boardRef.current, toMove: toMoveRef.current, winner: winnerRef.current,
       history: historyRef.current, lastMove: lastMoveRef.current,
       kind: kindRef.current, size: sizeRef.current,
@@ -76,6 +78,8 @@ export function createNegotiation(ctx: Pick<
     setLastMove(null);
     setHistory([]);
     setHover(null);
+    // 回退推进纪元：理由同 applyUndoLocal（审计 B1）
+    syncEpochRef.current += 1;
     setTimeout(() => pushSyncState(), 60);
   }
 

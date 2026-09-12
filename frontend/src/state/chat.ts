@@ -16,9 +16,9 @@ export function createChat(ctx: Pick<
   SessionCtx,
   | "chatLog" | "peers" | "spectators" | "serverMode" | "tabUser"
   | "setChatLog"
-  | "myHostRef" | "relayTargetsRef" | "roleRef"
+  | "myHostRef" | "opponentRef" | "roleRef"
 >) {
-  const { chatLog, peers, spectators, serverMode, tabUser, setChatLog, myHostRef, relayTargetsRef, roleRef } = ctx;
+  const { chatLog, peers, spectators, serverMode, tabUser, setChatLog, myHostRef, opponentRef, roleRef } = ctx;
 
   /** 聊天统一入口：本地插入 + 服务器 signal（对局者）/定向转发（观战者）。 */
   function sendChat(text: string) {
@@ -31,7 +31,8 @@ export function createChat(ctx: Pick<
         serverChannel.signal(myHostRef.current, "spec-chat", { userId: serverChannel.myServerId, name: myName() || "观战者", text: t });
       }
     } else if (serverMode && serverChannel.connected) {
-      const opp = relayTargetsRef.current.values().next().value as string | undefined;
+      // 对手判定用 opponentRef：relayTargets 首元素可能是等待期先来的观战者（审计 B2）
+      const opp = opponentRef.current;
       if (opp) serverChannel.signal(opp, "chat", { userId: serverChannel.myServerId, name: myName() || tabUser.slice(0, 8), text: t });
     } else {
       transport.send({ type: "Chat", text: t });

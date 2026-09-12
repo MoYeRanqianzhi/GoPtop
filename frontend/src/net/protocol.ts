@@ -21,7 +21,11 @@ export type MsgKind =
   // by：发送端声明的执子颜色。接收端（尤其观战者，没有"我的颜色"可用）据此判定，
   // 不得从本地 toMove/myColor 推断——历史 bug：任何一方认输，观战者都判白胜。
   | { type: "Move"; move: Move; by: StoneColor }
-  | { type: "SyncState"; board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null; history: Coord[]; lastMove: Coord | null; kind: GameKind; size: Size }
+  // sv：回退纪元（可选）。悔棋/重开让 history 变短是合法回退，旧守卫只比
+  // history.length 会把回退快照当旧快照丢掉（观战者永远看不到回退）；
+  // 发送端在每次本地回退时 +1 并随快照广播，接收端按 (sv, history.length)
+  // 双键比较——sv 更旧或同 sv 但更短才丢弃。
+  | { type: "SyncState"; sv?: number; board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null; history: Coord[]; lastMove: Coord | null; kind: GameKind; size: Size }
   | { type: "SyncRequest" }
   | { type: "Chat"; text: string }
   | { type: "Ping" }

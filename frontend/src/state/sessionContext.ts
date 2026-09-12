@@ -81,6 +81,11 @@ export type SessionCtx = {
   pendingLinkRef: MutableRefObject<{ target: string; pwd: string | null; spec: boolean } | null>;
   /** 服务器模式的兜底中转目标（对手 + 观战者的 s- 短 ID）。 */
   relayTargetsRef: MutableRefObject<Set<string>>;
+  /** 服务器模式当前对手的短 ID。relayTargets 的插入序第一个不一定是对手
+   *  （观战者可能在等待期先于对手加入），对手判定必须用它（审计 B2）。 */
+  opponentRef: MutableRefObject<string | null>;
+  /** SyncState 回退纪元：本地悔棋/重开时 +1，随快照广播供接收端双键比较（审计 B1）。 */
+  syncEpochRef: MutableRefObject<number>;
   /** 观战者侧：发言批准状态（双 host 均 ack 才可发言；被拒则本局锁死）。 */
   specCanChatRef: MutableRefObject<boolean>;
   /** 观战钥匙（每局生成、整局有效）：服务器模式观战链接的 pwd。 */

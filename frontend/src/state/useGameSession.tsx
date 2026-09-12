@@ -98,6 +98,11 @@ export function useGameSession() {
   const [serverState, setServerState] = useState<ServerState>(serverMode ? "connecting" : "off");
   /** 服务器模式的兜底中转目标（对手 + 观战者的 s- 短 ID）。 */
   const relayTargetsRef = useRef<Set<string>>(new Set());
+  /** 服务器模式当前对手的短 ID：观战者可能在等待期先于对手进入 relayTargets，
+   *  「取集合首元素当对手」在那种时序下会把房间同步/聊天发给观战者（审计 B2）。 */
+  const opponentRef = useRef<string | null>(null);
+  /** SyncState 回退纪元：本地悔棋/重开时 +1 并随快照广播（审计 B1，见 protocol.ts）。 */
+  const syncEpochRef = useRef(0);
   /** 服务器挑战信（对方点名邀请）：等用户同意/拒绝。 */
   const [serverIncoming, setServerIncoming] = useState<{ from: string; fromName: string; kind: GameKind; size: Size } | null>(null);
   /** 大厅挑战：createInvite 完成后向该目标发挑战信。 */
@@ -204,7 +209,7 @@ export function useGameSession() {
       case "SyncRequest": {
         setPeerConnected(true);
         transport.send({
-          type: "SyncState",
+          type: "SyncState", sv: syncEpochRef.current,
           board: boardRef.current, toMove: toMoveRef.current, winner: winnerRef.current,
           history: historyRef.current, lastMove: lastMoveRef.current,
           kind: kindRef.current, size: sizeRef.current,
@@ -213,10 +218,14 @@ export function useGameSession() {
       }
       case "SyncState": {
         setPeerConnected(true);
-        // 覆盖守卫（审查 A3）：快照版本 = history.length。直连 open 后本方可能先落子，
-        // 对方 200ms 后发出的旧空板快照若后到会吞掉这一手——只应用不旧于本地的快照；
-        // 同长视为同版本（正常对局中双方历史一致，覆盖无害）
-        if (k.history.length < historyRef.current.length) break;
+        // 覆盖守卫（审查 A3 + 回退纪元）：快照版本 = (sv, history.length) 双键。
+        // 直连 open 后本方可能先落子，对方 200ms 后发出的旧空板快照若后到会吞掉
+        // 这一手——只应用不旧于本地的快照；同长视为同版本（正常对局中双方历史
+        // 一致，覆盖无害）。仅比 length 会让悔棋/重开的「合法变短」回退被丢弃，
+        // 观战者从此发散（审计 B1）——sv 更旧的快照才是真旧快照。
+        const sv = k.sv ?? 0;
+        const mySv = syncEpochRef.current;
+        if (sv < mySv || (sv === mySv && k.history.length < historyRef.current.length)) break;
         if (k.kind !== kindRef.current) setKind(k.kind);
         if (k.size !== sizeRef.current) setSize(k.size);
         setBoard(k.board.map((r) => [...r]));
@@ -230,7 +239,7 @@ export function useGameSession() {
         setPeerConnected(true);
         if (myColorRef.current === "black") {
           transport.send({
-            type: "SyncState",
+            type: "SyncState", sv: syncEpochRef.current,
             board: boardRef.current, toMove: toMoveRef.current, winner: winnerRef.current,
             history: historyRef.current, lastMove: lastMoveRef.current,
             kind: kindRef.current, size: sizeRef.current,
@@ -757,6 +766,15 @@ export function useGameSession() {
     rtcPeersRef.current = [];
     inviterRtcRef.current = null;
     relayTargetsRef.current = new Set();
+    // peer.close() 的回调在本函数返回前同步触发时 phase 仍是 playing，
+    // 会误置 connLost——这里显式复位（审计 B3：旧局的红灯不得带进新局）
+    setConnLost(false);
+    opponentRef.current = null;
+    // 观战聊天权限是「本局」概念：不复位会把上局的获准/被拒带进新局（审计 B4）
+    specCanChatRef.current = false;
+    setSpecCanChat(false);
+    specChatOkRef.current.clear();
+    specRequestDeniedRef.current = false;
     pendingChallengeRef.current = null;
     setServerIncoming(null);
     setModal(null);
@@ -810,10 +828,11 @@ export function useGameSession() {
     let wasOpen = false;
     p.onRemote = (msg) => transport.injectRemote(msg);
     p.onState = (s) => {
-      // 关闭/失败即出列：rtcPeersRef 只装活连接，防止跨局累积（审查 D7）
+      // 关闭/失败即出列：rtcPeersRef 只装活连接，防止跨局累积（审查 D7）。
+      // 红灯只跟「对手」的连接走：观战者离开不构成对局中断（审计 B3）
       if (s === "closed" || s === "error") {
         rtcPeersRef.current = rtcPeersRef.current.filter((q) => q !== p);
-        if (wasOpen && phaseRef.current === "playing") setConnLost(true);
+        if (wasOpen && phaseRef.current === "playing" && p.role === "player") setConnLost(true);
       }
       if (s === "open") {
         wasOpen = true;
@@ -829,7 +848,7 @@ export function useGameSession() {
         // 直连建立后主动同步一次
         setTimeout(() => {
           transport.send({
-            type: "SyncState",
+            type: "SyncState", sv: syncEpochRef.current,
             board: boardRef.current, toMove: toMoveRef.current, winner: winnerRef.current,
             history: historyRef.current, lastMove: lastMoveRef.current,
             kind: kindRef.current, size: sizeRef.current,
@@ -934,9 +953,9 @@ export function useGameSession() {
     setSpecCanChat, setSpecRequests, setSpectateEnabled, setSpectators, setWatchUrl,
     boardRef, historyRef, kindRef, lastMoveRef, myColorRef, phaseRef, roleRef,
     sizeRef, toMoveRef, winnerRef, confirmRejectRef, confirmResolveRef, gameIdRef,
-    inviterRtcRef, myHostRef, pendingLinkRef, pwdRef, relayTargetsRef, rtcPeersRef,
+    inviterRtcRef, myHostRef, opponentRef, pendingLinkRef, pwdRef, relayTargetsRef, rtcPeersRef,
     specCanChatRef, specChatOkRef, specPwdRef, specRequestDeniedRef, specRequestsRef,
-    spectateEnabledRef, spectatorsRef,
+    spectateEnabledRef, spectatorsRef, syncEpochRef,
     showNotice, attachPeer, backHome, closeAllRtcPeers, resetBoardFor,
     pushChat: () => {},
   };
@@ -967,7 +986,9 @@ export function useGameSession() {
     presence.start();
     const off = presence.onEvent((e) => {
       if (e.type === "peers") {
-        setPeers(e.peers.filter((p) => p.id !== tabUser));
+        // 服务器模式的名册只信 serverChannel：presence（同源）与服务器名册是
+        // 两个写者，互相整表覆盖会让名册来回闪烁（审计顺手修）
+        if (!serverMode) setPeers(e.peers.filter((p) => p.id !== tabUser));
       } else if (e.type === "challenge") {
         challengeQueueRef.current.push(e);
         setSignalTick((t) => t + 1);

@@ -21,7 +21,7 @@ export function createServerSignaling(ctx: Pick<
   | "setSpecCanChat" | "setPeerAvatars" | "setGameId" | "setWatchUrl" | "setAnswerBackUrl"
   | "setSpectators"
   | "pendingLinkRef" | "roleRef" | "myHostRef" | "myColorRef" | "phaseRef" | "gameIdRef"
-  | "relayTargetsRef" | "inviterRtcRef" | "pwdRef" | "kindRef" | "sizeRef" | "rtcPeersRef"
+  | "relayTargetsRef" | "opponentRef" | "inviterRtcRef" | "pwdRef" | "kindRef" | "sizeRef" | "rtcPeersRef"
   | "spectateEnabledRef" | "specPwdRef" | "specChatOkRef" | "specRequestDeniedRef"
   | "specCanChatRef" | "confirmResolveRef" | "confirmRejectRef" | "specRequestsRef" | "spectatorsRef"
   | "showNotice" | "attachPeer" | "closeAllRtcPeers" | "backHome" | "resetBoardFor" | "pushChat"
@@ -33,7 +33,7 @@ export function createServerSignaling(ctx: Pick<
     setSpecCanChat, setPeerAvatars, setGameId, setWatchUrl, setAnswerBackUrl,
     setSpectators,
     pendingLinkRef, roleRef, myHostRef, myColorRef, phaseRef, gameIdRef,
-    relayTargetsRef, inviterRtcRef, pwdRef, kindRef, sizeRef, rtcPeersRef,
+    relayTargetsRef, opponentRef, inviterRtcRef, pwdRef, kindRef, sizeRef, rtcPeersRef,
     spectateEnabledRef, specPwdRef, specChatOkRef, specRequestDeniedRef,
     specCanChatRef, confirmResolveRef, confirmRejectRef, specRequestsRef, spectatorsRef,
     showNotice, attachPeer, closeAllRtcPeers, backHome, resetBoardFor, pushChat,
@@ -85,7 +85,8 @@ export function createServerSignaling(ctx: Pick<
 
   /** 房间名单变化后向对方对局者与全部观战者广播。 */
   function pushSpecSync(extra?: Record<string, unknown>) {
-    const opp = relayTargetsRef.current.values().next().value as string | undefined;
+    // 对手判定用 opponentRef：relayTargets 插入序第一个可能是等待期先来的观战者（审计 B2）
+    const opp = opponentRef.current;
     const payload = { list: spectatorsRef.current, enabled: spectateEnabledRef.current, ...extra };
     if (opp && serverChannel.connected) serverChannel.signal(opp, "spec-sync", payload);
     for (const s of spectatorsRef.current) {
@@ -131,6 +132,7 @@ export function createServerSignaling(ctx: Pick<
               if (inviterRtcRef.current !== host) return;
               host.peerTag = from;
               relayTargetsRef.current.add(from);
+              opponentRef.current = from;
               serverChannel.signal(from, "offer", { name: myName(), kind: kindRef.current, size: sizeRef.current, gameId: gameIdRef.current ?? "", offer });
             } catch { /* offer 失败：对端等待超时自行退出 */ }
           })();
@@ -373,6 +375,7 @@ export function createServerSignaling(ctx: Pick<
       const offer = await peer.createOfferPlain();
       peer.peerTag = from;
       relayTargetsRef.current.add(from);
+      opponentRef.current = from;
       inviterRtcRef.current = peer;
       serverChannel.signal(from, "offer", { name: myName(), kind: kindRef.current, size: sizeRef.current, gameId: g, offer });
     } catch {
@@ -402,6 +405,7 @@ export function createServerSignaling(ctx: Pick<
     setWatchUrl(null);
     setAnswerBackUrl(null);
     relayTargetsRef.current = new Set([from]);
+    opponentRef.current = from;
     showNotice(`接受 ${fromName} 的邀请，正在建立直连…`);
     nav("/p2p");
     const peer = new DirectRtcPeer({ isInviter: false, role: "player" });
