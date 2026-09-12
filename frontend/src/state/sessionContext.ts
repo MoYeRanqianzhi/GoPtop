@@ -7,6 +7,7 @@
  * 这里只声明类型；唯一例外是 peersRefCache——仅 chat 域使用，归 chat 模块私有。
  */
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import type { RulesEngine } from "../game/rules";
 import type { PeerInfo } from "../net/presence";
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 import type { DirectRtcPeer } from "../net/rtc";
@@ -86,6 +87,8 @@ export type SessionCtx = {
   opponentRef: MutableRefObject<string | null>;
   /** SyncState 回退纪元：本地悔棋/重开时 +1，随快照广播供接收端双键比较（审计 B1）。 */
   syncEpochRef: MutableRefObject<number>;
+  /** Rust 规则引擎（wasm）：落子/悔棋判定的唯一真源（negotiation 的 undo/reset 也走它）。 */
+  rulesRef: MutableRefObject<RulesEngine>;
   /** 观战者侧：发言批准状态（双 host 均 ack 才可发言；被拒则本局锁死）。 */
   specCanChatRef: MutableRefObject<boolean>;
   /** 观战钥匙（每局生成、整局有效）：服务器模式观战链接的 pwd。 */

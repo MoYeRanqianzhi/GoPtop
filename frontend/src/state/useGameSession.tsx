@@ -13,7 +13,8 @@
  * hook 与 transport 单例（transport/presence/DirectRtc）交互，与原先完全一致。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { checkFive, emptyBoard } from "../game/board";
+import { emptyBoard } from "../game/board";
+import { RulesEngine } from "../game/rules";
 import { loadDefaults } from "../pages/components";
 import type { Phase, Role } from "../pages/components";
 import { serverChannel } from "../net/serverChannel";
@@ -163,6 +164,8 @@ export function useGameSession() {
   const phaseRef = useRef(phase);
   const rtcPeersRef = useRef<DirectRtcPeer[]>([]);
   const inviterRtcRef = useRef<DirectRtcPeer | null>(null);
+  /** Rust 规则引擎（wasm）：落子/悔棋判定的唯一真源，棋盘/回合/胜负以它的回复为准。 */
+  const rulesRef = useRef(new RulesEngine());
   const bootRef = useRef(false);
   const inviteDoneRef = useRef<string | null>(null);
   // 挑战/同意信件队列：presence 回调只收件，消费逻辑走下面的 drain effect，
@@ -185,22 +188,23 @@ export function useGameSession() {
   useEffect(() => { pwdRef.current = pwd; }, [pwd]);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
-  // kind 切换时自动修正 size
-  useEffect(() => {
-    const nextSize: Size = kind === "gomoku" ? 15 : size === 15 ? 19 : size;
-    if (nextSize !== size) setSize(nextSize);
-  }, [kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  // kind 切换的 size 修正放在 pickKind 里原子完成（setKind+setSize 同批渲染）。
+  // 旧写法是 effect 二次修正：kind=go 而 size 仍是 15 的中间渲染帧会把
+  // Go{size:15} 传给 Rust 规则引擎——GameState::new 的尺寸断言 panic，
+  // wasm trap 直接掀翻 React 树（围棋按钮一点整页白屏）。
 
-  // 主页 size 变化重置棋盘；对局中由 SyncState 驱动
+  // 主页 size 变化重置棋盘；对局中由 SyncState 驱动。kind 切换必然带动 size
+  // （五子棋固定 15，围棋 9/13/19），故 kind 入依赖是冗余保险
   useEffect(() => {
     if (phase !== "home") return;
+    rulesRef.current.newGame(kind, size);
     setBoard(emptyBoard(size));
     setToMove("black");
     setWinner(null);
     setLastMove(null);
     setHistory([]);
     setHover(null);
-  }, [size, phase]);
+  }, [size, phase, kind]);
 
   /* ---------- 对局数据消息 ---------- */
   const handleNetMessage = useCallback((msg: GameMsg) => {
@@ -233,6 +237,10 @@ export function useGameSession() {
         setWinner(k.winner);
         setHistory([...k.history]);
         setLastMove(k.lastMove ? { ...k.lastMove } : null);
+        // wasm 引擎同步采纳快照：后续落子/悔棋的规则判定基于它；
+        // kind/size 有变（规则切换同步）时先重建引擎再采纳
+        if (k.kind !== kindRef.current || k.size !== sizeRef.current) rulesRef.current.newGame(k.kind, k.size);
+        rulesRef.current.adopt(k.board, k.toMove, k.winner, k.history);
         break;
       }
       case "Hello": {
@@ -265,14 +273,15 @@ export function useGameSession() {
           const n = curBoard.length;
           if (c.x < 0 || c.y < 0 || c.x >= n || c.y >= n) break;
           if (curBoard[c.y]?.[c.x] !== "empty") break;
-          const next = curBoard.map((r) => [...r]);
-          next[c.y][c.x] = mover;
-          const willWin = kindRef.current === "gomoku" && checkFive(next, c, mover);
-          setBoard(next);
+          // 规则判定与棋盘更新都在 Rust（wasm，game/rules.ts）：围棋提子/禁自杀
+          // 由此生效；wasm 拒绝（守卫口径外或快照有偏差）即丢弃本手——双保险
+          const res = rulesRef.current.place(c.x, c.y);
+          if (!res?.ok) break;
+          setBoard(res.board);
           setLastMove(c);
           setHistory((h) => [...h, c]);
-          if (willWin) setWinner(mover);
-          else setToMove(mover === "black" ? "white" : "black");
+          if (res.winner) setWinner(res.winner);
+          else setToMove(res.toMove);
         } else if (k.move.type === "Pass") {
           if (by !== toMoveRef.current) break;
           setToMove(by === "black" ? "white" : "black");
@@ -284,14 +293,7 @@ export function useGameSession() {
       }
       case "Reset": {
         setPeerConnected(true);
-        setKind(k.kind);
-        setSize(k.size);
-        setBoard(emptyBoard(k.size));
-        setToMove("black");
-        setWinner(null);
-        setLastMove(null);
-        setHistory([]);
-        setHover(null);
+        resetBoardFor(k.kind, k.size);
         break;
       }
       case "Chat": {
@@ -420,6 +422,7 @@ export function useGameSession() {
   const processedIntentRef = useRef<string | null>(null);
 
   function resetBoardFor(k: GameKind, s: Size) {
+    rulesRef.current.newGame(k, s);
     setKind(k);
     setSize(s);
     setBoard(emptyBoard(s));
@@ -900,18 +903,19 @@ export function useGameSession() {
     // 直连未建立时：服务器模式可经兜底中转落子（relay 双发去重），无服务器模式不可
     if (phase === "playing" && !peerConnected && !(serverMode && relayTargetsRef.current.size > 0)) return;
 
-    const mover = toMove;
-    const next = board.map((row) => [...row]);
-    next[c.y][c.x] = mover;
-    const willWin = kind === "gomoku" && checkFive(next, c, mover);
-    setBoard(next);
+    // 规则判定与棋盘更新都在 Rust（wasm，game/rules.ts）：权威棋盘直接上屏
+    //（围棋提子生效）；占据/自杀等非法手由 Rust 拒绝
+    const res = rulesRef.current.place(c.x, c.y);
+    if (!res?.ok) return;
+    setBoard(res.board);
     setLastMove(c);
     setHistory((h) => [...h, c]);
-    if (willWin) setWinner(mover);
-    else setToMove(mover === "black" ? "white" : "black");
+    if (res.winner) setWinner(res.winner);
+    else setToMove(res.toMove);
 
     if (phase === "playing") {
-      transport.send({ type: "Move", move: { type: "Place", coord: c }, by: mover });
+      // mover 是落子前的 toMove（此时 state 尚未重渲染，值即本手执子者）
+      transport.send({ type: "Move", move: { type: "Place", coord: c }, by: toMove });
     }
   }
 
@@ -955,7 +959,7 @@ export function useGameSession() {
     sizeRef, toMoveRef, winnerRef, confirmRejectRef, confirmResolveRef, gameIdRef,
     inviterRtcRef, myHostRef, opponentRef, pendingLinkRef, pwdRef, relayTargetsRef, rtcPeersRef,
     specCanChatRef, specChatOkRef, specPwdRef, specRequestDeniedRef, specRequestsRef,
-    spectateEnabledRef, spectatorsRef, syncEpochRef,
+    spectateEnabledRef, spectatorsRef, syncEpochRef, rulesRef,
     showNotice, attachPeer, backHome, closeAllRtcPeers, resetBoardFor,
     pushChat: () => {},
   };
@@ -1193,7 +1197,9 @@ export function useGameSession() {
 
   function pickKind(k: GameKind) {
     if (topLocked) return;
+    // 原子修正：五子棋固定 15；围棋原 15（五子棋带来的）则落到 19
     setKind(k);
+    setSize(k === "gomoku" ? 15 : size === 15 ? 19 : size);
   }
 
   function pickSize(s: Size) {

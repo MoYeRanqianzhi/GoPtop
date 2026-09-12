@@ -13,33 +13,32 @@ import type { SessionCtx } from "./sessionContext";
 export function createNegotiation(ctx: Pick<
   SessionCtx,
   | "boardRef" | "historyRef" | "kindRef" | "lastMoveRef" | "myColorRef" | "phaseRef" | "roleRef"
-  | "sizeRef" | "toMoveRef" | "winnerRef" | "syncEpochRef"
+  | "sizeRef" | "toMoveRef" | "winnerRef" | "syncEpochRef" | "rulesRef"
   | "setBoard" | "setHistory" | "setHover" | "setLastMove" | "setMyColor" | "setToMove" | "setWinner"
   | "showNotice"
 >) {
   const {
     boardRef, historyRef, kindRef, lastMoveRef, myColorRef, phaseRef, roleRef,
-    sizeRef, toMoveRef, winnerRef, syncEpochRef,
+    sizeRef, toMoveRef, winnerRef, syncEpochRef, rulesRef,
     setBoard, setHistory, setHover, setLastMove, setMyColor, setToMove, setWinner,
     showNotice,
   } = ctx;
 
   /* ---------- 协商：悔棋 / 重开 / 换棋（对方同意制） ---------- */
 
-  /** 撤销最后一手（确定性操作，双方一致）；完成后补发 SyncState 对齐观战者。 */
+  /** 撤销最后一手：Rust 侧弹出手并重放（围棋提子一并还原），TS 只做
+   *  history/lastMove 的镜像裁剪；完成后推进纪元并补发 SyncState 对齐观战者。 */
   function applyUndoLocal() {
     const h = historyRef.current;
     if (h.length === 0) return;
-    const last = h[h.length - 1];
-    const next = boardRef.current.map((r) => [...r]);
-    next[last.y][last.x] = "empty";
-    setBoard(next);
+    const res = rulesRef.current.undo();
+    if (!res?.ok) return;
+    syncEpochRef.current += 1;
+    setBoard(res.board);
     setHistory(h.slice(0, -1));
     setLastMove(h.length >= 2 ? h[h.length - 2] : null);
-    setWinner(null);
-    setToMove(h.length % 2 === 1 ? "black" : "white");
-    // 回退推进纪元：否则补发的更短快照会被接收端守卫当旧快照丢弃（审计 B1）
-    syncEpochRef.current += 1;
+    setWinner(res.winner);
+    setToMove(res.toMove);
     setTimeout(() => pushSyncState(), 60);
   }
 
@@ -72,6 +71,7 @@ export function createNegotiation(ctx: Pick<
 
   /** 协商重开的本地执行（双方各自执行 + SyncState 对齐观战者）。 */
   function doResetLocal() {
+    rulesRef.current.reset();
     setBoard(emptyBoard(sizeRef.current));
     setToMove("black");
     setWinner(null);

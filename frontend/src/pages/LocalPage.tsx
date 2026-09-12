@@ -1,15 +1,18 @@
 /**
  * 本地对战页（D1 拆分）——与 P2P 同一套棋盘 UI，只是没有邀请链接。
- * 从 App.tsx 原样搬出，禁止行为变化。规则/尺寸由顶部选择器统一控制。
+ * 落子/悔棋判定走 Rust 规则引擎（wasm，game/rules.ts），与 P2P 同一真源。
+ * 规则/尺寸由顶部选择器统一控制。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Coord, StoneColor } from "../net/protocol";
-import { checkFive, emptyBoard } from "../game/board";
+import { emptyBoard } from "../game/board";
+import { RulesEngine } from "../game/rules";
 import { BoardPanel } from "./components";
 import type { GameKind, Size } from "../net/protocol";
 
 export function LocalPage(props: { kind: GameKind; size: Size }) {
   const { kind, size } = props;
+  const rulesRef = useRef(new RulesEngine());
   const [board, setBoard] = useState<StoneColor[][]>(() => emptyBoard(size));
   const [toMove, setToMove] = useState<StoneColor>("black");
   const [winner, setWinner] = useState<StoneColor | null>(null);
@@ -17,8 +20,9 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
   const [hover, setHover] = useState<Coord | null>(null);
   const [history, setHistory] = useState<Coord[]>([]);
 
-  // 顶部切换规则/尺寸时重置棋盘
+  // 顶部切换规则/尺寸时重建 Rust 引擎并重置棋盘
   useEffect(() => {
+    rulesRef.current.newGame(kind, size);
     setBoard(emptyBoard(size));
     setToMove("black");
     setWinner(null);
@@ -28,6 +32,7 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
   }, [kind, size]);
 
   function resetBoard() {
+    rulesRef.current.reset();
     setBoard(emptyBoard(size));
     setToMove("black");
     setWinner(null);
@@ -39,25 +44,26 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
   function place(c: Coord) {
     if (winner) return;
     if (board[c.y][c.x] !== "empty") return;
-    const next = board.map((row) => [...row]);
-    next[c.y][c.x] = toMove;
-    const willWin = kind === "gomoku" && checkFive(next, c, toMove);
-    setBoard(next);
+    // 规则判定与棋盘更新都在 Rust（wasm）：权威棋盘直接上屏（围棋提子生效）
+    const res = rulesRef.current.place(c.x, c.y);
+    if (!res?.ok) return;
+    setBoard(res.board);
     setLastMove(c);
     setHistory((h) => [...h, c]);
-    if (willWin) setWinner(toMove);
-    else setToMove(toMove === "black" ? "white" : "black");
+    if (res.winner) setWinner(res.winner);
+    else setToMove(res.toMove);
   }
 
   function undo() {
     if (history.length === 0 || winner) return;
-    const prev = history[history.length - 1];
-    const next = board.map((row) => [...row]);
-    next[prev.y][prev.x] = "empty";
-    setBoard(next);
+    // Rust 侧弹出手并重放（围棋提子一并还原）
+    const res = rulesRef.current.undo();
+    if (!res?.ok) return;
+    setBoard(res.board);
     setHistory((h) => h.slice(0, -1));
     setLastMove(history.length >= 2 ? history[history.length - 2] : null);
-    setToMove((s) => (s === "black" ? "white" : "black"));
+    setToMove(res.toMove);
+    setWinner(res.winner);
   }
 
   const statusText = winner ? `${winner === "black" ? "黑" : "白"} 胜` : `${toMove === "black" ? "黑" : "白"} 落子`;
