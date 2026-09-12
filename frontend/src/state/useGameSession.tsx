@@ -1227,3 +1227,6 @@ export function useGameSession() {
     topLocked, topLockedTitle, showNotice,
   };
 }
+
+/** 页面组件的消费面：pages/* 以整包 session 取值，避免 60 余项逐 props 穿透。 */
+export type GameSession = ReturnType<typeof useGameSession>;

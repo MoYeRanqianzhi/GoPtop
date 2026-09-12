@@ -189,3 +189,33 @@ footer,
   /* 宽屏下弹窗形态隐藏（用停靠栏） */
   .chat-modal-bg { display: none; }
 }
+
+/* —— 页面壳布局（原 App.tsx 内联 <style> 块整体移入，注释随行保留） —— */
+/* bottom-grid 列数已由 minmax(auto-fit) 自适应，窄屏自动单列，旧 640px 断点删除 */
+/* header 三级降级（手机端致命挤压）：先隐徽章，再隐标题，最后把对局设置收进「类型」按钮。
+   阈值按模式分测（含 padding，2026-09-07 实测）：五子棋全量 578 / 无徽章 442；
+   围棋（3 个尺寸钮）全量 677 / 无徽章 572。各 +2px 余量——宁可挤一点也不提前隐藏 */
+@media (max-width: 580px) { header[data-kind="gomoku"] .hp-badge { display: none; } }
+@media (max-width: 679px) { header[data-kind="go"] .hp-badge { display: none; } }
+@media (max-width: 444px) { header[data-kind="gomoku"] .hp-title { display: none; } }
+@media (max-width: 574px) { header[data-kind="go"] .hp-title { display: none; } }
+@media (max-width: 463px) {
+  header[data-kind="go"] .hp-setup { display: none !important; }
+  header[data-kind="go"] .hp-type-btn { display: inline-block; }
+}
+@media (max-width: 342px) {
+  .hp-setup { display: none !important; }
+  .hp-type-btn { display: inline-block; }
+  header { padding: 8px 10px !important; }
+}
+/* 底部三卡切换（用户拍板 2026-09-07）：判定用容器查询——.play-stack 是容器
+   （brutal.css），stack 宽度跟随棋盘可用高度缩放，视口宽时 stack 也可能很窄，
+   媒体查询看不到这种「显示不下」。阈值以下宽卡放不下 → 收起显示 swap 卡 */
+.bp-swap { display: none; }
+@container (max-width: 520px) {
+  .bp-wide { display: none !important; }
+  .bp-swap { display: flex !important; }
+}
+@container (max-width: 300px) {
+  .bp-swap { padding: 10px !important; }
+}
