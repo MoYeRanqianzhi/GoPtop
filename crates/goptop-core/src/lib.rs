@@ -6,10 +6,12 @@
 //! - `go`     — 围棋规则（落子、提子、气等，最小可玩子集先行）。
 //! - `game`   — 统一的 `GameState`/`GameKind`/`Move` 状态机，屏蔽 Gomoku/Go 差异。
 //! - `protocol` — 联机消息 `GameMsg`（serde）参考实现。**注意：现行联机协议的
-//!   唯一真源是前端 `frontend/src/net/transport.ts`**（TS 线格式含 sender/userId/
+//!   唯一真源是前端 `frontend/src/net/protocol.ts`**（TS 线格式含 sender/userId/
 //!   SyncState 等，与本模块不同）；本模块尚未接线，对接 Rust 传输前须先对齐。
-//! - `wasm`   — 仅在 `feature = "wasm"` 时编译，为纯 Web 前端暴露 `wasm-bindgen` 绑定。
-//!   **前端当前使用 TS 内联规则实现，WASM 尚未接线**。
+//! - `wasm`   — 仅在 `feature = "wasm"` 时编译，为前端暴露 `WasmGame` 绑定。
+//!   **已接线（2026-09-13 起）**：Web 与 Tauri WebView 的所有落子/悔棋判定都
+//!   经 `frontend/src/game/rules.ts` 走本模块；改规则后重跑 scripts/build-wasm.sh
+//!   并提交 frontend/src/wasm/ 产物。
 //!
 //! 设计约束：
 //! - 本 crate 不依赖任何平台/网络/前端库，可在原生、Tauri、WASM 三端复用。

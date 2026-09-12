@@ -6,8 +6,6 @@
 mod commands;
 mod p2p;
 
-use tauri::Manager as _;
-
 /// 供 `src-tauri/src/main.rs` 调用的入口，保持与官方模板一致的 `run()` 签名。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

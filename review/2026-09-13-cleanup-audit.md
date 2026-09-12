@@ -70,7 +70,7 @@
 |---|---|
 | `net/transport.ts` 头注释 | 「禁用中转」与服务器 relay 兜底矛盾；「跨设备观战尚未实现」已过时（spec 链接已实现） |
 | `net/serverChannel.ts` 头注释 | 「offer/answer/ice」中的 ice 属死链路 |
-| `.agents/DOCS.md` | architecture.md 与 p2p-protocol.md 两条链接指向不存在的 `docs/`（实际在 `.agents/docs/`） |
+| `.agents/DOCS.md` | ~~链接指向不存在的 docs/~~ **审计误报**：链接相对 `.agents/` 解析（→ .agents/docs/，文件存在）。仅内容描述过时，已随文档重写更新 |
 | `.agents/docs/architecture.md` | 停在 09-07：行数全错；仍列 RtcStatusLine（已删）；模块地图缺 serverChannel/服务器模式/观战/聊天/头像/协商；布局段描述已被 --stack-max 机制取代的旧公式 |
 | `.agents/docs/p2p-protocol.md` | 「Chat/UndoReq 未接线」「跨设备观战未实现」「STUN 三节点表」全过时；MsgKind 清单缺 Swap/Reset/Avatar/Ctl；缺服务器模式协议整章 |
 | `README.md` | 「无服务器、无中转」宣言与内置服务器模式矛盾；`/<hostId>` 用废弃术语 host；STUN 三节点表过时；目录结构称 transport 有 iroh（已弃）；称 core 为「前端唯一真源」不实 |

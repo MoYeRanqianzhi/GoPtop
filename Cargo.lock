@@ -1436,15 +1436,9 @@ dependencies = [
 name = "goptop"
 version = "0.1.0-alpha.0"
 dependencies = [
- "goptop-core",
- "goptop-transport",
- "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -1470,17 +1464,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "goptop-transport"
-version = "0.1.0-alpha.0"
-dependencies = [
- "goptop-core",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]

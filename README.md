@@ -3,11 +3,11 @@
 > 「道生一，一生二，二生三，三生万物。」——《道德经 · 四十二章》
 >
 > 一局棋，生于两位对弈者；黑白二子，衍三百六十一路之万物。
-> GoPtop 取「道法自然」之意：**无服务器、无中转、无厚——对弈之信息，以无形之通道直达彼岸**，恰如庖丁解牛「以无厚入有间」，不着一物，而游刃有余。
+> GoPtop 取「道法自然」之意：**以无形之通道直达彼岸**——棋枰之上，对弈之信息优先 P2P 直达，恰如庖丁解牛「以无厚入有间」，不着一物，而游刃有余。信令服务器是可选的问路石，不连亦可对弈。
 >
 > 「大音希声，大象无形。」——最好的服务器，就是没有服务器。
 
-硬核新野兽派画风（Neubrutalism）· Tauri + React + TypeScript · Rust 唯一真源 · 真 P2P 直连（同源 BroadcastChannel / 跨设备 WebRTC DataChannel，会话级 STUN 穿透，无 TURN 中转、无自建后端）。
+硬核新野兽派画风（Neubrutalism）· Tauri + React + TypeScript · **规则引擎 Rust 唯一真源**（core 经 wasm 在 Web 与桌面 WebView 执行同一份判定）· 优先 P2P 直连（同源 BroadcastChannel / 跨设备 WebRTC DataChannel，STUN 穿透，无 TURN）· 信令服务器可选（在线名册 + 点对点信令转发 + 数据兜底中转，纯转发不落地，不连服务器则完全无设施）。
 
 ---
 
@@ -20,12 +20,12 @@
 | 玩法 | 说明 |
 |---|---|
 | 本地对战 `/local` | 同屏双打，与 P2P 同一套棋盘 UI（唯无邀请链接）。黑先轮流落子，悔棋、重开一应俱全 |
-| P2P 对战 `/p2p` | 生成邀请链接（`/<hostId>?pwd=…&kind=…&size=…`），发给对方即开局；主机凭钥匙 `pwd` 自动应战，两人进局后钥匙自废，余者只剩观战 |
+| P2P 对战 `/p2p` | 生成邀请链接（`/<邀请者ID>?pwd=…&kind=…&size=…`），发给对方即开局；邀请者凭钥匙 `pwd` 自动应战，两人进局后钥匙自废，余者只剩观战。连上服务器时链接跨设备免回执，不连时跨设备走「回执」粘贴（全部能力本地可用） |
 | 在线用户 `/users` | 同源自动发现：谁空闲、谁待战、谁战中，一目了然；可手动挑战，亦可复制主页相邀 |
-| 观战 `/watch/<gameId>` | 观棋不语真君子——实时同步落子，只看不下 |
-| 设置 `/settings` | 穿透节点（STUN）自择：国服 A 区、 国服 B 区、外服，可开关、可自添 |
+| 观战 `/watch/<gameId>` 或 `/<ID>?pwd=<观战钥匙>&spec=1` | 观棋不语真君子——实时同步落子，只看不下；服务器模式下跨设备可用（每局一把观战钥匙，可批准申请、禁言、踢人） |
+| 设置 `/settings` | 穿透节点（STUN）九条内置自择、可自添；信令服务器单选（官方服务器 / 自建 / 无服务器） |
 
-规则：五子棋 15×15（四向连五即胜）；围棋 9 / 13 / 19（当前仅落子与同点禁着——提子、禁自杀、数目在路线图，见 `docs/已知限制与路线图.md`）。棋盘视口自适应——「人法地，地法天」：屏大则棋大，屏小则棋小，整组等宽同步缩放，永不溢出。
+规则：五子棋 15×15（四向连五即胜）；围棋 9 / 13 / 19（落子、**提子、禁自杀**已由 Rust 规则引擎执行；劫争与终局数目在路线图，见 `docs/已知限制与路线图.md`）。棋盘视口自适应——「人法地，地法天」：屏大则棋大，屏小则棋小，整组等宽同步缩放，永不溢出。
 
 > 更多文档：[`docs/使用指南.md`](docs/使用指南.md)（完整玩法与疑难解答） · [`docs/部署指南.md`](docs/部署指南.md)（Cloudflare Pages 等） · [`docs/已知限制与路线图.md`](docs/已知限制与路线图.md)（诚实清单）
 
@@ -50,7 +50,7 @@
 > 通道隐于无名，而棋迹显于有形。
 
 ```
-  邀者房主 ◄──── 邀请链接（含本局钥匙 pwd） ────► 应者客人
+  邀请者   ◄──── 邀请链接（含本局钥匙 pwd） ────► 受邀者
       │                                              │
       │   同源双页：BroadcastChannel 端到端直传        │
       │   跨设备：WebRTC DataChannel 点对点加密直传    │
@@ -60,8 +60,9 @@
 ```
 
 - **同浏览器 / 双窗口**：`BroadcastChannel` 同源直传，零配置秒连。
-- **跨设备**：`RTCPeerConnection + DataChannel`，offer/answer 编进链接自动交换，无需手抄；STUN 负责「问路」（NAT 地址发现），棋步只走 P2P 加密通道，不经任何服务器。
-- **钥匙机制**：每局一钥（`pwd`），主机自动认钥应战；两人进局钥匙即废——「功成而弗居」，后来者只可观战，不可乱入。
+- **跨设备**：`RTCPeerConnection + DataChannel`，offer/answer 编进链接或经服务器信令自动交换；STUN 负责「问路」（NAT 地址发现），棋步优先走 P2P 加密通道；直连不通时，服务器模式可经服务器加密兜底中转（可选，不连服务器则宁断不转）。
+- **钥匙机制**：每局一钥（`pwd`），邀请者自动认钥应战；两人进局钥匙即废——「功成而弗居」，后来者只可观战，不可乱入。观战另有一钥（`specPwd`），整局有效。
+- **规则真源**：落子、五连、提子、禁自杀全部由 Rust core 判定（编译为 wasm 供 Web，Tauri 同一份）——TS 只画棋盘、传消息。
 
 ---
 
@@ -83,6 +84,9 @@ npm --prefix frontend run build    # 输出 frontend/dist，可直接静态托�
 # 4）Tauri 桌面（需 Rust 工具链）
 npm --prefix frontend install
 npm --prefix frontend run tauri dev
+
+# 5）自建信令服务器（可选；官服地址内置，无需自建也能用）
+cargo run -p goptop-server -- --listen=127.0.0.1:9527
 ```
 
 验收「双窗口对弈」：一窗 `/p2p` 点「复制邀请链接」，另一窗（或无痕窗）粘贴打开——两窗落子实时同步，即为功成。
@@ -146,10 +150,10 @@ npm --prefix frontend run tauri dev
 >
 > 器之用在其「无」：空处能容，方能运子。
 
-- `crates/goptop-core` — 统一棋盘/规则/协议（可编译为 WASM，前端唯一真源）
-- `crates/goptop-transport` — `Transport` 抽象 + `memory`（测试）+ `iroh`（官方 relay 真 P2P，桌面/原生侧）
-- `src-tauri` — Tauri 2 桌面壳（窗口 + 后端指令）
-- `frontend` — Vite + React + TS（`brutal.css` 新野兽派；`src/net/transport.ts` 为 P2P 门面：Presence/邀请/RTC/路由）
+- `crates/goptop-core` — 规则唯一真源（棋盘/五连/提子/禁自杀），编译为 WASM 供前端执行（`scripts/build-wasm.sh`）
+- `crates/goptop-server` — 官方信令服务器（Rust/axum）：名册 + 信令转发 + 兜底中转，纯内存不落地
+- `src-tauri` — Tauri 2 桌面壳（窗口；WebView 内与 Web 同一份前端与 wasm 规则）
+- `frontend` — Vite + React + TS（`brutal.css` 新野兽派；`src/net/` P2P 门面，`src/state/` 对局状态机，`src/pages/` 页面）
 - `docs/screenshots` — 本 README 所引截图
 - `.agents/` — 贡献者 agent 共用记忆与开发文档（团队真经，人类读者可略过）
 
@@ -163,10 +167,12 @@ npm --prefix frontend run tauri dev
 
 | 名 | 地址 | 默认 |
 |---|---|---|
-| 国服 A 区 | `stun.miwifi.com:3478` | 开 |
-| 国服 B 区 | `stun.chat.bilibili.com:3478` | 开 |
-| 外服 | `stun.l.google.com:19302` | 关（国内多不可用，备用） |
-| 自定 | 设置页自添 | — |
+| 小米 | `stun.miwifi.com:3478` | 开 |
+| 哔哩哔哩 | `stun.chat.bilibili.com:3478` | 开 |
+| Cloudflare | `stun.cloudflare.com:3478` | 开 |
+| Google | `stun.l.google.com:19302` | 关 |
+| Twilio / Nextcloud / Sipnet / Cope / wtfismyip | 见设置页 | 关 |
+| 自定 | 设置页自添（任意 `stun:host:port`） | — |
 
 STUN 只问路、不传棋；回合制每步不足 1KB，直连之后与节点再无瓜葛。
 

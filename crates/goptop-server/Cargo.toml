@@ -2,7 +2,7 @@
 name = "goptop-server"
 version = "0.1.0-alpha.0"
 edition = "2024"
-description = "GoPtop 官方信令服务器：在线名册 + 短码邀请/观战 + SDP 转发 + 数据兜底中转"
+description = "GoPtop 官方信令服务器：在线名册 + 通用点对点信令转发 + 数据兜底中转"
 
 [dependencies]
 tokio = { workspace = true }

@@ -8,3 +8,4 @@
 - [2026-09-10 P2P 跨网实测](memory/2026-09-10-p2p-crossnet-stun-turn.md) — 代码无 bug；失败根因=移动丢国际来向 UDP+阿里云安全组；STUN-only 天花板已实测，TURN 兜底方向待拍板；三台测试机部署位置与网络特性
 - [2026-09-12 userId 链接+协商+聊天+观战房间](memory/2026-09-12-userid-link-negotiation-chat-spectator.md) — 链接回归 /userId?pwd=；服务器纯转发不落地；协商消息必须三链路去重；名册 ID=客户端持久 userId
 - [2026-09-13 大厅挑战修复+邀请弹窗](memory/2026-09-13-lobby-challenge-modal.md) — challenge-accepted 守卫错位+/users 走错信令两根因；邀请统一居中弹窗不设背景关闭；E2E 39 断言；跨设备实测（本机↔美国官服）挑战→弹窗→对局→黑胜全通且 WebRTC 直连成功
+- [2026-09-13 整理轮：三层拆分+规则下沉 wasm](memory/2026-09-13-cleanup-refactor-round.md) — 架构要求重申（Rust 承接一切，TS 只 UI）；wasm 规则接线（pickKind 中间帧 trap 坑）；B1-B4 根因；E2E 断言依赖 UI 文案面的教训；多代理禁令解除

@@ -3,38 +3,84 @@
 > 读者：后续贡献者的 agent。人类读者请看 `docs/使用指南.md`。
 > 本文记录**当前真实实现**，随代码演进同步更新。规则：文档不许超前于代码；改代码必须同步改这里。
 
-更新：2026-09-07（commit 99fbb4c，D1 拆分后）
+更新：2026-09-13（整理轮：net/state/UI 三层拆分 + 规则下沉 wasm + B1-B4 修复后）
 
-## 模块地图
+## 架构总原则（用户拍板，2026-09-13 重申）
+
+**Rust 承接一切核心功能；TS 只负责 UI。** 落子/悔棋/重开等一切规则判定由
+`crates/goptop-core` 编译为 wasm（`frontend/src/wasm/`，经 `game/rules.ts`）在
+Web 与 Tauri WebView 中执行——TS 侧禁止再建规则副本。传输层（WebRTC/信令/编解码）
+当前仍在 TS（历史路径），Rust 化是路线图后续阶段（见 docs/已知限制与路线图.md）。
+
+## 模块地图（行数为 2026-09-13 实测）
 
 ```
 frontend/src/
-├── main.tsx                     入口，StrictMode 挂载 App
-├── App.tsx                      （~540 行）纯壳：header + 页面拼装 + footer + 弹窗 JSX
-├── state/useGameSession.tsx     （~900 行）对局状态机 + 信令编排（App 全部逻辑所在）
-├── net/transport.ts             （~880 行）P2P 全部底层：身份/URL/Presence/GameChannel/WebRTC/编码
-├── net/transport.test.ts        vitest 30 例（去重/编码往返/解析/genPwd），npm test
-├── pages/components.tsx         PeerList/StunSettings/RtcStatusLine/BoardPanel/loadDefaults/Role/Phase
-├── pages/LocalPage.tsx          本地对战页（自含状态机）
-├── game/board.ts                checkFive/emptyBoard 前端唯一实现（与 Rust core 语义对齐点）
-├── components/BoardSvg.tsx      棋盘 SVG 渲染与落子命中（唯一棋盘组件）
-├── components/BrutalCard.tsx    卡片容器（暂无调用者，App 用内联 div）
-└── styles/brutal.css            新野兽派样式 + 自适应布局关键约束（见下）
+├── main.tsx                       入口，StrictMode 挂载 App
+├── App.tsx                        （243 行）纯壳：header + 页面 switch + chatDock + 弹窗组装 + footer
+├── state/
+│   ├── useGameSession.tsx         （1200 行）对局状态机编排层：states/refs、net 消息分发、
+│   │                              presence/服务器通道 effect、邀请/回执/挑战流程、落子、URL 意图
+│   ├── sessionContext.ts          SessionCtx 接口：三个域工厂共享的成员清单（ref 所有权在 hook）
+│   ├── serverSignaling.ts         服务器模式信令域：join/offer/answer/challenge/spec-* 全套 + 观战房间管理
+│   ├── negotiation.ts             协商域：悔棋/重开/换棋请求与本地执行（走 Rust 规则引擎）
+│   └── chat.ts                    聊天域：pushChat/sendChat/resolvePeerName + peersRefCache
+├── net/
+│   ├── protocol.ts                线格式类型唯一真源（StoneColor/Coord/GameMsg/MsgKind…）
+│   ├── identity.ts                myUserId/myName/genPwd/genGameId
+│   ├── links.ts                   UrlIntent/parseUrl/五种链接构造/粘贴解析（域名无关）/nav
+│   ├── stun.ts                    STUN 线路配置（内置 9 条，默认开 3 条）
+│   ├── servers.ts                 信令服务器配置（内置官服 + 自建，单选切换）
+│   ├── presence.ts                同源发现/挑战（BroadcastChannel）
+│   ├── gameChannel.ts             对局数据通道（同源 BC + RTC + 服务器 relay 三链路，(sender,seq) 去重）
+│   ├── rtc.ts                     DirectRtcPeer（WebRTC STUN-only 直连）+ G1 编解码（deflate+XOR+base64url）
+│   ├── serverChannel.ts           信令服务器客户端（WSS，断线重连，纯转发协议）
+│   ├── gameChannel.test.ts        vitest：去重/重放/跨 sender
+│   ├── rtcCodec.test.ts           vitest：G1 编码往返/坏前缀/截断/错钥
+│   └── links.test.ts              vitest：genPwd/parsePastedLink/parsePastedAnswer
+├── game/
+│   ├── rules.ts                   Rust 规则引擎门面（wasm 绑定 + TLA init + 组合守卫）
+│   └── board.ts                   只剩 emptyBoard（规则禁止 TS 副本）
+├── wasm/                          goptop-core 的 wasm-bindgen 产物（入库；scripts/build-wasm.sh 生成）
+├── pages/
+│   ├── MenuPage/P2pPage/UsersPage/SettingsPage/UserPage/WatchPage/LocalPage.tsx
+│   └── components.tsx             PeerList/StunSettings/ServerSettings/BoardPanel/loadDefaults/Role/Phase
+├── components/
+│   ├── BoardSvg.tsx               棋盘 SVG（唯一棋盘组件；类型 re-export 自 net/protocol）
+│   ├── StatusLamp/UrlRow/NoticeLine/KindSizePicker.tsx   App 抽出的共用 JSX
+│   └── InviteModal/PasteModal/ConfirmBanner.tsx          三类弹窗
+└── styles/brutal.css              新野兽派样式 + 自适应布局约束 + header 降级/容器查询（自 App 收编）
 ```
 
-## 路由（无 react-router）
+## 规则执行（wasm，2026-09-13 起）
 
-- `transport.parseUrl()` 把 `location` 解析成 `UrlIntent`（menu/local/p2p/users/settings/user?pwd&kind&size&rtc/watch）。
-- `nav(path)` = `pushState` + 手动派发 `popstate`；App 监听 popstate → `setIntent(parseUrl())`。
-- `processIntent(intent)` 是 URL → 行动的唯一入口，含三层去重：`processedIntentRef`（同一 href 只处理一次，StrictMode 防重）、`inviteDoneRef`（同一邀请只挑战一次）、回执 URL 短路（含 `rtcAns` 的链接被当页面打开时**绝不**据此发起挑战——历史上导致同机两窗互弈，见 memory/2026-09-07）。
+- 落子唯一入口 `RulesEngine.place(x,y)` → wasm `WasmGame.try_place`：返回**权威棋盘**
+  （围棋含提子）、toMove、winner；`ok:false` 附稳定错误码（occupied/suicide/out_of_bounds/game_over）。
+- 悔棋 `undo_last()`：Rust 弹出一手并全量重放（提子一并还原）；TS 只镜像裁剪 history/lastMove。
+- SyncState 采纳走 `adopt(board,toMove,winner,history)`：棋盘照收、历史重建供后续 undo；
+  kind/size 有变时先 `newGame` 再 adopt。
+- **陷阱**：Rust `GameState::new` 对非法 kind/size 组合是断言 → wasm trap 会掀翻 React 树。
+  `rules.ts` 边界守卫 + `pickKind` 原子 setKind+setSize 双保险，勿拆。
+- 改 core 规则后：`bash scripts/build-wasm.sh`（需 wasm32 target 与匹配版本的 wasm-bindgen-cli）
+  并提交 frontend/src/wasm/ 产物——前端构建不依赖 Rust 工具链。
 
 ## 状态与 ref 双轨
 
-所有跨回调读取的可变状态都有镜像 ref（`boardRef/toMoveRef/...`），原因：presence/RTC 回调是闭包捕获，不能信任 React state 时效；StrictMode 双挂载会拿到旧闭包。**新增跨回调状态时必须同时建 ref 并加同步 effect，否则就重现过历史 bug（受邀者永远收不到 accept）。**
+所有跨回调读取的可变状态都有镜像 ref（`boardRef/toMoveRef/...`），原因：presence/RTC/服务器
+回调是闭包捕获，不能信任 React state 时效；StrictMode 双挂载会拿到旧闭包。**新增跨回调状态时
+必须同时建 ref 并加同步 effect，否则就重现过历史 bug（受邀者永远收不到 accept）。**
 
-notice 的唯一写入口是 `showNotice(text, ms?)`（自带旧 timer 清理，审查 D8）；直接调 setNotice 会绕过计时管理。
+- notice 的唯一写入口是 `showNotice(text, ms?)`（审查 D8）。
+- 信件队列模式：presence 回调只入队 + `setSignalTick(t+1)`，drain effect 里用 ref 消费。
+- 域工厂（serverSignaling/negotiation/chat）经 `Pick<SessionCtx,…>` 解构，函数体自 useGameSession
+  原样搬出；「capture once + 内部只读 ref」的语义不许改成 useCallback/useMemo。
 
-信件队列模式：presence 回调只把事件 push 进 `challengeQueueRef/acceptQueueRef/rejectQueueRef` 并 `setSignalTick(t+1)`；真正消费在 drain effect 里用最新 ref 判断。回调内不做业务决策。
+## 路由（无 react-router）
+
+`links.parseUrl()` → UrlIntent；`nav()` = pushState + 手动 popstate。`processIntent` 是 URL → 行动唯一
+入口，三层去重：`processedIntentRef`（同 href 一次）、`inviteDoneRef`（同邀请一次）、含 `rtcAns` 的
+链接被当页面打开时绝不据此挑战（防同机两窗互弈）。服务器模式 userId 链接经 `pendingLinkRef` 等
+连接 ready 后发 join/spec-join（不在本地查名册判断在线）。
 
 ## 对局流程状态机
 
@@ -43,56 +89,56 @@ phase: home → waiting → playing → home
 role:  idle / inviter / invitee / spectator
 ```
 
-- **createInvite()**：生成 gameId+pwd → waiting → 后台 `DirectRtcPeer.createOffer(pwd)` 生成邀请链接 `rtc=` 参数。offer 生成失败不阻塞（同源仍可用）。
-- **acceptInvite(inviterId,pwd,kind,size,inviteOffer?)**：生成**受邀者自己的** gameId（对局 channel 以受邀者的为准）→ waiting；若带 inviteOffer 则 `acceptOffer` 生成 answer：先 `presence.challenge(...ans)`（同源自动送达），并备好回执链接；跨设备时回执弹窗延迟 1.2s 弹出（若同源通道已送达、直连已 open 就不打扰）。
-- **acceptChallenge()**（同源路径，邀请者收到 pwd 正确的 challenge 自动调用）：join 受邀者 gameId → playing → Hello+SyncRequest。
-- **acceptReceipt()**（跨设备路径，邀请者弹窗粘贴回执）：校验 inviterId==自己、pwd==本局 → `applyAnswer(ans,pwd)` → join 受邀者 gameId → playing。与 acceptChallenge 是平行路径，**都**使 pwd 失效。
-- **serverChallengePeer() / challenge-accepted**（服务器模式大厅挑战，/p2p 与 /users 列表同一入口）：挑战仅主页可发起 → signal `challenge`（不改本端状态）；被挑战方弹**邀请弹窗**（与同源 presence 挑战共用同一弹窗，serverIncoming/incoming 二选一展示）→ 同意回 `challenge-accepted` → 发起方守卫 phase=home（保留 waiting+inviter 分支：「先挑战又点开启对战」的边缘顺序下被接受的挑战优先成局）→ `serverAdmitChallenger()` 建局送 offer，双方自动进对局。/users 页曾误走 presence 路径（跨设备不可达），已改走服务器信令。
-- **enterPlayingAsInvitee()**：两个触发源——同源 presence accept 信件，或 **RTC open 事件**（跨设备无 presence，直连一通直接进）。双触发幂等（phaseRef 判断）。
-- **backHome()**：清一切（含 modal、rtcPeers、inviterRtc）。
+- **createInvite()**：gameId+pwd+specPwd → waiting；服务器模式直接给 `/<userId>?pwd=` 链接并建
+  inviter RTC 等 join；无服务器模式后台预生成 offer 编进链接（A5：offer 就绪前不给复制）。
+- **acceptInvite(inviterId,pwd,kind,size,inviteOffer?)**：受邀者生成自己的 gameId（对局 channel
+  以受邀者为准）→ waiting；带 offer 则自动 answer：同源经 presence 自动回传，跨设备备回执链接
+  （1.2s 延迟弹窗避免打扰已直连的场景）。
+- **服务器模式受邀**：join signal → 房主本地校验 pwd（错转 wrong-pwd 弹窗）→ accept+offer →
+  受邀者 `serverAcceptOffer` → answer → 房主切 playing。大厅挑战：`challenge` → 邀请弹窗 →
+  `challenge-accepted` → 发起方 `serverAdmitChallenger` 建局送 offer，双方自动进对局。
+- **acceptChallenge/acceptReceipt**：同源/跨设备两条平行路径，都使 pwd 失效。
+- **enterPlayingAsInvitee()**：presence accept 信或 RTC open 双触发，幂等。
+- **观战**：spec 链接 `/<userId>?pwd=<specPwd>&spec=1`（specPwd 每局生成、整局有效、可关闭）；
+  pwd 对自动受理（spectator 直连 + spec-offer），错/无转聊天区私有申请（批准→admit）。房间名单
+  双方对局者共同维护（spec-sync 广播）；踢人/禁言/关闭观战见 serverSignaling.ts。
+- **backHome()**：清一切（含 modal、rtcPeers、specPwd、connLost、观战聊天权限 B4）。
 
-pwd 生命周期：createInvite 生成 → 两人进局即 null（第三人不可入）。回执校验、URL 自动挑战都依赖它。
+pwd 生命周期：createInvite 生成 → 两人进局即 null。**对手判定用 `opponentRef`**，不许取
+relayTargets 首元素（观战者可能在等待期先加入，B2）。
 
-## 消息双通道与去重（关键！）
+## 消息双通道与去重
 
-`transport.send()` 是**唯一发送口**：一条 `GameMsg` 同时经 BroadcastChannel（同源）和所有 open 的 WebRTC DataChannel（`wireRtcBroadcast` 注入的广播函数 → `rtcPeersRef` 全员）发出。**同一条消息、同一个 seq。**
+`transport.send()` 唯一发送口：同一 GameMsg（同 seq）同时发 BroadcastChannel、所有 open 的
+WebRTC DataChannel、（服务器模式）relay 兜底。接收端对有副作用类型按 (sender, seq) 单调去重；
+SyncState/SyncRequest 不去重（重连 seq 归零）。**SyncState 带 `sv` 回退纪元**：悔棋/重开时本地 +1
+随快照广播，接收端 (sv, history.length) 双键比较——旧守卫只比 length 会把合法回退当旧快照丢弃，
+观战者从此发散（B1，E2E 9h-9j 回归覆盖）。
 
-接收端 `GameChannel.dispatch()` 对 `Move` 类型按 `(sender, seq)` 单调去重（`lastSeq` Map）：先到应用、后到丢弃。**只对 Move 去重**——SyncState/SyncRequest 是幂等全量同步且重连后发送方 seq 归零，去重会丢重连同步。
+## 服务器连接
 
-历史教训：早期 App 手动双发（BC 一次 + RTC 一次用 `Date.now()` 当 seq）导致同源双窗口同一手棋应用两次、手数错乱。已废除手动双发。
-
-## offer/answer URL 编码（encodeRtcPayload）
-
-```
-JSON({s:sdp,t:type,r:role}) → UTF-8 → deflate-raw 压缩
-  → pwd 派生密钥流 XOR（fnv1a 双散列 keyStream）
-  → base64url 无填充 → 前缀 "G1"（版本头）
-```
-
-- 目的：SDP 压缩变短 + 链接里不出现可读 SDP（含本机 IP）。**混淆级，非密码学级**（pwd 就在同一链接里）；真正安全由 WebRTC DTLS 保证。
-- `DirectRtcPeer.createOffer(pwd)/acceptOffer(token,pwd)/acceptAnswer(token,pwd)` 全 async；三处签名都带 pwd，两端必须同钥。
-- `CompressionStream/DecompressionStream("deflate-raw")`：Chromium 103+/FF 113+/Safari 16.4+/Tauri WebView2，无降级。deflate/inflate 的 writer.write/close promise 已落 catch（截断流曾产生 unhandled rejection）。
-- `acceptAnswer` 有 `answered` 幂等位：回执可能经 presence 与弹窗双路径同时到达；幂等位在**应用成功后**才置位（审查 A1），坏回执不锁死重试。
-- **A3 覆盖守卫（commit be7fac7）**：SyncState 接收端以 history.length 作版本，旧快照丢弃。
+`serverChannel`（WSS）：hello(user_id=tabUser)→welcome(s-短ID；带 user_id 时名册用持久 ID)；
+25s 心跳/60s 空闲超时；指数退避重连，重连后重放 announce。服务器纯转发（signal/relay），不解析
+不存储。**服务器模式下忽略 presence 名册事件**（双写会互相覆盖）；切换服务器 = 设置页单选 + reload。
 
 ## 测试
 
-`cd frontend && npm test`（vitest）：GameChannel (sender,seq) 去重/重放/跨 sender、SyncState 不去重（重连 seq 归零）、G1 编码往返/坏前缀/截断/错钥、genPwd 6 位与熵抽查、parsePastedLink/parsePastedAnswer 全分支。改 transport.ts 协议面必须同步补测试。
-
-## Presence（同源发现/挑战，BroadcastChannel `goptop-presence-v1`）
-
-announce（2s 心跳，7s 超时）/ challenge（可带 pwd=自动同意；可带 rtcAns=同源回执）/ accept / reject / bye。**跨设备完全不可用**（这是设计：跨设备信令只走链接）。
+- `cd frontend && npm test`（vitest 30 例）：去重、G1 编码、genPwd、链接解析。改协议面必须同步补。
+- E2E：`%TEMP%/goptop-e2e/run.js`（Playwright，42 断言）——对局/聊天/协商/观战全链/大厅挑战/
+  观战回退可见性（B1）。两个静态源（localhost:5173 跑 dist、127.0.0.1:5174）+ 本地信令服
+  （`cargo run -p goptop-server -- --listen=127.0.0.1:9527`）。断言依赖 UI 文案，改卡片文案先看它。
+- 浏览器实测脚本：go-capture.js（围棋提子/悔棋还原/五连）、ui-audit.js（515px 窄屏巡检）。
 
 ## 自适应布局（不许破坏）
 
-- `main` 必须 `overflow:hidden`（曾改成 auto 导致整组撑开，自适应失效，commit a4ae1d5 修回）。
-- `.play-stack` 是唯一宽度锚点：`width: min(720px, 92vw, calc(100dvh - 360px), calc(100vh - 360px))`。
-- `.board-wrap > .brutal-card` `aspect-ratio: 1/1`，BoardSvg `width/height:100%`，viewBox 自缩放。
+- `main` 必须 `overflow:hidden`（曾改成 auto 导致整组撑开，commit a4ae1d5 修回）。
+- `.play-stack` 宽度 = `min(720px, 92vw, var(--stack-max))`；`--stack-max` 由 App 的 ResizeObserver
+  实测 `.board-wrap` 剩余高度写入（旧 calc(100dvh-360px) 死数已废）。
+- `.board-wrap > .brutal-card` `aspect-ratio:1/1`；底部三卡容器查询切换（bp-wide/bp-swap）。
+- header 三级降级（徽章→标题→「类型」弹出）阈值见 App 收编进 brutal.css 的注释。
 
-## 死代码（2026-09-07 已清理）
+## 历史教训索引（改相关代码前先读）
 
-- 旧 `game/board.ts`+`game/rules.ts`、`components/Stone.tsx`、`state/gameStore.ts` 均已删除（零引用）。`game/board.ts` 现为唯一活跃规则文件（见模块地图）。
-
-## 待办指向
-
-跨设备观战（A1）、回执常驻/自动识别、断线重连见 `.agents/TODO.md` 与 `docs/已知限制与路线图.md`。
+A1 回执幂等位/A3 快照守卫/A4 受理先于推进/A5 链接就绪/A7 换局清 peer/A8 拒绝信、
+B1 sv 纪元/B2 opponentRef/B3 connLost 生命周期/B4 观战权限跨局残留、C4 Rust 错误枚举化、
+D6 beforeunload 实例字段/D7 死 peer 出列/D8 showNotice 单入口——详见 review/archive/ 与 memory/。
