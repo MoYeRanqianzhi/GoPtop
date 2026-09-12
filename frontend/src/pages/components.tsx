@@ -369,7 +369,7 @@ export function ServerSettings() {
         <button className="brutal-btn brutal-btn--sm" onClick={addCustom} disabled={!/^wss?:\/\//.test(customUrl.trim())}>添加服务器</button>
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 }}>
-        选服务器：在线名册 + 短码邀请/观战（免回执）+ 连不上时的加密中转；不同服务器之间无法对战。
+        选服务器：在线名册 + 跨设备免回执链接 + 连不上时的加密兜底中转；不同服务器之间无法对战。
       </div>
     </div>
   );
