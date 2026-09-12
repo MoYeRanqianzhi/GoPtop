@@ -29,3 +29,20 @@
 ## 范围外（已知未修，待用户指令）
 - 用户主页 /<userId> 的无 pwd「挑战」按钮仍走 acceptInvite（服务器模式跨设备不可达）；
   pwd 链接的自动 join 流不受影响。
+
+## 跨设备真实对战实测（同日晚，本机 ↔ ssh remote=RackNerd 美国，官服信令）
+用户拍板：测试必须每步截图人工核验、完全模拟人类操作（真实鼠标事件，非合成事件）。
+结果 **全链路通过**：列表挑战（真实点击）→ 弹窗同意 → 双方自动进对局页 →
+9 手真实落子逐手双侧同步 → 黑五连胜判定一致。双方状态均为「已直连」——
+**本次 WebRTC 直连成功**（与 2026-09-10「移动丢国际来向 UDP」结论不同，
+ICE 打通与否存在网络路径随机性；服务器 relay 兜底仍是必要保险）。
+
+### 测试基建（challenge-server.js 拟人化控制服务，本机 %TEMP%/goptop-e2e 与 remote ~/pw 各一份）
+- 常驻 headless 浏览器 + HTTP 端点：/open /status /shot(截图) /challenge /accept /place(/eval 调试)；
+  外部 curl 逐步驱动，每步 /shot 截图人工回看；remote 截图经 `ssh remote "curl .../shot"` 取回。
+- 落子坐标由 SVG viewBox 反推（pad=30，cell=(vb-60)/(size-1)），mouse.move+mouse.click 真实点击。
+- 环境坑：remote node 在 /root/node/bin（非交互 ssh 不加载 .bashrc PATH）；本机 playwright
+  必须显式 executablePath=chromium-1228；**git-bash curl -d 的中文按 GBK 发出**（JSON body
+  乱码），必须 Write 工具写 UTF-8 文件再 `--data-binary @file`；remote 清进程用 ss 取 PID
+  再 kill（pkill -f 模式会匹配自身 ssh 命令行导致 ssh 255）。
+- remote 遗留：Sep10 起的旧 node bot.js 进程仍在跑（旧无服务器流程 bot，未动）。
