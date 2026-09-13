@@ -13,7 +13,7 @@ import { UrlRow } from "../components/UrlRow";
 export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) => void }) {
   const { s, setChatOpen } = props;
   const {
-    kind, size, board, toMove, winner, lastMove, hover, history,
+    kind, size, board, toMove, winner, lastMove, hover,
     tabUser, peers, role, phase, myColor,
     inviteUrl, watchUrl, notice, answerBackUrl, copyFb, myHomeUrl,
     serverMode, serverState, spectateEnabled, specPwd,
@@ -104,7 +104,7 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
             lastMove={lastMove} hover={hover} onHover={setHover}
             disabled onPlace={() => undefined}
             statusText="等待对手加入…" statusNote=""
-            moveCount={moveCount} history={history}
+            moveCount={moveCount}
             onUndo={null} onReset={null}
           />
         )}
@@ -131,7 +131,7 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
             lastMove={lastMove} hover={hover} onHover={setHover}
             disabled={boardDisabled} onPlace={handlePlace}
             statusText={statusText} statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
-            moveCount={moveCount} history={history}
+            moveCount={moveCount}
             onUndo={null} onReset={null}
             chatButton={
               <button className="brutal-btn brutal-btn--sm" onClick={() => setChatOpen(true)} title="聊天 / 悔棋 / 重开 / 换棋">

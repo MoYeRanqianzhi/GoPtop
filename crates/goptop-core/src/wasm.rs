@@ -16,6 +16,16 @@ use wasm_bindgen::prelude::*;
 use crate::board::{BoardVariant, Coord, Stone};
 use crate::game::{GameKind, GameState, Move};
 
+/// SyncState.history 条目：落子坐标对象，或字符串 "pass"（停一手）。
+/// 历史契约必须可表达 Pass，否则含 Pass 的对局在 undo 重放/adopt 重建时
+/// 轮转必然漂移（2026-09-14 审查 #5 P1-2）。
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum HistoryEntry {
+    Place(Coord),
+    Pass(String),
+}
+
 /// TS 颜色字符串 → Stone（大小写不敏感；非法值返回 None）。
 fn stone_from_str(s: &str) -> Option<Stone> {
     match s.to_ascii_lowercase().as_str() {
@@ -91,13 +101,17 @@ pub struct WasmGame {
 #[wasm_bindgen]
 impl WasmGame {
     /// 创建对局（静态工厂；wasm-bindgen 不允许构造函数返回 Option）。
-    /// kind_json 见模块注释。尺寸不变量由 GameState::new 断言——前端
-    /// kind/size 已在来源处（pickKind/pickSize/链接解析）收敛到合法集合。
+    /// kind_json 见模块注释。非法尺寸组合返回 None 而非触达核心层断言——
+    /// release 下 panic="abort"，断言即 wasm trap（白屏），边界必须自己挡
+    /// （2026-09-14 审查 #5 P2-3）。
     pub fn new_game(kind_json: &str) -> Option<WasmGame> {
         let kind: GameKind = match serde_json::from_str(kind_json) {
             Ok(k) => k,
             Err(_) => return None,
         };
+        if !kind.is_valid() {
+            return None;
+        }
         Some(WasmGame { state: GameState::new(kind) })
     }
 
@@ -123,17 +137,31 @@ impl WasmGame {
         }
     }
 
+    /// 停一手：引擎翻转行棋方并把 Pass 记入历史，保证后续 undo/adopt 重放
+    /// 与真实序列一致（收到 Move{Pass} 或未来本地停一手都走这里）。
+    pub fn pass(&mut self) -> String {
+        match self.state.try_play(Move::Pass) {
+            Ok(effect) => ok_reply(&self.state, &effect.captured),
+            Err(_) => err_reply("game_over"),
+        }
+    }
+
     /// 撤销最后一手：弹出一手并全量重放（≤361 步，开销可忽略），
     /// 返回回退后的权威棋盘。空历史返回 ok:false。
     pub fn undo_last(&mut self) -> String {
-        if self.state.history.pop().is_none() {
+        let mut moves = self.state.history.clone();
+        if moves.pop().is_none() {
             return err_reply("no_move");
         }
         let kind = self.state.kind.clone();
-        let moves = self.state.history.clone();
         let mut fresh = GameState::new(kind);
         for mv in moves {
-            let _ = fresh.try_play(mv); // 重放必成功：这些是历史上通过规则的手
+            // 重放必成功：这些是历史上通过规则的手，且 adopt 已做格式/边界
+            // 校验。万一失败（远端脏快照构造出互斥历史），保持原状态报错，
+            // 绝不带病回退（2026-09-14 审查 #5 P2-2）。
+            if fresh.try_play(mv).is_err() {
+                return err_reply("replay_failed");
+            }
         }
         self.state = fresh;
         ok_reply(&self.state, &[])
@@ -145,8 +173,8 @@ impl WasmGame {
     }
 
     /// 采纳全量快照（SyncState）：棋盘/行棋方/胜者直接采用快照（不经规则——
-    /// 快照可能来自任何合法序列），历史用坐标序列重建（黑白交替、黑先），
-    /// 供后续 undo_last 重放。TS 侧只在收到快照时调用。
+    /// 快照可能来自任何合法序列），历史按坐标/"pass" 序列重建（黑白交替、
+    /// 黑先，Pass 原样保留），供后续 undo_last 重放。TS 侧只在收到快照时调用。
     pub fn adopt(&mut self, board_json: &str, to_move: &str, winner: &str, history_json: &str) -> bool {
         let rows: Vec<Vec<String>> = match serde_json::from_str(board_json) {
             Ok(v) => v,
@@ -167,17 +195,41 @@ impl WasmGame {
         if !matches!(to_move, Stone::Black | Stone::White) {
             return false;
         }
-        let winner = if winner == "null" || winner.is_empty() { None } else { stone_from_str(winner) };
-        let coords: Vec<Coord> = match serde_json::from_str(history_json) {
+        // winner 与 to_move 同款守卫："empty" 等非法值直接拒绝（#5 P3-2）。
+        let winner = match winner {
+            "null" | "" => None,
+            "black" => Some(Stone::Black),
+            "white" => Some(Stone::White),
+            _ => return false,
+        };
+        let entries: Vec<HistoryEntry> = match serde_json::from_str(history_json) {
             Ok(v) => v,
             Err(_) => return false,
         };
+        let mut moves = Vec::with_capacity(entries.len());
+        for e in entries {
+            match e {
+                HistoryEntry::Place(c) => {
+                    // 边界校验：坐标对象只有 u8 约束，逻辑越界会污染 undo 重放
+                    if c.x as usize >= n || c.y as usize >= n {
+                        return false;
+                    }
+                    moves.push(Move::Place(c));
+                }
+                HistoryEntry::Pass(s) => {
+                    if s != "pass" {
+                        return false;
+                    }
+                    moves.push(Move::Pass);
+                }
+            }
+        }
         self.state.board = variant;
         self.state.to_move = to_move;
         self.state.winner = winner;
         self.state.captures = (0, 0);
-        // 历史重建：颜色按黑白交替推定（与 TS history 的隐含约定一致）。
-        self.state.history = coords.into_iter().map(Move::Place).collect();
+        // 历史重建：落子按黑白交替推定，Pass 原样保留（#5 P1-2）。
+        self.state.history = moves;
         true
     }
 }

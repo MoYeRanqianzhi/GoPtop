@@ -8,6 +8,7 @@
  */
 import { emptyBoard } from "../game/board";
 import { transport } from "../net/gameChannel";
+import type { Coord } from "../net/protocol";
 import type { SessionCtx } from "./sessionContext";
 
 export function createNegotiation(ctx: Pick<
@@ -35,8 +36,15 @@ export function createNegotiation(ctx: Pick<
     if (!res?.ok) return;
     syncEpochRef.current += 1;
     setBoard(res.board);
-    setHistory(h.slice(0, -1));
-    setLastMove(h.length >= 2 ? h[h.length - 2] : null);
+    const rest = h.slice(0, -1);
+    setHistory(rest);
+    // lastMove 语义是最后一颗落子：截断后末项可能是 "pass"，向前找最近坐标
+    let last: Coord | null = null;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      const m = rest[i];
+      if (m !== "pass") { last = m; break; }
+    }
+    setLastMove(last);
     setWinner(res.winner);
     setToMove(res.toMove);
     setTimeout(() => pushSyncState(), 60);

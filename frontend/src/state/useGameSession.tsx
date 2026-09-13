@@ -52,7 +52,7 @@ export function useGameSession() {
   const [winner, setWinner] = useState<StoneColor | null>(null);
   const [lastMove, setLastMove] = useState<Coord | null>(null);
   const [hover, setHover] = useState<Coord | null>(null);
-  const [history, setHistory] = useState<Coord[]>([]);
+  const [history, setHistory] = useState<(Coord | "pass")[]>([]);
 
   // —— 路由 —— //
   const [intent, setIntent] = useState<UrlIntent>(() => parseUrl());
@@ -287,8 +287,14 @@ export function useGameSession() {
           if (res.winner) setWinner(res.winner);
           else setToMove(res.toMove);
         } else if (k.move.type === "Pass") {
+          // Pass 必须进引擎：只翻 TS toMove 会让引擎 to_move 陈旧，后续落子
+          // 颜色/轮转错乱（审查 #5 P1-1）。Pass 不产胜者、无提子。
           if (by !== toMoveRef.current) break;
-          setToMove(by === "black" ? "white" : "black");
+          const res = rulesRef.current.pass();
+          if (!res?.ok) break;
+          setBoard(res.board);
+          setHistory((h) => [...h, "pass"]);
+          setToMove(res.toMove);
         } else if (k.move.type === "Resign") {
           // 认输者 = by，胜者是其对手——与接收方本地颜色无关（观战者/发送方回流都正确）
           setWinner(by === "black" ? "white" : "black");

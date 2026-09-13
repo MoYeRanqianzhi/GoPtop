@@ -37,7 +37,7 @@ export type SessionCtx = {
   /* ---------- state setter ---------- */
   setBoard: Dispatch<SetStateAction<StoneColor[][]>>;
   setChatLog: Dispatch<SetStateAction<ChatEntry[]>>;
-  setHistory: Dispatch<SetStateAction<Coord[]>>;
+  setHistory: Dispatch<SetStateAction<(Coord | "pass")[]>>;
   setHover: Dispatch<SetStateAction<Coord | null>>;
   setLastMove: Dispatch<SetStateAction<Coord | null>>;
   setMyColor: Dispatch<SetStateAction<StoneColor>>;
@@ -61,7 +61,7 @@ export type SessionCtx = {
 
   /* ---------- refs ---------- */
   boardRef: MutableRefObject<StoneColor[][]>;
-  historyRef: MutableRefObject<Coord[]>;
+  historyRef: MutableRefObject<(Coord | "pass")[]>;
   kindRef: MutableRefObject<GameKind>;
   lastMoveRef: MutableRefObject<Coord | null>;
   myColorRef: MutableRefObject<StoneColor>;

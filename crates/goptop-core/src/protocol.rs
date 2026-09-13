@@ -1,8 +1,8 @@
 //! 联机消息 — 参考实现（**尚未接线，前端未使用**）。
 //!
-//! 现行协议唯一真源：`frontend/src/net/transport.ts`（TS 版 GameMsg：
-//! `{seq, sender, userId, kind}`，MsgKind 含 SyncState/SyncRequest/Reset、
-//! Move 带 by 颜色、Hello 带 size）。本模块与其是两套格式；在 Rust 侧真正
+//! 现行协议唯一真源：`frontend/src/net/protocol.ts`（GameMsg 判别联合，
+//! MsgKind 含 SyncState/SyncRequest/Reset、Move 带 by 颜色、Chat/Avatar、
+//! 协商 Req/Ack）。本模块与其是两套格式；在 Rust 侧真正
 //! 接入传输前，两者不可混用。对接路线：链接信令 + WebRTC（见 .agents/docs/p2p-protocol.md），
 //! 端到端加密由 WebRTC DTLS 提供（非 iroh）。
 

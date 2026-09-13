@@ -12,7 +12,7 @@
 | 2 | 服务器信令 | state/serverSignaling、serverChannel、goptop-server | 完成 |
 | 3 | RTC/链接/编解码 | net/rtc、links、stun、identity、protocol、gameChannel | 完成 |
 | 4 | UI/React 组件层 | pages/、components/、App.tsx、styles | 完成 |
-| 5 | Rust/wasm 边界 | crates/goptop-core、game/rules.ts、src-tauri | 待派 |
+| 5 | Rust/wasm 边界 | crates/goptop-core、game/rules.ts、src-tauri | 完成 |
 | 6 | 文档/测试覆盖 | docs/、.agents/docs/、测试文件 | 待派 |
 
 基线：vitest 32/32（本轮新增 2 条 Chat 去重回归后），E2E 42/42（改动后需复跑）。
@@ -100,6 +100,27 @@
 查证不成立：LocalPage undo 索引、App --stack-max effect、切尺寸越界防护、PosterStrip StrictMode、boardDisabled 消费面、chat key、P2pPage specUrl 回退。
 
 ## 测试缺口（#3 提出，#4/#6 可能补充）
+
+## #5 Rust/wasm 边界（P1×2 条件触发 P2×3 P3×10；titlebar/契约核对全过）
+
+| 级别 | 发现 | 状态 |
+|------|------|------|
+| P1-1 | Pass 消息与 wasm 引擎脱钩：无 pass() 绑定，收到 Move{Pass} 只翻 TS toMove，引擎 to_move 陈旧 → 有对端发 Pass 后落子颜色/轮转错乱（现仓库无发送入口，条件触发） | **已修**：wasm.rs 加 pass() 绑定，useGameSession Pass 分支走引擎并记入 history |
+| P1-2 | adopt/undo 历史契约不含 Pass：SyncState.history: Coord[] 结构上不可表达 Pass，含 Pass 对局 adopt 后 undo 必然轮转漂移（#1 假设证实） | **已修**：protocol.ts history 升级 (Coord\|"pass")[]，adopt 按 untagged 枚举重建 Move |
+| P2-1 | rules.ts adopt 忽略 boolean 返回值：远端 SyncState 非法（维度/toMove=empty）时引擎拒绝而 TS 照收，两边分叉无提示 | **已修**：adopt 检查返回值并 console.warn 留痕 |
+| P2-2 | undo_last 重放 `let _ = fresh.try_play(mv)` 静默丢弃错误：adopt 未校验坐标边界，越界重放带病回退 | **已修**：adopt 校验坐标范围；undo 改为重建成功才替换状态，失败报 replay_failed |
+| P2-3 | GameState::new 的 assert 是唯一 trap 防线且 panic=abort 直接白屏，TS 守卫与 trap 间只隔远端可控 size | **已修**：GameKind::is_valid() 提取，wasm new_game 预验证返回 None |
+| P3-1 | try_place u8 参数越界静默截断（现调用方已钳制，防御注记） | 记录 |
+| P3-2 | adopt 接受 winner:"empty"（to_move 有守卫 winner 没有） | **已修**：winner 白名单 black/white/null |
+| P3-3 | captures 不可观测且 adopt 清零（UI 未显示提子，未来地雷） | 记录 |
+| P3-4 | WasmGame 无显式 free()，靠 FinalizationRegistry 兜底 | 记录 |
+| P3-5 | titlebar.rs 五项专项核对（类注册/HWND 残留/TrackMouseEvent/scale/单位与事件名）——**全部通过** | 无需行动 |
+| P3-6 | capabilities/命令/事件与前端完全一致 | 无需行动 |
+| P3-7 | ko 与双 Pass 终局缺失（go.rs 已声明；Pass 现仅翻轮手） | 已知限制，随 P1-1 修复考虑 |
+| P3-8 | protocol.rs:3 注释指向不存在的 transport.ts（真源 net/protocol.ts） | **已修**：注释改为 protocol.ts |
+| P3-9 | tauri.conf.json CSP null，建议收紧 | 记录（桌面建议） |
+| P3-10 | board_json 每手 361 次 format!、BFS 每手建 HashSet——非病理性，无需行动 | 无需行动 |
+| 契约核对 | 棋盘 JSON/ok_reply/Coord/kind 标签/.d.ts 签名与 TS 侧**全部一致**；Rust protocol.rs 未接线不构成漂移 | 无需行动 |
 
 
 - rtcCodec：空 pwd 往返、atob 异常路径、`length%4==1` 截断、非 ASCII、缺 s/t 字段。

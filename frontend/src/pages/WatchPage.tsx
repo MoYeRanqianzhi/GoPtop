@@ -7,7 +7,7 @@ import { NoticeLine } from "../components/NoticeLine";
 
 export function WatchPage(props: { s: GameSession }) {
   const {
-    kind, size, board, toMove, winner, lastMove, hover, history,
+    kind, size, board, toMove, winner, lastMove, hover,
     peerConnected, p2pStatusText, notice, statusText, moveCount,
     setHover, backHome,
   } = props.s;
@@ -29,7 +29,7 @@ export function WatchPage(props: { s: GameSession }) {
         lastMove={lastMove} hover={hover} onHover={setHover}
         disabled onPlace={() => undefined}
         statusText={statusText} statusNote="观战 · 只读"
-        moveCount={moveCount} history={history}
+        moveCount={moveCount}
         onUndo={null} onReset={null}
       />
     </div>

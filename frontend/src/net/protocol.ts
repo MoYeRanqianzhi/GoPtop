@@ -25,7 +25,9 @@ export type MsgKind =
   // history.length 会把回退快照当旧快照丢掉（观战者永远看不到回退）；
   // 发送端在每次本地回退时 +1 并随快照广播，接收端按 (sv, history.length)
   // 双键比较——sv 更旧或同 sv 但更短才丢弃。
-  | { type: "SyncState"; sv?: number; board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null; history: Coord[]; lastMove: Coord | null; kind: GameKind; size: Size }
+  // history 可表达停一手（"pass"）：含 Pass 的对局若快照丢失该信息，
+  // adopt 后 undo 重放的行棋方必然漂移（审查 #5 P1-2）。
+  | { type: "SyncState"; sv?: number; board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null; history: (Coord | "pass")[]; lastMove: Coord | null; kind: GameKind; size: Size }
   | { type: "SyncRequest" }
   | { type: "Chat"; text: string }
   | { type: "Ping" }

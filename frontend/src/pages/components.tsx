@@ -380,7 +380,7 @@ export function BoardPanel(props: {
   board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null;
   lastMove: Coord | null; hover: Coord | null; onHover: (c: Coord | null) => void;
   disabled: boolean; onPlace: (c: Coord) => void;
-  statusText: string; statusNote: string; moveCount: number; history: Coord[];
+  statusText: string; statusNote: string; moveCount: number;
   onUndo: (() => void) | null; onReset: (() => void) | null;
   actions?: ReactNode;
   /** P2P 对局：原悔棋/重开按钮位替换为聊天入口（协商动作移入聊天面板）。 */

@@ -12,6 +12,9 @@ import { webview } from '@kit.ArkWeb';
 
 const SCHEME_HOST = 'https://appassets.goptop/';
 
+// 远程调试（ArkWeb inspector），必须在任何 Web 实例创建前调用
+webview.WebviewController.setWebDebuggingAccess(true);
+
 function mimeOf(path: string): string {
   if (path.endsWith('.html')) return 'text/html';
   if (path.endsWith('.js')) return 'text/javascript';
@@ -44,7 +47,7 @@ struct Index {
         .zoomAccess(false)
         .width('100%')
         .height('100%')
-        .onInterceptRequest((event) => {
+        .onInterceptRequest((event: OnInterceptRequestEvent) => {
           const url = event.request.getRequestUrl();
           if (!url.startsWith(SCHEME_HOST)) {
             return null;

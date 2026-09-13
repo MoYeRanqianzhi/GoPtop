@@ -11,7 +11,7 @@ import { NoticeLine } from "../components/NoticeLine";
 
 export function UserPage(props: { s: GameSession }) {
   const {
-    intent, tabUser, name, kind, size, board, toMove, winner, lastMove, hover, history,
+    intent, tabUser, name, kind, size, board, toMove, winner, lastMove, hover,
     viewedUserId, viewedPeer, isSelfPage, role, phase, myColor,
     inviteUrl, watchUrl, notice, copyFb, myHomeUrl,
     serverMode, statusText, boardDisabled, moveCount,
@@ -126,7 +126,7 @@ export function UserPage(props: { s: GameSession }) {
         disabled={phase === "waiting" ? true : boardDisabled} onPlace={phase === "waiting" ? () => undefined : handlePlace}
         statusText={phase === "waiting" ? "等待对手加入…" : statusText}
         statusNote={phase === "waiting" ? "" : `${myColor === "black" ? "执黑" : "执白"}`}
-        moveCount={moveCount} history={history}
+        moveCount={moveCount}
         onUndo={null} onReset={phase === "waiting" ? null : reset}
       />
     )}

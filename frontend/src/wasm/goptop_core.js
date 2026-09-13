@@ -22,8 +22,8 @@ export class WasmGame {
     }
     /**
      * 采纳全量快照（SyncState）：棋盘/行棋方/胜者直接采用快照（不经规则——
-     * 快照可能来自任何合法序列），历史用坐标序列重建（黑白交替、黑先），
-     * 供后续 undo_last 重放。TS 侧只在收到快照时调用。
+     * 快照可能来自任何合法序列），历史按坐标/"pass" 序列重建（黑白交替、
+     * 黑先，Pass 原样保留），供后续 undo_last 重放。TS 侧只在收到快照时调用。
      * @param {string} board_json
      * @param {string} to_move
      * @param {string} winner
@@ -52,8 +52,9 @@ export class WasmGame {
     }
     /**
      * 创建对局（静态工厂；wasm-bindgen 不允许构造函数返回 Option）。
-     * kind_json 见模块注释。尺寸不变量由 GameState::new 断言——前端
-     * kind/size 已在来源处（pickKind/pickSize/链接解析）收敛到合法集合。
+     * kind_json 见模块注释。非法尺寸组合返回 None 而非触达核心层断言——
+     * release 下 panic="abort"，断言即 wasm trap（白屏），边界必须自己挡
+     * （2026-09-14 审查 #5 P2-3）。
      * @param {string} kind_json
      * @returns {WasmGame | undefined}
      */
@@ -62,6 +63,27 @@ export class WasmGame {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmgame_new_game(ptr0, len0);
         return ret === 0 ? undefined : WasmGame.__wrap(ret);
+    }
+    /**
+     * 停一手：引擎翻转行棋方并把 Pass 记入历史，保证后续 undo/adopt 重放
+     * 与真实序列一致（收到 Move{Pass} 或未来本地停一手都走这里）。
+     * @returns {string}
+     */
+    pass() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmgame_pass(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export3(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * 重开（同种类）。

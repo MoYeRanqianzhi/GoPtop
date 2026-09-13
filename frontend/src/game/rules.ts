@@ -49,17 +49,26 @@ export class RulesEngine {
     return JSON.parse(this.game.try_place(x, y)) as PlaceResult;
   }
 
+  /** 停一手：引擎翻转行棋方并把 Pass 记入历史（undo/adopt 重放与真实序列一致）。 */
+  pass(): PlaceResult | null {
+    if (!this.game) return null;
+    return JSON.parse(this.game.pass()) as PlaceResult;
+  }
+
   /** 撤销最后一手（Rust 侧弹出一手并重放，提子一并还原）。 */
   undo(): UndoResult | null {
     if (!this.game) return null;
     return JSON.parse(this.game.undo_last()) as UndoResult;
   }
 
-  /** 采纳全量快照（SyncState）：棋盘/行棋方/胜者照收，历史重建供后续 undo。
-   *  toMove 类型上是 StoneColor（协议口径），Rust 侧会拒绝 "empty"。 */
-  adopt(board: StoneColor[][], toMove: StoneColor, winner: StoneColor | null, history: Coord[]) {
+  /** 采纳全量快照（SyncState）：棋盘/行棋方/胜者照收，历史按坐标/"pass"
+   *  重建供后续 undo。Rust 侧对非法值（维度/颜色/越界坐标）返回 false；
+   *  快照是远端输入（系统边界），拒绝时必须留痕，否则引擎与 TS 静默分叉
+   *  （审查 #5 P2-1）。 */
+  adopt(board: StoneColor[][], toMove: StoneColor, winner: StoneColor | null, history: (Coord | "pass")[]) {
     if (!this.game) return;
-    this.game.adopt(JSON.stringify(board), toMove, winner ?? "null", JSON.stringify(history));
+    const ok = this.game.adopt(JSON.stringify(board), toMove, winner ?? "null", JSON.stringify(history));
+    if (!ok) console.warn("[rules] adopt 被引擎拒绝：快照与当前对局尺寸/格式不符，已忽略该快照");
   }
 
   /** 同尺寸重开。 */
