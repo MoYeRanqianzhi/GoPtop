@@ -53,3 +53,18 @@
 **How to apply:** 新端适配先读本文对应小节；改信令/协商/观战/服务器后跑
 `scripts/e2e/run.js` + 部署官服后跑 `official-smoke.js`；改 crates/goptop-core 后
 重跑 scripts/build-wasm.sh 并提交产物。
+
+## 会话收尾状态（2026-09-14，全部已推送 origin/main 至 2554fd5）
+
+全部完成：四端实机验证、真 Windows 标题栏、六维审查 #1-#6、修复批
+（f64419b/cd538ba/d414e1a/3e98cc8/7b33d43/30d2823/181632b/2554fd5）、
+E2E 入库（run 42/42 + go-capture 7/7 + official-smoke 8/8）、官服部署重启、
+测试补齐（wasm 36 + vitest 49 + server 3）、Android/HarmonyOS 包已同步最终产物并装机验证。
+
+下次继续的入口（全部在台账 review/2026-09-13-review-round.md 状态列）：
+- 低危残留修复：#2 join 无互斥、双挑战 tiebreak、muted 未强制；#3 A3 直连超时
+  用户可见失败、A6 自定义 STUN 校验、B5 links 解析三份拷贝收敛；#4 P2-1 非服务器
+  重开绕过同意制、P2-2/2-3 聊天跨局残留/双 ChatPanel；#5 CSP null。
+- 架构第二阶段：传输层 Rust 化（TODO.md，方向待拍板）。
+- 鸿蒙小遗留：ArkWeb 里合成 PointerEvent 偶发丢手（tap 重试可绕过；真机触控无此问题，
+  桌面 E2E 42 断言已覆盖逻辑面）——只影响 CDP 驱动测试，不影响产品。
