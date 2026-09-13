@@ -1,0 +1,9 @@
+{
+  "name": "goptop-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "description": "GoPtop 浏览器回归基线（用法见同目录 README.md）",
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}
