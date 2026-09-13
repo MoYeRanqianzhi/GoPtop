@@ -7,7 +7,8 @@
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 前端模块地图（net/state/pages 三层）、wasm 规则执行、状态/ref 双轨、对局状态机、消息三链路去重与 sv 纪元、自适应布局红线、测试（vitest + E2E 42 断言 + 浏览器脚本）、历史教训索引 |
 | [docs/p2p-protocol.md](docs/p2p-protocol.md) | 三链路总览、URL 格式（邀请/回执/观战 spec 链接）、G1 信令编码、GameMsg 线格式（含 sv）、同源/回执/服务器三种建连时序、观战房间信令、身份与钥匙、服务器 WS 协议、Rust 规则真源 |
-| [../review/](../review/) | 整改轮审计报告（2026-09-13 整理轮开工审计；历史审查归档在其 archive/ 子目录） |
+| [../review/2026-09-13-cleanup-audit.md](../review/2026-09-13-cleanup-audit.md) | 2026-09-13 整理轮开工审计（frontend/crates/文档全量精读；历史审查归档在 review/archive/） |
+| [../review/2026-09-13-review-round.md](../review/2026-09-13-review-round.md) | 六维代码审查唯一台账（各维度发现与修复状态全在此跟踪） |
 | [../MEMORY.md](../MEMORY.md) | 关键拍板索引（指向 memory/ 下长文） |
 | [../TODO.md](../TODO.md) | 共享待办（每项标注来源记忆） |
 

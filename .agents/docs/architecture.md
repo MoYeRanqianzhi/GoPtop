@@ -12,14 +12,14 @@
 Web 与 Tauri WebView 中执行——TS 侧禁止再建规则副本。传输层（WebRTC/信令/编解码）
 当前仍在 TS（历史路径），Rust 化是路线图后续阶段（见 docs/已知限制与路线图.md）。
 
-## 模块地图（行数为 2026-09-13 实测）
+## 模块地图
 
 ```
 frontend/src/
 ├── main.tsx                       入口，StrictMode 挂载 App
-├── App.tsx                        （243 行）纯壳：header + 页面 switch + chatDock + 弹窗组装 + footer
+├── App.tsx                        纯壳：header + 页面 switch + chatDock + 弹窗组装 + footer
 ├── state/
-│   ├── useGameSession.tsx         （1200 行）对局状态机编排层：states/refs、net 消息分发、
+│   ├── useGameSession.tsx         对局状态机编排层：states/refs、net 消息分发、
 │   │                              presence/服务器通道 effect、邀请/回执/挑战流程、落子、URL 意图
 │   ├── sessionContext.ts          SessionCtx 接口：三个域工厂共享的成员清单（ref 所有权在 hook）
 │   ├── serverSignaling.ts         服务器模式信令域：join/offer/answer/challenge/spec-* 全套 + 观战房间管理
@@ -47,6 +47,8 @@ frontend/src/
 │   └── components.tsx             PeerList/StunSettings/ServerSettings/BoardPanel/loadDefaults/Role/Phase
 ├── components/
 │   ├── BoardSvg.tsx               棋盘 SVG（唯一棋盘组件；类型 re-export 自 net/protocol）
+│   ├── PosterStrip.tsx            顶部黑条 + Tauri 窗口控制三键（最小化/最大化/关闭，配合 src-tauri titlebar.rs）
+│   ├── BrutalCard.tsx             卡片容器（暂无调用者，见其头注释）
 │   ├── StatusLamp/UrlRow/NoticeLine/KindSizePicker.tsx   App 抽出的共用 JSX
 │   └── InviteModal/PasteModal/ConfirmBanner.tsx          三类弹窗
 └── styles/brutal.css              新野兽派样式 + 自适应布局约束 + header 降级/容器查询（自 App 收编）
@@ -123,7 +125,7 @@ SyncState/SyncRequest 不去重（重连 seq 归零）。**SyncState 带 `sv` �
 
 ## 测试
 
-- `cd frontend && npm test`（vitest 30 例）：去重、G1 编码、genPwd、链接解析。改协议面必须同步补。
+- `cd frontend && npm test`（vitest 33 例）：去重、G1 编码、genPwd、链接解析。改协议面必须同步补。
 - E2E：`%TEMP%/goptop-e2e/run.js`（Playwright，42 断言）——对局/聊天/协商/观战全链/大厅挑战/
   观战回退可见性（B1）。两个静态源（localhost:5173 跑 dist、127.0.0.1:5174）+ 本地信令服
   （`cargo run -p goptop-server -- --listen=127.0.0.1:9527`）。断言依赖 UI 文案，改卡片文案先看它。

@@ -7,7 +7,7 @@
 //!
 //! 消息面（JSON，`t` 为判别标签）：
 //! - `hello`/`announce`：注册与状态上报，服务器向全员广播名册（在线用户）。
-//! - `signal`：任意点对点信令原样转发（邀请 offer/answer/ice、观战 join/offer/answer、
+//! - `signal`：任意点对点信令原样转发（邀请 offer/answer、观战 join/offer/answer、
 //!   大厅挑战、观战房间控制等，语义由客户端解释）。
 //! - `relay`：GameMsg 兜底中转（P2P 未建立时客户端用它，按 sender+seq 去重）。
 //! - `ping`：心跳。

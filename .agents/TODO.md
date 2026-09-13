@@ -16,7 +16,7 @@
 - [x] R2a/R2b 复核：acceptReceipt 的 pwd 对比与 createInvite 续体守卫在现行代码中均已存在，关闭。
 - [x] D1 App 拆分：2026-09-13 完成第三刀（App 765→243，pages/* + components/* 共用组件）与第四刀
   （useGameSession 1786→1208，serverSignaling/negotiation/chat 域模块 + SessionCtx）。
-- [x] D11 前端测试：vitest 30 例 + E2E 42 断言（run.js，含观战回退可见性 9h-9j）。
+- [x] D11 前端测试：vitest 33 例 + E2E 42 断言（run.js，含观战回退可见性 9h-9j）。
 
 ## 2026-09-13 整理轮（记录，全部完成）
 

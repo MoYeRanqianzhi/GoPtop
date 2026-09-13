@@ -1,7 +1,7 @@
-//! GoPtop Tauri backend — 窗口、命令与 P2P 的粘合层。
+//! GoPtop Tauri backend — 窗口与命令的粘合层。
 //!
 //! - `commands` 暴露给前端的 `invoke` 接口（greet 为模板探针，后续扩展为 create_room/join/send）。
-//! - `p2p` 持有 iroh Endpoint 与 GameState，通过 `app.emit("game://msg", ...)` 推给前端。
+//! - `p2p` 为预留空模块：早期 iroh 路线已弃，现行 P2P 全在前端 TS（见 .agents/docs/p2p-protocol.md）。
 
 mod commands;
 mod p2p;

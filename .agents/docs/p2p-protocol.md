@@ -55,7 +55,7 @@ MsgKind = Hello{kind,size} | Move{move: Place{coord}|Pass|Resign; by: StoneColor
 - `Move.by`：发送端声明的执子颜色，接收端一律按 by 判定，不得从本地推断（历史 bug：任何一方认输观战者都判白胜）。无 by 的旧格式丢弃。
 - **落子规则判定在 Rust（wasm）**：接收端把 (x,y) 交给 RulesEngine，权威棋盘（含围棋提子）上屏；wasm 拒绝即丢消息。合法性守卫（toMove/边界/占据）是防乱序的第一层，Rust 规则是第二层。
 - `SyncState.sv`：回退纪元。本地悔棋/重开 +1 并随快照广播；接收端 `(sv, history.length)` 双键比较，sv 更旧或同 sv 更短才丢弃（B1：只比 length 会让观战者看不到回退）。快照到达经 `RulesEngine.adopt` 重建引擎与历史。
-- 发送唯一口 `transport.send()`：BC + 所有 open RTC + 服务器 relay 同 seq 三发；接收端对 Move/协商/Aware 按 (sender,seq) 单调去重，SyncState/SyncRequest 不去重（重连 seq 归零）。
+- 发送唯一口 `transport.send()`：BC + 所有 open RTC + 服务器 relay 同 seq 三发；接收端只对**有副作用的类型**按 (sender,seq) 单调去重（gameChannel.ts 的 DEDUP 集合：Move/UndoReq/UndoAck/ResetReq/ResetAck/SwapReq/SwapAck/Avatar/Chat），Hello/SyncState/SyncRequest/Ping/Pong 不去重（幂等或重连 seq 归零）。
 - 协商语义：请求 → 对方弹窗 → Ack；同意后双方各自执行本地操作（走 Rust 引擎）并补发 SyncState(sv+1) 对齐观战者；拒绝仅提示。`Ctl` 消息已删除（观战房间控制走服务器信令）。
 
 ## 4. 建连流程
@@ -111,8 +111,9 @@ SyncState(sv)。A3 守卫见 §3。closed/error 的 peer 出列 rtcPeersRef；**
 C2S: {t:"hello",name,userId?} | {t:"announce",status,gameId?} | {t:"signal",to,kind,payload}
    | {t:"relay",to,payload} | {t:"ping"}
 S2C: {t:"welcome",id} | {t:"peers",users:[{id,name,status,gameId}]} | {t:"signal",from,kind,payload}
-   | {t:"relayed",from,payload} | {t:"pong"} | {t:"error",msg}
+   | {t:"relayed",from,payload} | {t:"pong"} | {t:"error",code?,msg}
 ```
+- `error.code:"taken-over"`：同一 userId 在别处重新连接，旧连接被顶替踢出；客户端收到后应主动断开旧 socket 并走重连（serverChannel.ts 已处理，见 main.rs 顶替逻辑）。
 限制：hello 10s 超时；每连接 10s 窗口 500 条；signal payload ≤128 键、relay ≤64 键；60s 空闲断开。
 客户端 25s 心跳（低于 CF 代理 100s 空闲阈值），指数退避重连（封顶 10s），重连后重放 announce。
 

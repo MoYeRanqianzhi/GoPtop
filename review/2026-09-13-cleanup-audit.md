@@ -3,7 +3,8 @@
 > 范围：frontend/src 全部 13 文件（~5000 行）、crates 全部（~1530 行）、src-tauri、docs/ 与 .agents/docs/ 全部文档、README。
 > 方法：逐文件全文精读（非抽样），基线验证 cargo test（core 26 过）/ tsc 零错 / vitest 30 过。
 > 结论先行：**架构合规审查不通过**（规则与传输全部在 TS，Rust 未接线）；存在 4 个确认级 bug、
-> 6 处死代码、两份 agent 文档与 README/已知限制大面积失真。修复方案见 §6，执行计划见 .agents/plan/。
+> 6 处死代码、两份 agent 文档与 README/已知限制大面积失真。修复方案见 §6；执行计划已完结
+> （2026-09-13 整理轮），历史见 git log。
 
 ---
 
