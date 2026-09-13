@@ -135,7 +135,7 @@ export default function App() {
   );
 
   return (
-    <div style={{ height: "100dvh", minHeight: "100dvh", display: "flex", flexDirection: "column", background: "var(--bg-page)", overflow: "hidden" }}>
+    <div style={{ height: "100dvh", minHeight: "100dvh", display: "flex", flexDirection: "column", background: "var(--bg-page)", overflow: "hidden", paddingTop: "env(safe-area-inset-top, 0px)" }}>
       <PosterStrip />
 
       <header
@@ -235,8 +235,9 @@ export default function App() {
         copyText={s.copyText}
       />
 
-      {/* 装饰行限一行：显示不下硬截断（与顶部 poster-strip 同款处理，不换行不省略号） */}
-      <footer style={{ flexShrink: 0, padding: "10px 16px", borderTop: "3px solid var(--ink)", background: "#fff", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden" }}>
+      {/* 装饰行限一行：显示不下硬截断（与顶部 poster-strip 同款处理，不换行不省略号）；
+          底部留 safe-area，避开 Android edge-to-edge 的手势条 */}
+      <footer style={{ flexShrink: 0, padding: "10px 16px calc(10px + env(safe-area-inset-bottom, 0px))", borderTop: "3px solid var(--ink)", background: "#fff", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden" }}>
         GoPtop · P2P Gomoku & Go · 优先直连 · 服务器可选中转
       </footer>
     </div>

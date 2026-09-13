@@ -17,10 +17,12 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "../net/links";
 
-type Platform = "win" | "mac" | "lin";
+type Platform = "win" | "mac" | "lin" | "mobile";
 
 function detectPlatform(): Platform {
   const ua = navigator.userAgent;
+  // Android UA 含 "Linux"，必须先判；移动端没有窗口管理，三键与拖拽区无意义
+  if (ua.includes("Android")) return "mobile";
   if (ua.includes("Mac")) return "mac";
   if (ua.includes("Linux")) return "lin";
   return "win";
@@ -54,16 +56,18 @@ export function PosterStrip() {
   const [maxHover, setMaxHover] = useState(false);
   const [platform] = useState<Platform>(detectPlatform);
   const maxBtnRef = useRef<HTMLButtonElement | null>(null);
+  // 三键与 app-tauri 布局仅桌面 Tauri 有意义；Android 无窗口管理（且 UA 含 Linux，必须先判）
+  const desktopTauri = isTauri() && platform !== "mobile";
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!desktopTauri) return;
     document.documentElement.classList.add("app-tauri");
     return () => document.documentElement.classList.remove("app-tauri");
-  }, []);
+  }, [desktopTauri]);
 
   // 最大化状态跟踪（谁触发的无所谓：OS overlay、tao 双击、Linux 转发键都会走 resize）
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!desktopTauri) return;
     let off: (() => void) | undefined;
     let cancelled = false;
     void (async () => {
@@ -139,11 +143,16 @@ export function PosterStrip() {
     } catch { /* 权限缺失或非 Tauri 环境：按钮无效即静默 */ }
   }
 
-  if (!isTauri()) {
+  // 移动端（Android）：纯装饰黑条（兼作状态栏底色），无三键、无拖拽区；
+  // 窄屏媒体查询会把长文案换成短文案（styles/brutal.css）
+  if (!desktopTauri) {
     return (
       <div className="poster-strip">
         <span className="poster-strip__text">
           GoPtop · P2P Gomoku & Go · Neubrutalism · 优先直连 · 服务器可选中转
+        </span>
+        <span className="poster-strip__text poster-strip__text--short">
+          GoPtop · P2P Gomoku & Go
         </span>
       </div>
     );
@@ -167,6 +176,9 @@ export function PosterStrip() {
     <div className="poster-strip" data-tauri-drag-region>
       <span className="poster-strip__text" data-tauri-drag-region>
         GoPtop · P2P Gomoku & Go · Neubrutalism · 优先直连 · 服务器可选中转
+      </span>
+      <span className="poster-strip__text poster-strip__text--short" data-tauri-drag-region>
+        GoPtop · P2P Gomoku & Go
       </span>
       <div className="window-controls">
         <button className="wc-btn" aria-label="最小化" title="最小化" onClick={() => control("minimize")}>

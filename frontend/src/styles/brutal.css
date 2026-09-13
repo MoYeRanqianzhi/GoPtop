@@ -139,11 +139,22 @@ footer,
 
 .poster-strip {
   background: var(--ink); color: #fff; font-family: var(--font-mono); font-weight: 700;
-  letter-spacing: 0.18em; text-transform: uppercase; font-size: 11px; padding: 7px 12px;
+  letter-spacing: 0.18em; text-transform: uppercase; font-size: 11px;
+  /* Android 15 强制 edge-to-edge：状态栏区域由 App 外壳用 env(safe-area-inset-top)
+     垫出页面底色，黑条本身保持与桌面一致的细条（用户拍板「很细的一条」） */
+  padding: 7px 12px;
   overflow: hidden; white-space: nowrap; border-bottom: 3px solid var(--ink);
   text-align: center;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* 手机窄屏：长文案放不下，换短文案；黑条兼作状态栏底色（页脚已有同样信息） */
+.poster-strip__text--short { display: none; }
+@media (max-width: 520px) {
+  .poster-strip__text { display: none; }
+  .poster-strip__text--short { display: inline; }
+  .poster-strip { min-height: 24px; }
 }
 
 /* Tauri 标题栏融合（tauri-native-chrome 技能，decorations:false 路径，2026-09-13）：
