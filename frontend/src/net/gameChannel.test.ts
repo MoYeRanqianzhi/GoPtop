@@ -107,3 +107,23 @@ describe("GameChannel.dispatch — SyncState 不去重", () => {
     expect(received).toHaveLength(2);
   });
 });
+
+describe("GameChannel.dispatch — Chat 去重（审查 A2：同源双链路必重复）", () => {
+  function remoteChat(seq: number, text: string, sender = "remote-peer"): GameMsg {
+    return { seq, sender, userId: "remote-user", kind: { type: "Chat", text } };
+  }
+
+  it("同一条聊天经双链路到达只显示一次", () => {
+    const { ch, received } = isolatedChannel();
+    ch.injectRemote(remoteChat(1, "你好"));
+    ch.injectRemote(remoteChat(1, "你好"));
+    expect(received).toHaveLength(1);
+  });
+
+  it("不同文本的不同 seq 正常送达", () => {
+    const { ch, received } = isolatedChannel();
+    ch.injectRemote(remoteChat(1, "你好"));
+    ch.injectRemote(remoteChat(2, "在吗"));
+    expect(received).toHaveLength(2);
+  });
+});

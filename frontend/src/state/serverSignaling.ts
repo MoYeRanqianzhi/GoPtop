@@ -258,7 +258,12 @@ export function createServerSignaling(ctx: Pick<
             showNotice("你已被移出观战", 3600);
           }
         }
-        if (typeof pl.enabled === "boolean") setSpectateEnabled(pl.enabled);
+        // enabled 必须同时进 ref：pushSpecSync 的载荷与 join 的开关判断都读 ref，
+        // 只写 state 会让另一 host 的「关闭观战」在下次名单同步时被本端 ref 覆盖回去
+        if (typeof pl.enabled === "boolean") {
+          spectateEnabledRef.current = pl.enabled;
+          setSpectateEnabled(pl.enabled);
+        }
         return;
       }
       // —— 踢出对方直连的观战者（先通知被踢者，再移除）——

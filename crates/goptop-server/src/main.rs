@@ -109,11 +109,13 @@ async fn handle_conn(socket: WebSocket, state: AppState) {
     let Ok(C2S::Hello { name, user_id }) = serde_json::from_str::<C2S>(&text) else { return };
 
     // 注册 ID：优先用客户端持久 ID（与邀请链接一致）；同 ID 旧连接顶替。
+    // code=taken-over：客户端收到后必须主动断开旧 socket，否则旧连接的下行
+    // 事件仍会以该 user_id 路由（顶替后名册里已是新连接）。
     let user_id = match user_id {
         Some(id) if is_valid_peer_id(&id) => {
             let mut st = state.write().unwrap();
             if let Some(old) = st.peers.remove(&id) {
-                let _ = old.tx.send(Message::text(json!({ "t": "error", "msg": "本 ID 在别处重新连接，当前连接已被顶替" }).to_string()));
+                let _ = old.tx.send(Message::text(json!({ "t": "error", "code": "taken-over", "msg": "本 ID 在别处重新连接，当前连接已被顶替" }).to_string()));
             }
             drop(st);
             id
@@ -172,11 +174,15 @@ async fn handle_conn(socket: WebSocket, state: AppState) {
     }
 
     // 断线清理：名册移除并广播（无其他状态可清——服务器不存业务数据）。
+    // 同 ID 顶替后这里可能晚于新连接执行：只有名册里仍是本连接的 tx 才清，
+    // 否则会把顶替者（新连接）的注册误删成「在线却不可达」。
     {
         let mut st = state.write().unwrap();
-        st.peers.remove(&user_id);
-        st.rates.remove(&user_id);
-        broadcast_peers_locked(&st);
+        if st.peers.get(&user_id).is_some_and(|p| p.tx.same_channel(&tx)) {
+            st.peers.remove(&user_id);
+            st.rates.remove(&user_id);
+            broadcast_peers_locked(&st);
+        }
     }
     tracing::info!("{user_id} left");
     drop(tx);

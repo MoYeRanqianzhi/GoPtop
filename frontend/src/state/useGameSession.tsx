@@ -130,6 +130,10 @@ export function useGameSession() {
   /** 对端头像（P2P 直连后互相发送；观战者头像经 host 转发）。 */
   const [peerAvatars, setPeerAvatars] = useState<Record<string, string>>({});
   const myAvatarRef = useRef<string | null>(null);
+  // 上次会话存过的头像要回填：直连建立即互发头像（:850），只认 ref 不查 localStorage
+  useEffect(() => {
+    myAvatarRef.current = loadMyAvatar();
+  }, []);
   /** 观战者侧：发言批准状态（双 host 均 ack 才可发言；被拒则本局锁死）。 */
   const [specCanChat, setSpecCanChat] = useState(false);
   const specCanChatRef = useRef(false);
@@ -309,8 +313,10 @@ export function useGameSession() {
         break;
       }
       // —— 协商请求：对方同意制，弹窗处理 ——
+      // 三类 Req 都只发对局者；观战者即便收到（中继广播）也绝不能代为应允，
+      // 否则 Ack 会与真实对手的应答叠加造成双重悔棋/重开（2026-09-13 审查 P1）
       case "UndoReq": {
-        if (phaseRef.current !== "playing") break;
+        if (phaseRef.current !== "playing" || roleRef.current === "spectator") break;
         setConfirmReq({ kind: "undo", from: msg.userId, fromName: resolvePeerName(msg.userId, msg.sender) });
         confirmResolveRef.current = () => {
           transport.send({ type: "UndoAck", ok: true });
@@ -329,7 +335,7 @@ export function useGameSession() {
         break;
       }
       case "ResetReq": {
-        if (phaseRef.current !== "playing") break;
+        if (phaseRef.current !== "playing" || roleRef.current === "spectator") break;
         setConfirmReq({ kind: "reset", from: msg.userId, fromName: resolvePeerName(msg.userId, msg.sender) });
         confirmResolveRef.current = () => {
           transport.send({ type: "ResetAck", ok: true });
@@ -348,7 +354,7 @@ export function useGameSession() {
         break;
       }
       case "SwapReq": {
-        if (phaseRef.current !== "playing") break;
+        if (phaseRef.current !== "playing" || roleRef.current === "spectator") break;
         setConfirmReq({ kind: "swap", from: msg.userId, fromName: resolvePeerName(msg.userId, msg.sender) });
         confirmResolveRef.current = () => {
           transport.send({ type: "SwapAck", ok: true });
@@ -437,6 +443,11 @@ export function useGameSession() {
    *  服务器模式下 offer 需异步生成后再交给服务器换短码，故整体 async。 */
   async function createInvite() {
     closeAllRtcPeers();
+    // 连通性前置：否则服务器未连接时上面这串状态已写一半，退出到主页前是「脏等待态」
+    if (serverMode && !serverChannel.connected) {
+      showNotice("服务器未连接：请检查设置页服务器配置或切换到无服务器模式");
+      return;
+    }
     const g = genGameId();
     const p = genPwd();
     setGameId(g);
@@ -458,10 +469,6 @@ export function useGameSession() {
     // —— 服务器模式：链接回归 /<userId>?pwd=（无 rtc，最短）；pwd 校验在收到 join
     //    signal 时于本端进行（错误转弹窗询问），offer 在校验通过后才生成发送 ——
     if (serverMode) {
-      if (!serverChannel.connected) {
-        showNotice("服务器未连接：请检查设置页服务器配置或切换到无服务器模式");
-        return;
-      }
       showNotice(null);
       // 观战钥匙一并生成（整局有效），对局页可展示观战链接
       specPwdRef.current = genPwd();
@@ -786,6 +793,16 @@ export function useGameSession() {
   }
 
   function backHome() {
+    // 服务器模式对局者退出：先通知挂在自己名下的观战者散场（他们收到后各自
+    // backHome+提示），否则只断 RTC，观战者面对死棋盘停留在观战中无任何提示。
+    // 观战者自己退场（或被踢后 backHome）走不到这里的名册广播——role 是 spectator。
+    if (roleRef.current !== "spectator" && serverChannel.connected) {
+      for (const s of spectatorsRef.current) {
+        if (s.host === serverChannel.myServerId) {
+          serverChannel.signal(s.id, "spec-kicked", { name: myName() });
+        }
+      }
+    }
     closeAllRtcPeers();
     // 观战钥匙不清理会泄漏到下一局：取消等待后被挑战进局，卡片会挂上过期钥匙的 spec 链接
     specPwdRef.current = null;

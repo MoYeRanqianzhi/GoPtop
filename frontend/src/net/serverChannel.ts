@@ -24,7 +24,7 @@ export type ServerEvent =
   | { t: "peers"; users: ServerUserInfo[] }
   | { t: "signal"; from: string; kind: string; payload: Record<string, unknown> }
   | { t: "relayed"; from: string; payload: GameMsg }
-  | { t: "error"; msg: string };
+  | { t: "error"; msg: string; code?: string };
 
 const PING_MS = 25_000;
 
@@ -101,13 +101,23 @@ export class ServerChannel {
       } else if (m.t === "pong") {
         // 心跳回应，无需处理
       } else {
+        // 本 ID 被别处顶替：服务器已把名册指向新连接，旧连接继续收发只会以
+        // 他人身份路由事件——主动断开（manualClose 避免自动重连再顶替回去）。
+        if (m.t === "error" && (m as { code?: string }).code === "taken-over") {
+          this.manualClose = true;
+          try { ws.close(); } catch { /* ignore */ }
+          this.teardownTimers();
+          this.setState("error", (m as { msg?: string }).msg || "本 ID 在别处重新连接");
+          return;
+        }
         this.onEvent?.(m as ServerEvent);
       }
     };
     ws.onclose = () => {
       this.teardownTimers();
       if (this.manualClose) {
-        this.setState("off");
+        // 被顶替的关停已经在 taken-over 分支报过 error，这里不再盖成 off
+        if (this.state !== "error") this.setState("off");
         return;
       }
       this.setState("connecting");

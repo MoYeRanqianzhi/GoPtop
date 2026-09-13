@@ -75,11 +75,12 @@ export class GameChannel {
     if (!msg || typeof msg.seq !== "number" || !msg.kind) return;
     if (msg.sender === this.myId) return;
     // BroadcastChannel / WebRTC 直连 / 服务器 relay 三链路会送达同一条消息：
-    // 有副作用的类型（落子、协商请求与批复、头像）按 (sender, seq) 单调去重，
-    // 先到者应用、后到者丢弃——否则 SwapAck 这类「翻转」操作会被执行两次翻回去。
-    // SyncState/SyncRequest 不去重（幂等全量同步，重连后发送方 seq 归零，
-    // 去重会错误丢弃重连同步）；Chat 允许重复（仅显示层，且须容忍 seq 归零）。
-    const DEDUP = new Set(["Move", "UndoReq", "UndoAck", "ResetReq", "ResetAck", "SwapReq", "SwapAck", "Avatar"]);
+    // 有副作用的类型（落子、协商请求与批复、头像、聊天）按 (sender, seq) 单调去重，
+    // 先到者应用、后到者丢弃——否则 SwapAck 这类「翻转」操作会被执行两次翻回去、
+    // 聊天在同源双链路下必然显示两遍。sender 每次页面加载重新生成、seq 单调递增，
+    // 去重键不会跨会话残留。SyncState/SyncRequest 不去重（幂等全量同步，
+    // 重连后发送方 seq 归零，去重会错误丢弃重连同步）。
+    const DEDUP = new Set(["Move", "UndoReq", "UndoAck", "ResetReq", "ResetAck", "SwapReq", "SwapAck", "Avatar", "Chat"]);
     if (DEDUP.has(msg.kind.type)) {
       const seen = this.lastSeq.get(msg.sender) ?? 0;
       if (msg.seq <= seen) return;
