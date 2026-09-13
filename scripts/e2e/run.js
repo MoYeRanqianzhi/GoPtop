@@ -163,7 +163,9 @@ async function challengeFromList(c, peerName) {
   if (specUrl) {
     const u = new URL(specUrl);
     await C.page.goto(C.origin + u.pathname + u.search, { waitUntil: "domcontentloaded" });
-    check("8b. C 自动批准观战", await bodyHas(C, "观战", 15000) && await bodyHas(C, "手数", 5000));
+    // 「观战」字样在「正在连接对局观战…」提示即刻出现，真实门槛是 RTC gathering
+  // （waitGathering 上限 8s，跨网/STUN 慢时 5s 窗口会假阴）——手数给足 15s
+  check("8b. C 自动批准观战", await bodyHas(C, "观战", 15000) && await bodyHas(C, "手数", 15000));
   }
 
   // —— 9. 观战发言申请：双 host 批准（C 面板无输入框，只有「申请发言」） ——

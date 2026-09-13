@@ -122,6 +122,27 @@
 | P3-10 | board_json 每手 361 次 format!、BFS 每手建 HashSet——非病理性，无需行动 | 无需行动 |
 | 契约核对 | 棋盘 JSON/ok_reply/Coord/kind 标签/.d.ts 签名与 TS 侧**全部一致**；Rust protocol.rs 未接线不构成漂移 | 无需行动 |
 
+## #6 文档/测试覆盖（文档失真 15 + 缺失 6 + 测试缺口 12）
+
+| 级别 | 发现 | 状态 |
+|------|------|------|
+| A1 | docs/使用指南.md:100「跨设备观战尚未实现」与已知限制 A1 矛盾——服务器观战已全链可用 | 待修 |
+| A2-A6 | 使用指南：P2P 描述漏信令服务器可选；STUN 表 3 行旧名（实际 9 条内置）；4.4 编号错位；/users 跨设备说明；设置表缺信令服务器/头像行 | 待修 |
+| A7 | docs/部署指南.md:57 引用已删除的 transport.ts（真源 links.ts:154） | 待修 |
+| A8 | 部署指南「不需要任何后端」与可选官服矛盾，缺自建服务器部署章节 | 待修 |
+| A9 | p2p-protocol.md:58 DEDUP 列表含不存在的 Aware，实际集合见 gameChannel.ts:83 | 待修 |
+| A10-A12 | architecture.md：vitest 30→33、行数标注过期、components 列表缺 BrutalCard/PosterStrip | 待修 |
+| A13 | p2p-protocol.md:113 S2C error 漏 `code:"taken-over"` 语义 | 待修 |
+| A14-A15 | DOCS.md 索引未覆盖根 review/；cleanup-audit.md 指向空目录 .agents/plan/ | 待修 |
+| 注释 | src-tauri/lib.rs p2p/iroh 注释与 p2p.rs「空模块」矛盾；goptop-server main.rs:10 kind 列表含已删的 ice | 待修 |
+| B1 | **E2E/浏览器验证脚本未版本化**（run.js 42 断言/go-capture/ui-audit 只在本机 %TEMP%），新 clone 无法复现回归基线 | 待修（入 scripts/e2e/ + 说明） |
+| B2-B6 | 自建信令服务器部署文档、服务器模式/聊天/换棋/头像人类文档、STUN 迁移记录、版本口径 | 待修 |
+| C1-C9 | TS 测试缺口：links.parseUrl+5 构造函数、(sv,len) 双键守卫、DirectRtcPeer 状态机、rtcCodec 异常、协商类去重、stun/servers/identity 零测试 | 待补 |
+| C10 | wasm.rs 零测试：10 条用例清单（undo 提子还原/空历史/adopt 维度/颜色/错误码契约/game_over/Resign/多子块提） | 待补 |
+| C11 | goptop-server 零测试：is_valid_peer_id/sanitize_name/限速窗口 | 待补 |
+| C12 | state 层可下沉纯函数：loadDefaults/resolvePeerName/serverSignaling 假通道驱动 | 记录 |
+| D | 一致项：README 命令面、STUN 9 条、已知限制 A2-A4/B1/C2、architecture 时序数字、p2p-protocol URL 六格式/G1 编码链/限速参数、build-wasm.sh、DOCS.md memory 索引 | 无需行动 |
+
 
 - rtcCodec：空 pwd 往返、atob 异常路径、`length%4==1` 截断、非 ASCII、缺 s/t 字段。
 - links：parseUrl 完全无测试（/watch 单段、多段、畸形 %）；五个 URL 构造函数零测试；`?u=` 双解码回归。
