@@ -5,12 +5,14 @@
  * - genPwd：固定 6 位 base36、CSPRNG 分布抽查。
  * - parsePastedLink / parsePastedAnswer：域名无关解析、旧 query 兼容、
  *   单段路径收紧（防普通文本误判成用户主页）。
+ * - parseUrl（审查 #6 C1）：路径路由（node 环境无 jsdom，stub window.location）。
+ * - 五个链接构造函数（审查 #6 C2）：构造 → 解析往返等值。
  *
  * 运行：`npm test`。
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { genPwd } from "./identity";
-import { parsePastedLink, parsePastedAnswer } from "./links";
+import { parseUrl, parsePastedLink, parsePastedAnswer, inviteToUrl, answerToUrl, userToUrl, specLinkUrl, watchToUrl } from "./links";
 
 describe("genPwd", () => {
   it("固定 6 位 base36", () => {
@@ -119,5 +121,157 @@ describe("parsePastedAnswer", () => {
     const r = parsePastedAnswer("https://x.dev/u-h?pwd=x&rtcAns=G1X&kind=xxx&size=0");
     expect(r?.kind).toBeNull();
     expect(r?.size).toBeNull();
+  });
+});
+
+/* ---------------- parseUrl：路径路由（审查 #6 C1） ---------------- */
+
+describe("parseUrl", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** node 环境无 jsdom：把待测地址注入 window.location.href 再解析。 */
+  function at(href: string) {
+    vi.stubGlobal("window", { location: { href, origin: "https://x.dev" } });
+    return parseUrl();
+  }
+
+  it("根路径 → menu", () => {
+    expect(at("https://x.dev/")).toEqual({ mode: "menu" });
+    expect(at("https://x.dev")).toEqual({ mode: "menu" });
+  });
+
+  it("四个静态页面各自 mode", () => {
+    expect(at("https://x.dev/local")).toEqual({ mode: "local" });
+    expect(at("https://x.dev/p2p")).toEqual({ mode: "p2p" });
+    expect(at("https://x.dev/users")).toEqual({ mode: "users" });
+    expect(at("https://x.dev/settings")).toEqual({ mode: "settings" });
+  });
+
+  it("/watch/<id> → watch", () => {
+    expect(at("https://x.dev/watch/g-1")).toEqual({ mode: "watch", gameId: "g-1" });
+  });
+
+  it("邀请路径 → user 全字段", () => {
+    expect(at("https://x.dev/u-abc?pwd=k&kind=go&size=13&rtc=G1X")).toEqual({
+      mode: "user",
+      userId: "u-abc",
+      pwd: "k",
+      kind: "go",
+      size: 13,
+      rtc: "G1X",
+      spec: false,
+    });
+  });
+
+  it("spec=1 → 观战意图（pwd 为观战钥匙）", () => {
+    expect(at("https://x.dev/u-abc?pwd=spec123&spec=1")).toEqual({
+      mode: "user",
+      userId: "u-abc",
+      pwd: "spec123",
+      kind: "gomoku",
+      size: 15,
+      rtc: null,
+      spec: true,
+    });
+  });
+
+  it("旧 query 兼容 ?u= / ?room= / ?watch=", () => {
+    expect(at("https://x.dev/?u=u-abc&pwd=k&kind=go&size=9")).toMatchObject({
+      mode: "user",
+      userId: "u-abc",
+      pwd: "k",
+      kind: "go",
+      size: 9,
+    });
+    expect(at("https://x.dev/?room=g-1")).toEqual({ mode: "watch", gameId: "g-1" });
+    expect(at("https://x.dev/?watch=g-2")).toEqual({ mode: "watch", gameId: "g-2" });
+  });
+
+  it("多段路径 → menu（含保留字后缀段，不误路由）", () => {
+    expect(at("https://x.dev/a/b")).toEqual({ mode: "menu" });
+    expect(at("https://x.dev/local/extra")).toEqual({ mode: "menu" });
+  });
+
+  it("路径含畸形 % 不抛：decodeURIComponent 的 URIError 被吞 → menu", () => {
+    expect(at("https://x.dev/u-a%zz?pwd=k")).toEqual({ mode: "menu" });
+  });
+
+  it("路径 userId 百分号解码", () => {
+    expect(at("https://x.dev/u-a%20b%2Fc")).toMatchObject({ mode: "user", userId: "u-a b/c" });
+  });
+});
+
+/* ---------------- 链接构造 → 解析往返（审查 #6 C2） ---------------- */
+
+describe("链接构造 → 解析往返", () => {
+  beforeEach(() => {
+    // shareOrigin() 非 Tauri 下取 window.location.origin。
+    vi.stubGlobal("window", { location: { href: "https://x.dev/", origin: "https://x.dev" } });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("inviteToUrl 含 rtc：全字段往返等值", () => {
+    const url = inviteToUrl("u-abc", "k9d2x1", "go", 13, "G1X");
+    expect(url.startsWith("https://x.dev/u-abc?")).toBe(true);
+    expect(parsePastedLink(url)).toEqual({
+      mode: "user",
+      userId: "u-abc",
+      pwd: "k9d2x1",
+      kind: "go",
+      size: 13,
+      rtc: "G1X",
+      spec: false,
+    });
+  });
+
+  it("inviteToUrl 不带 rtc：解析出 rtc=null", () => {
+    const url = inviteToUrl("u-abc", "k9d2x1", "gomoku", 15, null);
+    expect(url).not.toContain("rtc=");
+    expect(parsePastedLink(url)).toMatchObject({ mode: "user", userId: "u-abc", rtc: null, spec: false });
+  });
+
+  it("specLinkUrl 带 spec=1", () => {
+    const url = specLinkUrl("u-host", "specpwd1");
+    expect(url).toContain("spec=1");
+    expect(parsePastedLink(url)).toMatchObject({
+      mode: "user",
+      userId: "u-host",
+      pwd: "specpwd1",
+      spec: true,
+    });
+  });
+
+  it("watchToUrl → watch 往返", () => {
+    expect(parsePastedLink(watchToUrl("g-42"))).toEqual({ mode: "watch", gameId: "g-42" });
+  });
+
+  it("userToUrl：u- 前缀无 pwd 也识别为用户主页", () => {
+    expect(parsePastedLink(userToUrl("u-plain"))).toMatchObject({
+      mode: "user",
+      userId: "u-plain",
+      pwd: null,
+      spec: false,
+    });
+  });
+
+  it("answerToUrl → parsePastedAnswer 往返（含 game/kind/size）", () => {
+    const url = answerToUrl("u-inviter", "q9bwbu", "G1Ans", "g-99", "go", 13);
+    expect(parsePastedAnswer(url)).toEqual({
+      inviterId: "u-inviter",
+      pwd: "q9bwbu",
+      rtcAns: "G1Ans",
+      spectator: false,
+      gameId: "g-99",
+      kind: "go",
+      size: 13,
+    });
+  });
+
+  it("userId 特殊字符：encodeURIComponent 编入、解码往返等值", () => {
+    for (const id of ["u-a b/c?", "u-中文", "u-100%安全", "u-a&b=c"]) {
+      const url = inviteToUrl(id, "p1w2e3", "gomoku", 15);
+      expect(url).not.toContain(id); // 确已编码，未裸拼进 URL
+      expect(parsePastedLink(url)?.userId).toBe(id);
+    }
   });
 });

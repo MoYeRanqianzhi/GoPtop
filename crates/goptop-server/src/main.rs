@@ -279,3 +279,60 @@ fn rate_ok(state: &AppState, me: &str) -> bool {
     entry.1 += 1;
     entry.1 <= 500
 }
+
+/// 信令服务器纯函数单测（审查 #6 C11）：ID 白名单、昵称清理、限速窗口。
+/// 网络路径（ws 握手/广播）不在单测覆盖面，由 scripts/e2e 官服冒烟脚本回归。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// is_valid_peer_id：u-/s- 前缀、总长 3..=40、仅 ASCII 字母数字与 '-'。
+    #[test]
+    fn peer_id_validation() {
+        assert!(is_valid_peer_id("u-abc"));
+        assert!(is_valid_peer_id("s-1a2b"));
+        // 前缀白名单：其余一律拒绝（大小写敏感）。
+        assert!(!is_valid_peer_id("x-abc"));
+        assert!(!is_valid_peer_id("U-abc"));
+        assert!(!is_valid_peer_id("abc"));
+        // 长度边界 3..=40。
+        assert!(is_valid_peer_id("u-a"));
+        assert!(!is_valid_peer_id("u-"));
+        assert!(is_valid_peer_id(&format!("u-{}", "a".repeat(38)))); // 恰 40
+        assert!(!is_valid_peer_id(&format!("u-{}", "a".repeat(39)))); // 41
+        // 字符集：下划线/空格/非 ASCII 拒绝。
+        assert!(!is_valid_peer_id("u-a_b"));
+        assert!(!is_valid_peer_id("u-a b"));
+        assert!(!is_valid_peer_id("u-围"));
+    }
+
+    /// sanitize_name：按字符截断到 24、空/纯空白名回退短 ID、其余 trim 保留。
+    #[test]
+    fn name_sanitization() {
+        assert_eq!(sanitize_name(&"a".repeat(30), "u-x"), "a".repeat(24));
+        // 多字节字符按"字符"而非字节截断：30 个汉字 → 24 个。
+        assert_eq!(sanitize_name(&"围".repeat(30), "u-x"), "围".repeat(24));
+        assert_eq!(sanitize_name("", "u-x"), "u-x");
+        assert_eq!(sanitize_name("   ", "u-x"), "u-x");
+        assert_eq!(sanitize_name("  alice  ", "u-x"), "alice");
+        assert_eq!(sanitize_name("bob", "u-x"), "bob");
+    }
+
+    /// rate_ok：500 条/10s 窗口。Instant 不可注入，窗口重置直接把计数窗口
+    /// 起点拨回 11s 前（等价真实流逝），不写真实 sleep。
+    #[test]
+    fn rate_limit_threshold_and_window_reset() {
+        let state: AppState = Arc::default();
+        // 阈值内全部放行。
+        for _ in 0..500 {
+            assert!(rate_ok(&state, "u-r"));
+        }
+        // 第 501 条被拒。
+        assert!(!rate_ok(&state, "u-r"));
+        // 连接间计数独立：另一连接不受影响。
+        assert!(rate_ok(&state, "u-other"));
+        // 窗口重置：起点拨回 11s 前 → 计数清零、重新放行。
+        state.write().unwrap().rates.get_mut("u-r").unwrap().0 = Instant::now() - Duration::from_secs(11);
+        assert!(rate_ok(&state, "u-r"));
+    }
+}

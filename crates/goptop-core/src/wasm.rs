@@ -233,3 +233,205 @@ impl WasmGame {
         true
     }
 }
+
+/// wasm.rs 的 JSON 契约单测（审查 #6 C10）——在 native 目标直接调用
+/// `#[wasm_bindgen]` 导出的 pub fn（返回 String/bool），断言一律先解析成
+/// `serde_json::Value`，锁定错误码/字段名等稳定契约而非裸字符串比对。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn go9() -> WasmGame {
+        WasmGame::new_game(r#"{"Go":{"size":9}}"#).unwrap()
+    }
+
+    fn gomoku15() -> WasmGame {
+        WasmGame::new_game(r#"{"Gomoku":{"size":15}}"#).unwrap()
+    }
+
+    fn parse(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    /// board JSON 中 (x,y) 的颜色字符串。
+    fn at(v: &Value, x: usize, y: usize) -> &str {
+        v["board"][y][x].as_str().unwrap()
+    }
+
+    /// n×n 空盘 JSON（全 "empty"）。
+    fn empty_board(n: usize) -> String {
+        let row = format!("[{}]", vec!["\"empty\""; n].join(","));
+        format!("[{}]", vec![row.as_str(); n].join(","))
+    }
+
+    /// 空盘上摆子后的棋盘 JSON。
+    fn board_with(blacks: &[(usize, usize)], whites: &[(usize, usize)], n: usize) -> String {
+        let mut v: Value = serde_json::from_str(&empty_board(n)).unwrap();
+        for &(x, y) in blacks {
+            v[y][x] = json!("black");
+        }
+        for &(x, y) in whites {
+            v[y][x] = json!("white");
+        }
+        v.to_string()
+    }
+
+    /// 1) 提子后 undo：被提白子还原、行棋方回到提子前的黑。
+    #[test]
+    fn undo_restores_captured_stone() {
+        let mut g = go9();
+        // B(1,0) → W(0,0) → B(0,1) 提白 (0,0)。
+        assert!(parse(&g.try_place(1, 0))["ok"].as_bool().unwrap());
+        assert!(parse(&g.try_place(0, 0))["ok"].as_bool().unwrap());
+        let cap = parse(&g.try_place(0, 1));
+        assert_eq!(cap["captured"], json!([{"x":0,"y":0}]));
+        assert_eq!(at(&cap, 0, 0), "empty");
+        let undone = parse(&g.undo_last());
+        assert_eq!(at(&undone, 0, 0), "white");
+        assert_eq!(undone["toMove"], "black");
+        // 被弹出的正是提子那手 B(0,1)（该点回空）；更早的黑子 (1,0) 仍在。
+        assert_eq!(at(&undone, 0, 1), "empty");
+        assert_eq!(at(&undone, 1, 0), "black");
+    }
+
+    /// 2) 空历史 undo：ok:false + 稳定错误码 no_move。
+    #[test]
+    fn undo_on_empty_history_is_no_move() {
+        let mut g = go9();
+        let r = parse(&g.undo_last());
+        assert_eq!(r["ok"], json!(false));
+        assert_eq!(r["error"], "no_move");
+    }
+
+    /// 3) 连续两次 undo：逐手回退直至空盘、黑先。
+    #[test]
+    fn undo_twice_returns_to_empty_board() {
+        let mut g = go9();
+        assert!(parse(&g.try_place(4, 4))["ok"].as_bool().unwrap());
+        assert!(parse(&g.try_place(5, 5))["ok"].as_bool().unwrap());
+        let r1 = parse(&g.undo_last());
+        assert_eq!(at(&r1, 5, 5), "empty");
+        assert_eq!(at(&r1, 4, 4), "black");
+        assert_eq!(r1["toMove"], "white");
+        let r2 = parse(&g.undo_last());
+        assert_eq!(at(&r2, 4, 4), "empty");
+        assert_eq!(r2["toMove"], "black");
+        assert!(r2["winner"].is_null());
+    }
+
+    /// 4) adopt 后 undo：按重建历史全量重放，回到快照前一状态
+    /// （而非简单保留快照棋盘——(5,5) 的白子必须因重放而消失）。
+    #[test]
+    fn adopt_then_undo_replays_rebuilt_history() {
+        let mut g = go9();
+        // 快照：黑 (4,4)、白 (5,5)，轮白；历史两条同序。
+        let board = board_with(&[(4, 4), (5, 5)], &[], 9);
+        assert!(g.adopt(&board, "white", "null", r#"[{"x":4,"y":4},{"x":5,"y":5}]"#));
+        let after = parse(&g.undo_last());
+        assert_eq!(at(&after, 4, 4), "black");
+        assert_eq!(at(&after, 5, 5), "empty");
+        assert_eq!(after["toMove"], "white");
+    }
+
+    /// 5) adopt 维度守卫：行数≠逻辑尺寸、行长不齐均拒绝。
+    #[test]
+    fn adopt_rejects_dimension_mismatch() {
+        let mut g = gomoku15();
+        // 14 行给 15 路局。
+        let row15 = format!("[{}]", vec!["\"empty\""; 15].join(","));
+        let board14 = format!("[{}]", vec![row15.as_str(); 14].join(","));
+        assert!(!g.adopt(&board14, "black", "null", "[]"));
+        // 行长度不齐。
+        let row14 = format!("[{}]", vec!["\"empty\""; 14].join(","));
+        let ragged = format!("[{},{},{}]", row15, row14, row15);
+        assert!(!g.adopt(&ragged, "black", "null", "[]"));
+    }
+
+    /// 6) adopt 字段白名单：toMove 不接受 "empty"；winner 接受 "null"（→None）、
+    /// 拒绝白名单外颜色。
+    #[test]
+    fn adopt_rejects_invalid_to_move_and_winner() {
+        let mut g = go9();
+        let board = empty_board(9);
+        assert!(!g.adopt(&board, "empty", "null", "[]"));
+        assert!(g.adopt(&board, "black", "null", "[]"));
+        assert!(!g.adopt(&board, "black", "red", "[]"));
+        assert!(g.adopt(&board, "white", "black", "[]"));
+    }
+
+    /// 7) adopt 历史校验：越界坐标拒绝；非 "pass" 字符串拒绝；
+    /// "pass" 接受为 Move::Pass（含 pass 的历史 undo 重放轮转不漂移）。
+    #[test]
+    fn adopt_history_validation() {
+        let mut g = go9();
+        let board = empty_board(9);
+        assert!(!g.adopt(&board, "black", "null", r#"[{"x":99,"y":0}]"#));
+        assert!(!g.adopt(&board, "black", "null", r#"["resign"]"#));
+        // 合法：黑落 (4,4)、白 pass → 快照轮黑。
+        let board_after_pass = board_with(&[(4, 4)], &[], 9);
+        assert!(g.adopt(&board_after_pass, "black", "null", r#"[{"x":4,"y":4},"pass"]"#));
+        // undo 弹出 pass 后重放 [Place(4,4)]：黑子仍在、轮白。
+        let undone = parse(&g.undo_last());
+        assert_eq!(at(&undone, 4, 4), "black");
+        assert_eq!(undone["toMove"], "white");
+    }
+
+    /// 8) try_place 错误码契约：out_of_bounds/occupied/suicide 锁定为稳定字符串
+    /// （game_over 在五连用例中锁定）。
+    #[test]
+    fn try_place_error_codes() {
+        let mut g = go9();
+        // 9 路局 (9,0) 超出逻辑尺寸（物理 19×19 也在盘外）。
+        assert_eq!(parse(&g.try_place(9, 0))["error"], "out_of_bounds");
+        assert!(parse(&g.try_place(4, 4))["ok"].as_bool().unwrap());
+        assert_eq!(parse(&g.try_place(4, 4))["error"], "occupied");
+        // 自杀：白 (0,1)、(1,0) 分隔不相连各有外气，黑 (0,0) 无气且提不动 → suicide。
+        assert!(parse(&g.try_place(0, 1))["ok"].as_bool().unwrap());
+        assert!(parse(&g.try_place(5, 5))["ok"].as_bool().unwrap());
+        assert!(parse(&g.try_place(1, 0))["ok"].as_bool().unwrap());
+        assert_eq!(parse(&g.try_place(0, 0))["error"], "suicide");
+    }
+
+    /// 9) 五子棋第 5 子 → winner="black"；终局后再落子 → ok:false + game_over。
+    #[test]
+    fn gomoku_five_wins_then_game_over() {
+        let mut g = gomoku15();
+        for x in 0..4u8 {
+            assert!(parse(&g.try_place(x, 0))["ok"].as_bool().unwrap()); // 黑连珠
+            assert!(parse(&g.try_place(x, 7))["ok"].as_bool().unwrap()); // 白闲着
+        }
+        let fifth = parse(&g.try_place(4, 0));
+        assert_eq!(fifth["winner"], "black");
+        let later = parse(&g.try_place(7, 7));
+        assert_eq!(later["ok"], json!(false));
+        assert_eq!(later["error"], "game_over");
+        // 终局态持续：再次落子仍拒绝（err_reply 只含 ok/error，棋盘不可见）。
+        let again = parse(&g.try_place(7, 7));
+        assert_eq!(again["error"], "game_over");
+    }
+
+    /// 10) pass：轮转翻转、棋盘不变；终局后 pass → ok:false + game_over。
+    #[test]
+    fn pass_flips_to_move_and_rejected_after_game_over() {
+        let mut g = go9();
+        assert!(parse(&g.try_place(4, 4))["ok"].as_bool().unwrap());
+        let before = parse(&g.try_place(5, 5));
+        let p1 = parse(&g.pass());
+        assert_eq!(p1["toMove"], "white");
+        assert_eq!(p1["board"], before["board"]);
+        let p2 = parse(&g.pass());
+        assert_eq!(p2["toMove"], "black");
+        assert_eq!(p2["board"], before["board"]);
+        // 终局后 pass 被拒。
+        let mut gm = gomoku15();
+        for x in 0..4u8 {
+            assert!(parse(&gm.try_place(x, 0))["ok"].as_bool().unwrap());
+            assert!(parse(&gm.try_place(x, 7))["ok"].as_bool().unwrap());
+        }
+        assert!(parse(&gm.try_place(4, 0))["ok"].as_bool().unwrap());
+        let p3 = parse(&gm.pass());
+        assert_eq!(p3["ok"], json!(false));
+        assert_eq!(p3["error"], "game_over");
+    }
+}
