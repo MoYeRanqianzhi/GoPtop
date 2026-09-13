@@ -1,0 +1,10 @@
+# 构建产物与本地环境
+/build/
+entry/build/
+entry/oh_modules/
+oh_modules/
+.hvigor/
+.cxx/
+local.properties
+*.hap
+.idea/
