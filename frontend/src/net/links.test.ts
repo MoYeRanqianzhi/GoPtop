@@ -45,6 +45,12 @@ describe("parsePastedLink", () => {
     expect(r).toMatchObject({ mode: "user", userId: "u-abc", pwd: "p1w2e3", kind: "go", size: 9 });
   });
 
+  it("?u= 只解码一次：ID 含 % 不抛 URIError（审查 #3 A4 双解码回归）", () => {
+    // get("u") 已解码一次得到 "u-a%b"；若再 decode 会抛 URIError 被吞成 null
+    const r = parsePastedLink("https://x.dev/?u=u-a%25b&pwd=p1");
+    expect(r).toMatchObject({ mode: "user", userId: "u-a%b", pwd: "p1" });
+  });
+
   it("旧 query 风格 ?room= / ?watch=", () => {
     expect(parsePastedLink("https://x.dev/?room=g-1")).toMatchObject({ mode: "watch", gameId: "g-1" });
     expect(parsePastedLink("https://x.dev/?watch=g-2")).toMatchObject({ mode: "watch", gameId: "g-2" });

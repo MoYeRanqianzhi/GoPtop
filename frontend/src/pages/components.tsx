@@ -186,7 +186,7 @@ export function ChatPanel(props: {
       {role === "spectator" && (!specCanChat || !spectateEnabled) ? null : (
         <div style={{ display: "flex", gap: 6 }}>
           <input value={text} onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) send(); }}
             placeholder="说点什么…"
             style={{ flex: 1, minWidth: 0, border: "3px solid var(--ink)", padding: "6px 9px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
           <button className="brutal-btn brutal-btn--sm" onClick={send} disabled={!text.trim()}>发送</button>

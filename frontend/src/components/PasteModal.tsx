@@ -62,7 +62,7 @@ export function PasteModal(props: {
               autoFocus
               value={modalInput}
               onChange={(e) => setModalInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitModal(); }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) submitModal(); }}
               placeholder={modal === "paste-invite" ? "粘贴邀请链接或主页链接"
                 : "粘贴受邀者发来的回执链接"}
               style={{ border: "3px solid var(--ink)", padding: "9px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }}

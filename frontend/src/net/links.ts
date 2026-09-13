@@ -176,7 +176,8 @@ export function parsePastedLink(text: string): UrlIntent | null {
     const u = sp.get("u");
     if (u) {
       const { kind, size } = kindSizeFromParams(sp);
-      return { mode: "user", userId: decodeURIComponent(u), pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc"), spec: sp.get("spec") === "1" };
+      // searchParams.get 已解码一次；再 decode 会在 ID 含 % 时抛 URIError 被外层吞成「无法识别」
+      return { mode: "user", userId: u, pwd: sp.get("pwd"), kind, size, rtc: sp.get("rtc"), spec: sp.get("spec") === "1" };
     }
     const watch = sp.get("watch");
     if (watch) return { mode: "watch", gameId: watch };

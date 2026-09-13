@@ -3,6 +3,7 @@
  * isSelfPage 两分支（自己的主页：头像/昵称/等待与对局状态；他人主页：资料卡+挑战），
  * 等待/对局中附 BoardPanel。
  */
+import { useState } from "react";
 import { nav } from "../net/links";
 import type { GameSession } from "../state/useGameSession";
 import { AvatarSettings, BoardPanel } from "./components";
@@ -18,7 +19,9 @@ export function UserPage(props: { s: GameSession }) {
     acceptInvite, serverChallengePeer, createInvite, backHome, copyText,
     reset, handlePlace, saveName, loadMyAvatar, saveMyAvatar,
   } = props.s;
-  const myAvatar = loadMyAvatar();
+  // 头像存 localStorage、保存动作不触发 session state：预览必须用本地 state 驱动，
+  // 否则上传/清除后页面毫无反应（审查 #4 P1-2）
+  const [myAvatar, setMyAvatar] = useState(loadMyAvatar);
   return viewedUserId ? (
     <>
     <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -30,7 +33,7 @@ export function UserPage(props: { s: GameSession }) {
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <div className="brutal-label">头像与昵称（对局/聊天中展示）</div>
-            <AvatarSettings dataUrl={myAvatar} onSave={saveMyAvatar} />
+            <AvatarSettings dataUrl={myAvatar} onSave={(d) => { saveMyAvatar(d); setMyAvatar(d); }} />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <input placeholder="给自己起个昵称" value={name} onChange={(e) => setName(e.target.value)}
                 style={{ flex: "1 1 160px", minWidth: 140, border: "3px solid var(--ink)", padding: "7px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
