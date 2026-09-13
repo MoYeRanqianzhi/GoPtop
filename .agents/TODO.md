@@ -27,11 +27,22 @@
 - [x] 规则下沉 wasm + pickKind 原子化（Go{size:15} 中间帧曾致 wasm trap 白屏）。
 - [x] 文档收口：architecture.md/p2p-protocol.md 重写；README/已知限制与路线图/DOCS.md 对齐实况。
 
+## 2026-09-13/14 四端实机验证轮 + 六维审查（全部完成）
+
+- [x] 真 Windows 标题栏（HTMAXBUTTON 覆盖层真 Snap Layouts）+ 平台字形三键 + release 体积优化（c56338c，详见记忆 2026-09-14）。
+- [x] 四端实机测试：Windows/Linux(ssh remote)/Android(AVD)/HarmonyOS(ArkWeb 壳工程 harmony/，未签名 HAP 模拟器可装) 全通过。
+- [x] 六维审查 #1-#6 全完成，台账 review/2026-09-13-review-round.md；修复批 f64419b/cd538ba/d414e1a/3e98cc8。
+- [x] E2E 基线入库 scripts/e2e/（run.js 42 + go-capture 7 + official-smoke 8）；官服部署重启后冒烟 8/8。
+
 ## 下一步候选（未获指令，不动工）
 
 - **围棋劫争与终局数目**：在 crates/goptop-core 实现（go.rs Phase 4 标注），重跑 scripts/build-wasm.sh。
 - **协商弹窗队列**：undo/reset/swap/spec-chat 共用 confirmReq，未决时被覆盖（docs/已知限制与路线图.md A4）。
 - **无服务器模式跨设备观战**：/watch 仅同源（docs/已知限制与路线图.md A1）。
+- **传输层 Rust 化**（见上第二阶段）与 #6 审查遗留的 B5（links 解析三份拷贝收敛）。
+- **审查台账低危残留**：#1 invitee 取消无通知等 P3 数条；#2 join 无互斥、双挑战 tiebreak；
+  #3 A3 直连超时用户可见失败、A6 自定义 STUN 校验；#4 P2-1 非服务器重开绕过同意制、P2-2/2-3；
+  #5 CSP null 收紧。全部见台账状态列。
 
 ## 已完成（历史）
 

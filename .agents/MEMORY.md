@@ -9,3 +9,4 @@
 - [2026-09-12 userId 链接+协商+聊天+观战房间](memory/2026-09-12-userid-link-negotiation-chat-spectator.md) — 链接回归 /userId?pwd=；服务器纯转发不落地；协商消息必须三链路去重；名册 ID=客户端持久 userId
 - [2026-09-13 大厅挑战修复+邀请弹窗](memory/2026-09-13-lobby-challenge-modal.md) — challenge-accepted 守卫错位+/users 走错信令两根因；邀请统一居中弹窗不设背景关闭；E2E 39 断言；跨设备实测（本机↔美国官服）挑战→弹窗→对局→黑胜全通且 WebRTC 直连成功
 - [2026-09-13 整理轮：三层拆分+规则下沉 wasm](memory/2026-09-13-cleanup-refactor-round.md) — 架构要求重申（Rust 承接一切，TS 只 UI）；wasm 规则接线（pickKind 中间帧 trap 坑）；B1-B4 根因；E2E 断言依赖 UI 文案面的教训；多代理禁令解除
+- [2026-09-14 四端实机验证+真 Windows 标题栏+六维审查](memory/2026-09-14-four-platform-testbar-review-round.md) — HTMAXBUTTON 覆盖层真 Snap Layouts（点击/悬停必须回传页面）；Android `__TAURI_INTERNALS__` 非 document-start 注入坑；HarmonyOS ArkWeb 壳（未签名 HAP 可装模拟器+CDP 驱动）；SyncState.history 必须可表达 Pass；E2E 入库 scripts/e2e/；官服部署程序
