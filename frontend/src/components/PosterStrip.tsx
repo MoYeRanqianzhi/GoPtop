@@ -157,7 +157,7 @@ export function PosterStrip() {
       const code = kind === "min" ? "\uE921" : kind === "close" ? "\uE8BB" : maximized && kind === "max" ? "\uE923" : "\uE922";
       return <span className="wc-glyph--win" aria-hidden="true">{code}</span>;
     }
-    if (platform === "lin") return <LinGlyph kind={kind} />;
+    if (platform === "lin") return <LinGlyph kind={maximized && kind === "max" ? "restore" : kind} />;
     // macOS 红绿灯（untested：本仓库暂无 mac 实机测试面）
     const dot = kind === "close" ? "#FF5F57" : kind === "min" ? "#FEBC2E" : "#28C840";
     return <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 999, background: dot, display: "inline-block" }} />;
