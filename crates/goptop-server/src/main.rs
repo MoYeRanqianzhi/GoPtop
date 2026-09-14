@@ -98,7 +98,8 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     ws.on_upgrade(move |socket| handle_conn(socket, state))
 }
 
-/// 单连接生命周期：首条消息必须是 hello（换取 s- 短 ID），之后循环处理上行。
+/// 单连接生命周期：首条消息必须是 hello（优先采用客户端持久 ID；缺失才分配
+/// s- 短 ID 兜底），之后循环处理上行。
 async fn handle_conn(socket: WebSocket, state: AppState) {
     let (mut sink, mut source) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
@@ -130,7 +131,7 @@ async fn handle_conn(socket: WebSocket, state: AppState) {
         );
         broadcast_peers_locked(&st);
     }
-    // welcome 告知客户端自己被分配的短 ID（大厅显示、信令目标都用它）。
+    // welcome 告知客户端其在名册中的 ID（客户端持久 ID，或缺失时的 s- 兜底短 ID）。
     let _ = tx.send(Message::text(json!({ "t": "welcome", "id": user_id }).to_string()));
     tracing::info!("{user_id} joined (name={name})");
 
@@ -204,21 +205,34 @@ fn handle_event(state: &AppState, me: &str, ev: C2S) -> Result<(), String> {
             broadcast_peers_locked(&st);
         }
         C2S::Signal { to, kind, payload } => {
-            if payload.as_object().map(|o| o.len() > 128).unwrap_or(true) {
+            if !payload_size_ok(&payload, SIGNAL_MAX_BYTES) {
                 return Err("signal payload too large".into());
             }
             // 客户端按 t:"signal" 分发；kind/payload 独立成字段（语义由客户端解释）
             send_to(&st, &to, &json!({ "t": "signal", "kind": kind, "from": me, "payload": payload }));
         }
         C2S::Relay { to, payload } => {
-            if payload.as_object().map(|o| o.len() > 64).unwrap_or(true) {
+            if !payload_size_ok(&payload, RELAY_MAX_BYTES) {
                 return Err("relay payload too large".into());
             }
             send_to(&st, &to, &json!({ "t": "relayed", "from": me, "payload": payload }));
         }
-        C2S::Hello { .. } | C2S::Ping => unreachable!("handled by caller"),
+        // hello 在握手层已消费；循环内再收到说明客户端状态异常（或探测），
+        // 温和拒绝并断开——绝不 panic（release panic=abort 会拖垮整个进程）。
+        C2S::Hello { .. } => return Err("already registered".into()),
+        C2S::Ping => unreachable!("handled by caller before dispatch"),
     }
     Ok(())
+}
+
+/// signal 单条上限：须容得下 128px 圆形头像 dataURL（约 20KB）加信令余量。
+const SIGNAL_MAX_BYTES: usize = 64 * 1024;
+/// relay 单条上限：19 路全量快照（board + 数百手 history）实测 < 16KB。
+const RELAY_MAX_BYTES: usize = 16 * 1024;
+
+/// payload 字节上限：序列化后长度（顶层键数限制挡不住单键巨串）。
+fn payload_size_ok(payload: &Value, max: usize) -> bool {
+    payload.to_string().len() <= max
 }
 
 fn send_to(st: &StateInner, to: &str, msg: &Value) {
@@ -334,5 +348,25 @@ mod tests {
         // 窗口重置：起点拨回 11s 前 → 计数清零、重新放行。
         state.write().unwrap().rates.get_mut("u-r").unwrap().0 = Instant::now() - Duration::from_secs(11);
         assert!(rate_ok(&state, "u-r"));
+    }
+
+    /// payload_size_ok：按序列化字节限长——少量键的巨串也要拦，大量小键也拦。
+    #[test]
+    fn payload_size_limit_by_bytes() {
+        // 少量键 + 巨串：3 个键各 20KB → 超 16KB relay 上限。
+        let big = json!({ "a": "x".repeat(20 * 1024), "b": "y".repeat(20 * 1024), "c": "z".repeat(20 * 1024) });
+        assert!(!payload_size_ok(&big, RELAY_MAX_BYTES));
+        // 大量小键：200 个键各 1 字节值 → 序列化约 1.6KB，signal（64KB）放行、1KB 阈值拒。
+        let mut m = serde_json::Map::new();
+        for i in 0..200 {
+            m.insert(format!("k{i}"), json!("v"));
+        }
+        let many = Value::Object(m);
+        assert!(payload_size_ok(&many, SIGNAL_MAX_BYTES));
+        assert!(!payload_size_ok(&many, 1024));
+        // 正常量级信令/头像（20KB dataURL）在 signal 上限内。
+        let avatar = json!({ "dataUrl": format!("data:image/png;base64,{}", "A".repeat(20 * 1024)) });
+        assert!(payload_size_ok(&avatar, SIGNAL_MAX_BYTES));
+        assert!(payload_size_ok(&json!({ "kind": "ice" }), RELAY_MAX_BYTES));
     }
 }
