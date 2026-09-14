@@ -1454,6 +1454,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "goptop-net"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "flate2",
+ "goptop-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "goptop-server"
 version = "0.1.0-alpha.0"
 dependencies = [

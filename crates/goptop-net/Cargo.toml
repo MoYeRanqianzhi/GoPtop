@@ -1,0 +1,25 @@
+[package]
+# goptop-net — 传输与联机的纯逻辑层（协议线格式/链接编解码/去重/身份/会话状态机）。
+# 目标：Rust 承接一切功能，TS 只做 UI（用户 2026-09-13 拍板，2026-09-15 第二阶段落地）。
+# 本 crate 无平台依赖（不碰 WebSocket/WebRTC/localStorage）——所有 IO 以 Effect/Event
+# 抽象（见 session.rs），由 goptop-transport 的 wasm 绑定层执行；因此一切逻辑都可在
+# native 下充分单元测试。
+name = "goptop-net"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop net — protocol, links, codec and session state machine"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[lib]
+name = "goptop_net"
+crate-type = ["rlib"]
+
+[dependencies]
+goptop-core = { path = "../goptop-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# deflate-raw 压缩（G1 信令编码）：rust_backend = miniz_oxide 纯 Rust，wasm 可用。
+# 与浏览器 CompressionStream("deflate-raw") 字节级互通（两端都是标准 raw deflate 流）。
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
