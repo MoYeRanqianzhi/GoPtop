@@ -90,8 +90,8 @@ export default function App() {
       ? {
           fromName: incoming.fromName,
           desc: `${incoming.kind === "gomoku" ? "五子棋" : "围棋"} ${incoming.size}×${incoming.size}`,
-          accept: () => acceptChallenge(incoming.from, incoming.kind, incoming.size, incoming.gameId, false),
-          reject: () => rejectChallenge(incoming.from, incoming.gameId),
+          accept: acceptChallenge,
+          reject: rejectChallenge,
         }
       : null;
 

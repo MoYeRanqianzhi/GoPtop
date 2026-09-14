@@ -35,6 +35,20 @@ impl Session {
         if !self.dedup.admit(&msg.sender, msg.seq, is_dedupable(kind_type)) {
             return fx;
         }
+        // 观战者镜像转发：对手的数据面消息（落子/协商/聊天）经我补发给我名下的观战者
+        // ——观战者与我不一定同源（BC 不可达），与对手也往往无直连。重复送达由
+        // 观战者的 (sender, seq) 去重表兜底，绝不二次应用。
+        let forward_to_specs = self.server_mode
+            && matches!(self.role, Role::Inviter | Role::Invitee)
+            && is_dedupable(kind_type)
+            && !self.spectators.is_empty();
+        if forward_to_specs {
+            for s in &self.spectators {
+                if s.host == self.user_id {
+                    fx.push(Effect::SendServer(serde_json::json!({ "t": "relay", "to": s.id, "payload": msg })));
+                }
+            }
+        }
         match msg.kind {
             MsgKind::SyncRequest => {
                 self.peer_connected = true;

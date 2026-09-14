@@ -109,7 +109,8 @@ impl Session {
                 let size = sanitize_size(pl["size"].as_u64());
                 let name = jstr(pl, "name", from);
                 let game_id = jstr(pl, "gameId", "");
-                self.server_accept_offer(from, &name, &kind_s, size, &game_id)
+                let offer = jstr(pl, "offer", "");
+                self.server_accept_offer(from, &name, &kind_s, size, &game_id, &offer)
             }
             "reject" => {
                 let reason = jstr(pl, "reason", "未说明");
@@ -166,12 +167,13 @@ impl Session {
                 fx.push(Effect::Emit);
                 fx
             }
-            // —— 被踢：断开回主页 ——
+            // —— 被踢：断开回主页（通知在 backHome 之后，不被其清空动作覆盖）——
             "spec-kicked" => {
-                let mut fx = vec![Effect::Notice(Some("你已被移出观战".into()), Some(3600)), Effect::ClosePeers];
                 self.my_host = None;
                 self.spec_can_chat = false;
+                let mut fx = vec![Effect::ClosePeers];
                 fx.extend(self.do_back_home());
+                fx.push(Effect::Notice(Some("你已被移出观战".into()), Some(3600)));
                 fx
             }
             // —— 观战者聊天（经 host 转发进双方聊天区）——
@@ -288,6 +290,7 @@ impl Session {
                 "gameId": self.game_id.clone().unwrap_or_default(),
                 "offer": offer.unwrap_or_default(),
             })));
+            fx.push(Effect::RenamePeer { from: "main".into(), to: from.to_string() });
             self.opponent = Some(from.to_string());
             self.relay_targets.insert(from.to_string());
             self.inviter_main = Some(from.to_string());
@@ -318,7 +321,7 @@ impl Session {
     }
 
     /// 受邀者：收到 offer（join/challenge 流共用）——受理进等待并回 answer。
-    pub(crate) fn server_accept_offer(&mut self, from: &str, from_name: &str, kind: &str, size: SizeT, game_id: &str) -> Vec<Effect> {
+    pub(crate) fn server_accept_offer(&mut self, from: &str, from_name: &str, kind: &str, size: SizeT, game_id: &str, offer: &str) -> Vec<Effect> {
         if self.phase == Phase::Playing {
             return Vec::new();
         }
@@ -339,6 +342,8 @@ impl Session {
             Effect::Notice(Some(format!("接受 {from_name} 的邀请，正在建立直连…")), None),
             Effect::Nav("/p2p".into()),
             Effect::CreatePeer { tag: from.to_string(), inviter: false, spectator: false },
+            // offer 喂给刚建的 PC（transport 生成 answer 后回 RtcReady）。
+            Effect::FeedOffer { tag: from.to_string(), offer: offer.to_string(), encrypted: false },
             Effect::Emit,
         ]);
         fx
@@ -455,7 +460,7 @@ impl Session {
     }
 
     /// 观战者：收到房主 offer——进观战态并回 answer。
-    pub(crate) fn server_accept_spectator_offer(&mut self, from: &str, _offer: &str, game_id: &str) -> Vec<Effect> {
+    pub(crate) fn server_accept_spectator_offer(&mut self, from: &str, offer: &str, game_id: &str) -> Vec<Effect> {
         if self.role != Role::Spectator {
             return Vec::new();
         }
@@ -472,6 +477,7 @@ impl Session {
             fx.push(Effect::Notice(Some("观战模式：只读同步，不可落子".into()), None));
         }
         fx.push(Effect::CreatePeer { tag: from.to_string(), inviter: false, spectator: true });
+        fx.push(Effect::FeedOffer { tag: from.to_string(), offer: offer.to_string(), encrypted: false });
         fx.push(Effect::Emit);
         fx
     }
@@ -493,9 +499,9 @@ impl Session {
             if !me_still && self.my_host.is_some() && self.role == Role::Spectator {
                 self.my_host = None;
                 self.spec_can_chat = false;
-                fx.push(Effect::Notice(Some("你已被移出观战".into()), Some(3600)));
                 fx.push(Effect::ClosePeers);
                 fx.extend(self.do_back_home());
+                fx.push(Effect::Notice(Some("你已被移出观战".into()), Some(3600)));
             }
         }
         // enabled 必须同写：只写展示态会被本端下次名单同步覆盖回去。
@@ -556,6 +562,10 @@ impl Session {
     /// 踢出观战者：自己的直接关连接；对方直连的经 spec-kick 转移处理。
     /// 先发 spec-kicked 通知再移除——移除后 spec-sync 就送不到被踢者了。
     pub fn kick_spectator(&mut self, id: &str) -> Vec<Effect> {
+        self.kick_spectator_why(id, "kick")
+    }
+
+    pub(crate) fn kick_spectator_why(&mut self, id: &str, why: &str) -> Vec<Effect> {
         let Some(target) = self.spectators.iter().find(|s| s.id == id) else {
             return Vec::new();
         };
@@ -570,7 +580,7 @@ impl Session {
             fx.push(self.signal_effect(&host, "spec-kick", serde_json::json!({ "name": self.display_name(), "id": id })));
         }
         self.spectators.retain(|s| s.id != id);
-        fx.extend(self.push_spec_sync());
+        fx.extend(self.push_spec_sync_why(why));
         fx.push(Effect::Emit);
         fx
     }
@@ -588,6 +598,10 @@ impl Session {
 
     /// 关闭观战：本局所有人无法观战，全部踢出。
     pub fn disable_spectate(&mut self) -> Vec<Effect> {
+        self.disable_spectate_why("disable")
+    }
+
+    pub(crate) fn disable_spectate_why(&mut self, why: &str) -> Vec<Effect> {
         self.spectate_enabled = false;
         self.spec_pwd = None;
         let hosts: Vec<(String, String)> = self.spectators.iter().map(|s| (s.id.clone(), s.host.clone())).collect();
@@ -604,7 +618,7 @@ impl Session {
         }
         self.spectators.clear();
         self.spec_url = None;
-        fx.extend(self.push_spec_sync());
+        fx.extend(self.push_spec_sync_why(why));
         fx.push(Effect::Notice(Some("已关闭本局观战".into()), Some(3000)));
         fx.push(Effect::Emit);
         fx
@@ -632,10 +646,15 @@ impl Session {
 
     /// 房间名单变化后向对方对局者与自己的观战者广播。
     pub(crate) fn push_spec_sync(&self) -> Vec<Effect> {
+        self.push_spec_sync_why("")
+    }
+
+    pub(crate) fn push_spec_sync_why(&self, why: &str) -> Vec<Effect> {
         let mut fx = Vec::new();
         let payload = serde_json::json!({
             "list": self.spectators,
             "enabled": self.spectate_enabled,
+            "_why": why,
         });
         if let Some(opp) = self.opponent.as_ref() {
             if self.server_state == "ready" {

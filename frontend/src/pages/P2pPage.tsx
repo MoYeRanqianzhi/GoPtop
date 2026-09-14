@@ -22,10 +22,11 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
     createInvite, acceptInvite, backHome, copyText, handlePlace, serverChallengePeer,
   } = s;
 
-  // 服务器模式观战链接（观战钥匙整局有效；关闭观战后不再展示）
-  const specUrl = serverMode && spectateEnabled && specPwd && (phase === "playing" || phase === "waiting") && role !== "spectator"
+  // 观战链接：Rust 状态机权威生成（服务器模式 spec 链接；无服务器含 specrtc 直连参数）。
+  // 快照无值时回退本地拼接（兼容无服务器流程前的展示）。
+  const specUrl = s.specUrl ?? (serverMode && spectateEnabled && specPwd && (phase === "playing" || phase === "waiting") && role !== "spectator"
     ? specLinkUrl(tabUser, specPwd)
-    : null;
+    : null);
 
   return (
     <>

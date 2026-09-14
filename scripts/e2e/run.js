@@ -102,6 +102,7 @@ async function challengeFromList(c, peerName) {
   const browser = await chromium.launch({
     executablePath: "C:/Users/MoYeR/AppData/Local/ms-playwright/chromium-1228/chrome-win64/chrome.exe",
     headless: true,
+  args: ["--disable-features=WebRtcHideLocalIpsWithMdns", "--enforce-webrtc-ip-permission-check=false"],
   });
 
   const A = await newClient(browser, "http://localhost:5173", "阿甲");
@@ -196,7 +197,12 @@ async function challengeFromList(c, peerName) {
   await new Promise((r) => setTimeout(r, 900));
   check("9j. 观战者看到回退", (await moveCount(C)) === "0");
 
-  // —— 10. 踢出 ——
+  // —— 10. 踢出（观战管理在聊天面板内：先点聊天图标展开） ——
+  await A.page.evaluate(() => {
+    const btn = [...document.querySelectorAll("button")].find((b) => b.querySelector("svg"));
+    if (btn) btn.click();
+  });
+  await new Promise((r) => setTimeout(r, 500));
   await A.page.evaluate(() => {
     const rows = [...document.querySelectorAll(".brutal-card")].filter((d) => d.innerText.includes("观战（"));
     for (const row of rows) {

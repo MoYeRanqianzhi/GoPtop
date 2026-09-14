@@ -117,7 +117,6 @@ impl WasmSession {
             size: u16,
         }
         let cfg: Config = serde_json::from_str(cfg_json).expect("bad config");
-        console_error_panic_hook::set_once();
         let user_id = ensure_user_id();
         let peer_id = fresh_peer_id();
         let avatar = storage_get("goptop:avatar");
@@ -149,6 +148,52 @@ impl WasmSession {
     /// 当前状态快照（UI 渲染契约）。
     pub fn snapshot(&self) -> String {
         self.core.borrow().session.snapshot()
+    }
+
+    /// ICE 调试（E2E/诊断）：各连接的 tag/ICE 状态/本地与远端候选摘要。
+    pub fn ice_debug(&self) -> String {
+        let core = self.core.borrow();
+        let list: Vec<serde_json::Value> = core
+            .peers
+            .iter()
+            .map(|(tag, p)| {
+                let cands = |sdp: Option<web_sys::RtcSessionDescription>| -> Vec<String> {
+                    sdp.map(|d| {
+                        d.sdp()
+                            .lines()
+                            .filter(|l| l.starts_with("a=candidate"))
+                            .map(|l| l.split_whitespace().skip(4).take(2).collect::<Vec<_>>().join("@"))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+                };
+                let ice = match p.pc.ice_connection_state() {
+                    web_sys::RtcIceConnectionState::New => "new",
+                    web_sys::RtcIceConnectionState::Checking => "checking",
+                    web_sys::RtcIceConnectionState::Connected => "connected",
+                    web_sys::RtcIceConnectionState::Completed => "completed",
+                    web_sys::RtcIceConnectionState::Failed => "failed",
+                    web_sys::RtcIceConnectionState::Disconnected => "disconnected",
+                    web_sys::RtcIceConnectionState::Closed => "closed",
+                    _ => "unknown",
+                };
+                let dc = p.dc.borrow().as_ref().map(|c| match c.ready_state() {
+                    web_sys::RtcDataChannelState::Connecting => "connecting",
+                    web_sys::RtcDataChannelState::Open => "open",
+                    web_sys::RtcDataChannelState::Closing => "closing",
+                    web_sys::RtcDataChannelState::Closed => "closed",
+                    _ => "unknown",
+                });
+                serde_json::json!({
+                    "tag": tag,
+                    "ice": ice,
+                    "local": cands(p.pc.local_description()),
+                    "remote": cands(p.pc.remote_description()),
+                    "dcState": dc,
+                })
+            })
+            .collect();
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
     }
 
     /// UI 命令（方法集 → UiCommand 入队 → 泵一次）。
@@ -258,6 +303,38 @@ impl WasmSession {
     }
     pub fn back_home(&self) {
         self.cmd(UiCommand::BackHome);
+    }
+
+    /// 链接解析（粘贴弹窗分派用；复用 goptop-net links 解析，跨端一致）。
+    /// 返回 JSON：{ok:true, intent:{mode:"user"|..., ...}} 或 {ok:false}。
+    pub fn parse_link(&self, text: String) -> String {
+        let _ = self;
+        match goptop_net::links::parse_pasted_link(&text) {
+            Some(it) => {
+                let intent = match it {
+                    goptop_net::links::UrlIntent::User { user_id, pwd, kind, size, rtc, spec } => serde_json::json!({
+                        "mode": "user", "userId": user_id, "pwd": pwd, "kind": kind, "size": size, "rtc": rtc, "spec": spec,
+                    }),
+                    goptop_net::links::UrlIntent::Watch { game_id } => serde_json::json!({ "mode": "watch", "gameId": game_id }),
+                    goptop_net::links::UrlIntent::Local => serde_json::json!({ "mode": "local" }),
+                    goptop_net::links::UrlIntent::P2p => serde_json::json!({ "mode": "p2p" }),
+                    goptop_net::links::UrlIntent::Users => serde_json::json!({ "mode": "users" }),
+                    goptop_net::links::UrlIntent::Settings => serde_json::json!({ "mode": "settings" }),
+                    goptop_net::links::UrlIntent::Menu => serde_json::json!({ "mode": "menu" }),
+                };
+                serde_json::json!({ "ok": true, "intent": intent }).to_string()
+            }
+            None => serde_json::json!({ "ok": false }).to_string(),
+        }
+    }
+
+    /// 回执解析（粘贴弹窗用）。返回 {ok:true, answer:{...}} 或 {ok:false}。
+    pub fn parse_answer(&self, text: String) -> String {
+        let _ = self;
+        match goptop_net::links::parse_pasted_answer(&text) {
+            Some(a) => serde_json::json!({ "ok": true, "answer": a }).to_string(),
+            None => serde_json::json!({ "ok": false }).to_string(),
+        }
     }
 
     /// 事件泵：处理 IO 回调入队的全部事件（JS 以 50ms 定时调用）。

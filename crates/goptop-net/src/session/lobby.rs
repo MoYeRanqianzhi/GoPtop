@@ -439,6 +439,7 @@ pub(crate) fn on_peer_state(s: &mut Session, tag: &str, opened: bool, gone: bool
             s.conn_lost = false;
             // 等待中的受邀者：跨设备时 presence 不可达，直连一通直接进对局。
             let should_enter = s.role == Role::Invitee && s.phase == Phase::Waiting && p.player;
+            let _ = should_enter;
             let mut extra: Vec<Effect> = Vec::new();
             if should_enter {
                 extra.extend(enter_playing_as_invitee(s));
@@ -514,19 +515,21 @@ pub(crate) fn on_rtc_ready(
     }
     let offer_plain = offer_plain.clone().or_else(|| offer_enc.clone());
     let enc = offer_enc.clone();
+    // 观战受理流（pending_specs 优先匹配；服务器模式 tag=对端 ID，无服务器为 spec- 前缀）。
+    if let Some(pos) = s.pending_specs.iter().position(|(t, _)| t == tag) {
+        // 服务器模式受理流：加入名册 + 发 spec-offer + 广播名单。
+        let (_, sname) = s.pending_specs.remove(pos);
+        s.spectators.push(Spectator { id: tag.to_string(), name: sname, host: s.user_id.clone(), muted: false });
+        fx.push(s.signal_effect(tag, "spec-offer", serde_json::json!({ "gameId": s.game_id.clone().unwrap_or_default(), "offer": offer_plain })));
+        fx.extend(s.push_spec_sync());
+        fx.push(Effect::Emit);
+        return fx;
+    }
     // 观战方向（tag 以 spec- 开头）。
     if tag.starts_with("spec-") {
-        if let Some(pos) = s.pending_specs.iter().position(|(t, _)| t == tag) {
-            // 服务器模式受理流：加入名册 + 发 spec-offer + 广播名单。
-            let (_, sname) = s.pending_specs.remove(pos);
-            s.spectators.push(Spectator { id: tag.to_string(), name: sname, host: s.user_id.clone(), muted: false });
-            fx.push(s.signal_effect(tag, "spec-offer", serde_json::json!({ "gameId": s.game_id.clone().unwrap_or_default(), "offer": offer_plain })));
-            fx.extend(s.push_spec_sync());
-        } else {
-            // 无服务器预生成：编进 spec 链接（自动换新，拿旧链接的观众会失败并要新的）。
-            let Some(enc2) = enc else { return fx };
-            s.refresh_spec_url_with(ctx, tag, &enc2);
-        }
+        // 无服务器预生成：编进 spec 链接（自动换新，拿旧链接的观众会失败并要新的）。
+        let Some(enc2) = enc else { return fx };
+        s.refresh_spec_url_with(ctx, tag, &enc2);
         fx.push(Effect::Emit);
         return fx;
     }
@@ -664,7 +667,10 @@ pub(crate) fn accept_spec_receipt(s: &mut Session, ctx: &ReduceCtx, ans: &Answer
         return vec![Effect::Notice(Some("本局观战直连未就绪：请重新生成观战链接后再试".into()), Some(4200))];
     };
     slot.tag = live.clone();
-    let mut fx = vec![Effect::AcceptAnswer { tag: live, answer: ans.rtc_ans.clone(), encrypted: true }];
+    let mut fx = vec![
+        Effect::RenamePeer { from: "spec-pending".into(), to: live.clone() },
+        Effect::AcceptAnswer { tag: live, answer: ans.rtc_ans.clone(), encrypted: true },
+    ];
     // 受理即预生成下一份观战 offer（链接自动换新）。
     fx.push(Effect::CreatePeer { tag: "spec-pending".into(), inviter: true, spectator: true });
     fx.push(Effect::Notice(Some("观战回执已受理，直连建立中…".into()), None));

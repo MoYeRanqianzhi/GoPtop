@@ -16,7 +16,8 @@ import {
   saveServerSelection, saveServers,
 } from "../net/servers";
 import type { ServerEntry } from "../net/servers";
-import type { PeerInfo } from "../net/presence";
+/** 名册用户（与 goptop-net session::PeerInfo 快照字段一致；presence.ts 已迁 Rust）。 */
+export type PeerInfo = { id: string; name: string; status: "idle" | "waiting" | "in-game"; gameId: string | null; ts: number };
 
 /* ---------------- 头像（圆形，本地存储，P2P 交换） ---------------- */
 

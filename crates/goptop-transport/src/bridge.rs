@@ -151,6 +151,13 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
                 }
             }
         }
+        Effect::RenamePeer { from, to } => {
+            let mut core = core.borrow_mut();
+            if let Some(pos) = core.peers.iter().position(|(t, _)| *t == from) {
+                let entry = core.peers.remove(pos);
+                core.peers.push((to, entry.1));
+            }
+        }
         Effect::AcceptAnswer { tag, answer, encrypted } => {
             let (sdp, typ, _) = decode_sdp(&answer, encrypted, core);
             if let (Some(sdp), Some(typ)) = (sdp, typ) {

@@ -532,6 +532,9 @@ pub enum Effect {
     CreatePeer { tag: String, inviter: bool, spectator: bool },
     /// 受邀方向：把远端 offer 喂给已有连接（明文=服务器模式，加密=无服务器链接）。
     FeedOffer { tag: String, offer: String, encrypted: bool },
+    /// 连接改名（join 受理后 main → 对端 ID；观战受理后 spec-pending → spec-live-N），
+    /// transport 侧句柄键同步。
+    RenamePeer { from: String, to: String },
     /// 邀请方向：把远端 answer 喂给已有连接（明文/加密同上）。
     AcceptAnswer { tag: String, answer: String, encrypted: bool },
     /// 关闭全部 RTC 连接。

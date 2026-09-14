@@ -58,7 +58,7 @@ impl RtcPeer {
             closures.push(cb);
         }
 
-        // ondatachannel：受邀方向收到对端 DC。
+        // ondatachannel 兜底（negotiated 模式下不会触发，保留以防配置回退）。
         {
             let core2 = core.clone();
             let tag2 = tag.clone();
@@ -73,17 +73,21 @@ impl RtcPeer {
             closures.push(cb);
         }
 
+        // 双端 negotiated DC（id=0）：跳过 in-band 协商与 ondatachannel 事件依赖——
+        // 该事件在部分时序下会丢失（B 端 SRD 后派发竞争），negotiated 是经典可靠解。
+        {
+            let mut init = web_sys::RtcDataChannelInit::new();
+            init.id(0).negotiated(true);
+            let ch = pc.create_data_channel_with_data_channel_dict("goptop", &init);
+            attach_channel_handlers(core, &tag, &ch);
+            *peer.dc.borrow_mut() = Some(ch);
+        }
+
         // 全量 gathering 模型：候选已含在 SDP 里，onicecandidate 仅等待 null（完成信号）。
         {
             let cb = Closure::<dyn FnMut(JsValue)>::new(|_ev: JsValue| {});
             pc.set_onicecandidate(Some(cb.as_ref().unchecked_ref()));
             closures.push(cb);
-        }
-
-        if inviter {
-            let ch = pc.create_data_channel("goptop");
-            attach_channel_handlers(core, &tag, &ch);
-            *peer.dc.borrow_mut() = Some(ch);
         }
 
         peer._closures.borrow_mut().extend(closures);
@@ -216,6 +220,11 @@ fn attach_channel_handlers(core: &SharedCore, tag: &str, ch: &web_sys::RtcDataCh
         });
         ch.set_onmessage(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+    }
+    // 竞态防御：本机/低延迟网络下 DC 可能在 onopen 注册完成前已 open（事件错过）。
+    // 挂接完毕后按当前状态补发 open 事件（幂等：状态机 PeerSlot.opened 记账）。
+    if ch.ready_state() == web_sys::RtcDataChannelState::Open {
+        queue_event(Event::PeerState { tag: tag.to_string(), opened: true, closed: false, failed: false });
     }
 }
 

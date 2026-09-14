@@ -32,7 +32,7 @@ features = [
     "BroadcastChannel",
     "RtcPeerConnection", "RtcPeerConnectionIceEvent", "RtcIceCandidateInit",
     "RtcSessionDescription", "RtcSessionDescriptionInit", "RtcSdpType",
-    "RtcDataChannel", "RtcDataChannelEvent", "RtcDataChannelState",
+    "RtcDataChannel", "RtcDataChannelEvent", "RtcDataChannelState", "RtcDataChannelInit",
     "RtcIceGatheringState", "RtcIceConnectionState", "RtcConfiguration",
     "RtcIceServer", "RtcOfferOptions", "RtcAnswerOptions",
     "EventTarget", "Event",
