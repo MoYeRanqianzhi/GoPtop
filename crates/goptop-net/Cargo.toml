@@ -23,3 +23,5 @@ thiserror = { workspace = true }
 # deflate-raw 压缩（G1 信令编码）：rust_backend = miniz_oxide 纯 Rust，wasm 可用。
 # 与浏览器 CompressionStream("deflate-raw") 字节级互通（两端都是标准 raw deflate 流）。
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# 百分号编码原语（链接模型；url crate 因 RFC 归一化 %2F 不合 WHATWG 行为，弃用）。
+percent-encoding = "2"

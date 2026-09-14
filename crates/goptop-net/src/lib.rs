@@ -19,6 +19,10 @@
 pub mod codec;
 pub mod dedup;
 pub mod identity;
+pub mod links;
 pub mod protocol;
+pub mod session;
 
+pub use links::{AnswerIntent, UrlIntent};
 pub use protocol::{Color, CoordT, GameKindT, GameMsg, MoveT, MsgKind, SizeT};
+pub use session::{reduce, Effect, Event, ReduceCtx, Session, UiCommand};
