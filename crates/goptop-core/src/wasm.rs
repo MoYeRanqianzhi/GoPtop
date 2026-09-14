@@ -71,25 +71,47 @@ fn to_move_json(state: &GameState) -> String {
     format!("\"{}\"", stone_to_str(state.to_move))
 }
 
-/// ok 回复公共字段：棋盘（权威）、行棋方、胜者、本手提子。
+fn ko_point_json(state: &GameState) -> String {
+    match state.ko_point {
+        Some(c) => format!("{{\"x\":{},\"y\":{}}}", c.x, c.y),
+        None => "null".to_string(),
+    }
+}
+
+/// ok 回复公共字段：棋盘（权威）、行棋方、胜者、本手提子、劫点、计分态。
 fn ok_reply(state: &GameState, captured: &[Coord]) -> String {
     let caps: Vec<String> = captured
         .iter()
         .map(|c| format!("{{\"x\":{},\"y\":{}}}", c.x, c.y))
         .collect();
     format!(
-        "{{\"ok\":true,\"board\":{},\"captured\":[{}],\"toMove\":{},\"winner\":{}}}",
+        "{{\"ok\":true,\"board\":{},\"captured\":[{}],\"toMove\":{},\"winner\":{},\"koPoint\":{},\"scoring\":{}}}",
         board_json(state),
         caps.join(","),
         to_move_json(state),
         winner_json(state),
+        ko_point_json(state),
+        state.scoring,
     )
 }
 
 fn err_reply(err: &str) -> String {
-    // error 字符串是稳定契约（occupied/out_of_bounds/suicide/game_over/no_move），
+    // error 字符串是稳定契约（occupied/out_of_bounds/suicide/ko/scoring/game_over/no_move），
     // 前端据此决定静默忽略还是提示。
     format!("{{\"ok\":false,\"error\":\"{err}\"}}")
+}
+
+/// RuleError → 稳定错误码字符串（wasm 边界与 TS 契约）。
+fn rule_error_code(e: &crate::game::RuleError) -> &'static str {
+    match e {
+        crate::game::RuleError::OutOfBounds => "out_of_bounds",
+        crate::game::RuleError::Occupied => "occupied",
+        crate::game::RuleError::Suicide => "suicide",
+        crate::game::RuleError::Ko => "ko",
+        crate::game::RuleError::Scoring => "scoring",
+        crate::game::RuleError::GameOver => "game_over",
+        crate::game::RuleError::Other(_) => "other",
+    }
 }
 
 /// 行为化绑定：一个实例持一局 `GameState`。前端每个对局页面/本地页各持一个。
@@ -121,28 +143,44 @@ impl WasmGame {
         self.state.kind.size() as u8
     }
 
-    /// 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负；
-    /// 非法（占据/越界/自杀/终局）返回 ok:false，内部状态不变。
-    /// 越界/占据/终局判定都在 GameState::try_play 内。
+    /// 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负/劫点/计分态；
+    /// 非法（占据/越界/自杀/劫/计分态/终局）返回 ok:false，内部状态不变。
+    /// 越界/占据/劫/终局判定都在 GameState::try_play 内。
     pub fn try_place(&mut self, x: u8, y: u8) -> String {
         match self.state.try_play(Move::Place(Coord::new(x, y))) {
             Ok(effect) => ok_reply(&self.state, &effect.captured),
-            Err(e) => err_reply(match e {
-                crate::game::RuleError::OutOfBounds => "out_of_bounds",
-                crate::game::RuleError::Occupied => "occupied",
-                crate::game::RuleError::Suicide => "suicide",
-                crate::game::RuleError::GameOver => "game_over",
-                crate::game::RuleError::Other(_) => "other",
-            }),
+            Err(e) => err_reply(rule_error_code(&e)),
         }
     }
 
     /// 停一手：引擎翻转行棋方并把 Pass 记入历史，保证后续 undo/adopt 重放
     /// 与真实序列一致（收到 Move{Pass} 或未来本地停一手都走这里）。
+    /// 围棋连续双 Pass 自动进入计分态（scoring:true 随回复返回）。
     pub fn pass(&mut self) -> String {
         match self.state.try_play(Move::Pass) {
             Ok(effect) => ok_reply(&self.state, &effect.captured),
-            Err(_) => err_reply("game_over"),
+            Err(e) => err_reply(rule_error_code(&e)),
+        }
+    }
+
+    /// 终局区域计分（中国规则数子法）：把 `dead_json`（`[{"x":..,"y":..}]`）视为
+    /// 死子移除后计分。返回 ok/black/white（含贴目 7.5）/黑地/白地/死子数/winner。
+    /// scoring 态之外调用也允许（UI 可随时预览形势），死子坐标非法返回 ok:false。
+    pub fn score(&self, dead_json: &str) -> String {
+        let dead: Vec<Coord> = match serde_json::from_str(dead_json) {
+            Ok(v) => v,
+            Err(_) => return err_reply("bad_dead"),
+        };
+        let result = match &self.state.board {
+            BoardVariant::B15(b) => crate::go::score_area(b, &dead, crate::go::KOMI, self.state.kind.size()),
+            BoardVariant::B19(b) => crate::go::score_area(b, &dead, crate::go::KOMI, self.state.kind.size()),
+        };
+        match result {
+            Ok(s) => format!(
+                "{{\"ok\":true,\"black\":{},\"white\":{},\"blackTerritory\":{},\"whiteTerritory\":{},\"deadRemoved\":{},\"winner\":\"{}\"}}",
+                s.black, s.white, s.black_territory, s.white_territory, s.dead_removed, stone_to_str(s.winner),
+            ),
+            Err(e) => err_reply(rule_error_code(&e)),
         }
     }
 
@@ -172,9 +210,11 @@ impl WasmGame {
         self.state.reset();
     }
 
-    /// 采纳全量快照（SyncState）：棋盘/行棋方/胜者直接采用快照（不经规则——
-    /// 快照可能来自任何合法序列），历史按坐标/"pass" 序列重建（黑白交替、
-    /// 黑先，Pass 原样保留），供后续 undo_last 重放。TS 侧只在收到快照时调用。
+    /// 采纳全量快照（SyncState）：按 `history`（坐标/"pass" 序列）从新局全量重放，
+    /// 重放终态必须与快照的棋盘/行棋方一致（胜者允许快照多出认输/五连胜者而重放为
+    /// None 的放宽），一致则采**重放结果**——captures/ko_point/scoring 全部正确；
+    /// 重放失败或与快照矛盾（远端脏数据/伪造）整体拒绝返回 false，绝不带病采纳。
+    /// TS 侧只在收到快照时调用。
     pub fn adopt(&mut self, board_json: &str, to_move: &str, winner: &str, history_json: &str) -> bool {
         let rows: Vec<Vec<String>> = match serde_json::from_str(board_json) {
             Ok(v) => v,
@@ -224,12 +264,28 @@ impl WasmGame {
                 }
             }
         }
-        self.state.board = variant;
-        self.state.to_move = to_move;
-        self.state.winner = winner;
-        self.state.captures = (0, 0);
-        // 历史重建：落子按黑白交替推定，Pass 原样保留（#5 P1-2）。
-        self.state.history = moves;
+
+        // 全量重放：从同种类新局重演历史，得到 captures/ko_point/scoring 的权威值。
+        let kind = self.state.kind.clone();
+        let mut fresh = GameState::new(kind);
+        for mv in &moves {
+            if fresh.try_play(mv.clone()).is_err() {
+                return false;
+            }
+        }
+        // 快照与重放终态一致性：棋盘与行棋方必须相等；胜者允许「重放 None、
+        // 快照 Some」的放宽（认输不进 history、围棋五连胜者由重放产生则必相等）。
+        if fresh.board != variant
+            || fresh.to_move != to_move
+            || (fresh.winner != winner && fresh.winner.is_some())
+        {
+            return false;
+        }
+        fresh.board = variant;
+        fresh.to_move = to_move;
+        fresh.winner = winner;
+        fresh.history = moves;
+        self.state = fresh;
         true
     }
 }
@@ -325,9 +381,9 @@ mod tests {
     #[test]
     fn adopt_then_undo_replays_rebuilt_history() {
         let mut g = go9();
-        // 快照：黑 (4,4)、白 (5,5)，轮白；历史两条同序。
-        let board = board_with(&[(4, 4), (5, 5)], &[], 9);
-        assert!(g.adopt(&board, "white", "null", r#"[{"x":4,"y":4},{"x":5,"y":5}]"#));
+        // 快照：黑 (4,4)、白 (5,5)，两手后轮黑；历史两条同序。
+        let board = board_with(&[(4, 4)], &[(5, 5)], 9);
+        assert!(g.adopt(&board, "black", "null", r#"[{"x":4,"y":4},{"x":5,"y":5}]"#));
         let after = parse(&g.undo_last());
         assert_eq!(at(&after, 4, 4), "black");
         assert_eq!(at(&after, 5, 5), "empty");
@@ -348,8 +404,8 @@ mod tests {
         assert!(!g.adopt(&ragged, "black", "null", "[]"));
     }
 
-    /// 6) adopt 字段白名单：toMove 不接受 "empty"；winner 接受 "null"（→None）、
-    /// 拒绝白名单外颜色。
+    /// 6) adopt 字段白名单：toMove 不接受 "empty"；winner 接受 "null"（→None）与
+    /// 合法颜色，拒绝白名单外值。
     #[test]
     fn adopt_rejects_invalid_to_move_and_winner() {
         let mut g = go9();
@@ -357,7 +413,8 @@ mod tests {
         assert!(!g.adopt(&board, "empty", "null", "[]"));
         assert!(g.adopt(&board, "black", "null", "[]"));
         assert!(!g.adopt(&board, "black", "red", "[]"));
-        assert!(g.adopt(&board, "white", "black", "[]"));
+        // winner 接受合法颜色（空盘黑先与 winner=black 并存不校验语义，只校验白名单）。
+        assert!(g.adopt(&board, "black", "black", "[]"));
     }
 
     /// 7) adopt 历史校验：越界坐标拒绝；非 "pass" 字符串拒绝；
@@ -433,5 +490,80 @@ mod tests {
         let p3 = parse(&gm.pass());
         assert_eq!(p3["ok"], json!(false));
         assert_eq!(p3["error"], "game_over");
+    }
+
+    /// 风车劫形的布子序列（黑白交替、黑先）：返回 (实例, 最后一手=提劫的回复)。
+    /// 黑固定 (0,2),(2,2),(1,3) 围白 Q=(1,2)；白固定 (0,1),(2,1),(1,0) 围黑 P=(1,1)；
+    /// 白 Q 入住（气=(1,1) 一口），黑 P 提 Q 成劫。
+    fn ko_game() -> (WasmGame, Value) {
+        let mut g = go9();
+        let seq: [(u8, u8); 13] = [
+            (0, 2), (0, 1), (2, 2), (2, 1), (1, 3), (1, 0),
+            (7, 7), (7, 8), (8, 7), (8, 8), (6, 7), (1, 2), (1, 1),
+        ];
+        let mut last = None;
+        for (x, y) in seq {
+            last = Some(parse(&g.try_place(x, y)));
+        }
+        (g, last.unwrap())
+    }
+
+    /// 11) 劫：提劫回复带 koPoint；立即回提 → error "ko"；非劫手清 koPoint=null。
+    #[test]
+    fn ko_contract_in_reply() {
+        let (mut g, cap) = ko_game();
+        assert_eq!(cap["captured"], json!([{"x":1,"y":2}]));
+        assert_eq!(cap["koPoint"], json!({"x":1,"y":2}));
+        assert_eq!(cap["toMove"], "white");
+        // 立即回提被拒，稳定错误码 ko。
+        assert_eq!(parse(&g.try_place(1, 2))["error"], "ko");
+        // 白改下他处 → 劫点清空。
+        let other = parse(&g.try_place(6, 8));
+        assert_eq!(other["koPoint"], json!(null));
+        assert!(other["ok"].as_bool().unwrap());
+    }
+
+    /// 12) 双 Pass → scoring:true；计分态落子/pass → error "scoring"；
+    /// score() 契约（无白子时全盘空域只接触黑 → 黑地 79）。
+    #[test]
+    fn double_pass_scoring_contract() {
+        let mut g = go9();
+        assert!(parse(&g.try_place(4, 4))["ok"].as_bool().unwrap());
+        let p1 = parse(&g.pass());
+        assert_eq!(p1["scoring"], json!(false)); // 单 Pass 不终局
+        let p2 = parse(&g.pass());
+        assert_eq!(p2["scoring"], json!(true)); // 双 Pass 终局
+        assert_eq!(parse(&g.try_place(5, 5))["error"], "scoring");
+        assert_eq!(parse(&g.pass())["error"], "scoring");
+        // 计分：黑 1 子 + 80 地（81-1，无白子全归黑）= 81，白 7.5，黑胜。
+        // 得分序列化为裸数字（81/7.5），断言按 f64 数值比较避免整浮 Number 类型差异。
+        let s = parse(&g.score("[]"));
+        assert_eq!(s["ok"], json!(true));
+        assert_eq!(s["black"].as_f64().unwrap(), 81.0);
+        assert_eq!(s["white"].as_f64().unwrap(), 7.5);
+        assert_eq!(s["winner"], "black");
+        // 死子参数非法 → 稳定错误码。
+        assert_eq!(parse(&g.score(r#"[{"x":0,"y":0}]"#))["error"], "other");
+        assert_eq!(parse(&g.score(r#"[{"x":9,"y":0}]"#))["error"], "out_of_bounds");
+    }
+
+    /// 13) adopt 历史含双 Pass：重放重建 scoring=true。
+    #[test]
+    fn adopt_rebuilds_scoring_from_history() {
+        let mut g = go9();
+        // 历史：黑 (4,4)、白 pass、黑 pass → 双 Pass 终局，轮白。
+        let board = board_with(&[(4, 4)], &[], 9);
+        assert!(g.adopt(&board, "white", "null", r#"[{"x":4,"y":4},"pass","pass"]"#));
+        // scoring 态下落子拒绝（证明重放恢复了 scoring）。
+        assert_eq!(parse(&g.try_place(5, 5))["error"], "scoring");
+    }
+
+    /// 14) adopt 历史与快照矛盾 → 整体拒绝（重放终态与快照棋盘不一致）。
+    #[test]
+    fn adopt_rejects_history_snapshot_mismatch() {
+        let mut g = go9();
+        // 快照棋盘没有 (4,4) 的黑子，历史却说黑下过 (4,4)。
+        let board = empty_board(9);
+        assert!(!g.adopt(&board, "white", "null", r#"[{"x":4,"y":4}]"#));
     }
 }

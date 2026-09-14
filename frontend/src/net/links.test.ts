@@ -271,7 +271,7 @@ describe("链接构造 → 解析往返", () => {
     for (const id of ["u-a b/c?", "u-中文", "u-100%安全", "u-a&b=c"]) {
       const url = inviteToUrl(id, "p1w2e3", "gomoku", 15);
       expect(url).not.toContain(id); // 确已编码，未裸拼进 URL
-      expect(parsePastedLink(url)?.userId).toBe(id);
+      expect(parsePastedLink(url)).toMatchObject({ mode: "user", userId: id });
     }
   });
 });

@@ -21,9 +21,11 @@ export class WasmGame {
         wasm.__wbg_wasmgame_free(ptr, 0);
     }
     /**
-     * 采纳全量快照（SyncState）：棋盘/行棋方/胜者直接采用快照（不经规则——
-     * 快照可能来自任何合法序列），历史按坐标/"pass" 序列重建（黑白交替、
-     * 黑先，Pass 原样保留），供后续 undo_last 重放。TS 侧只在收到快照时调用。
+     * 采纳全量快照（SyncState）：按 `history`（坐标/"pass" 序列）从新局全量重放，
+     * 重放终态必须与快照的棋盘/行棋方一致（胜者允许快照多出认输/五连胜者而重放为
+     * None 的放宽），一致则采**重放结果**——captures/ko_point/scoring 全部正确；
+     * 重放失败或与快照矛盾（远端脏数据/伪造）整体拒绝返回 false，绝不带病采纳。
+     * TS 侧只在收到快照时调用。
      * @param {string} board_json
      * @param {string} to_move
      * @param {string} winner
@@ -67,6 +69,7 @@ export class WasmGame {
     /**
      * 停一手：引擎翻转行棋方并把 Pass 记入历史，保证后续 undo/adopt 重放
      * 与真实序列一致（收到 Move{Pass} 或未来本地停一手都走这里）。
+     * 围棋连续双 Pass 自动进入计分态（scoring:true 随回复返回）。
      * @returns {string}
      */
     pass() {
@@ -92,9 +95,34 @@ export class WasmGame {
         wasm.wasmgame_reset(this.__wbg_ptr);
     }
     /**
-     * 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负；
-     * 非法（占据/越界/自杀/终局）返回 ok:false，内部状态不变。
-     * 越界/占据/终局判定都在 GameState::try_play 内。
+     * 终局区域计分（中国规则数子法）：把 `dead_json`（`[{"x":..,"y":..}]`）视为
+     * 死子移除后计分。返回 ok/black/white（含贴目 7.5）/黑地/白地/死子数/winner。
+     * scoring 态之外调用也允许（UI 可随时预览形势），死子坐标非法返回 ok:false。
+     * @param {string} dead_json
+     * @returns {string}
+     */
+    score(dead_json) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(dead_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.wasmgame_score(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred2_0 = r0;
+            deferred2_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export3(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负/劫点/计分态；
+     * 非法（占据/越界/自杀/劫/计分态/终局）返回 ok:false，内部状态不变。
+     * 越界/占据/劫/终局判定都在 GameState::try_play 内。
      * @param {number} x
      * @param {number} y
      * @returns {string}

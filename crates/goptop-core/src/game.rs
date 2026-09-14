@@ -55,6 +55,12 @@ pub enum RuleError {
     Occupied,
     #[error("suicide move not allowed")]
     Suicide,
+    /// 简单劫：立即回提造成全局同形（围棋）。
+    #[error("ko: immediate recapture forbidden")]
+    Ko,
+    /// 对局已进入终局计分阶段（双 Pass 后），不再接受落子/停一手。
+    #[error("game is in scoring phase")]
+    Scoring,
     #[error("game already over")]
     GameOver,
     #[error("{0}")]
@@ -83,6 +89,11 @@ pub struct GameState {
     pub history: Vec<Move>,
     /// 提子数 (黑, 白) — 围棋统计，五子棋恒为 (0,0)。
     pub captures: (u32, u32),
+    /// 当前劫点（围棋简单劫）：对手不得立即在此回提。
+    /// 不单独存档也可由 history 全量重放恢复，随状态携带便于直接查询。
+    pub ko_point: Option<Coord>,
+    /// 终局计分阶段（围棋连续双 Pass 后进入）：只允许死子标记与计分，不再接受落子。
+    pub scoring: bool,
     /// 胜者（`None` 表示进行中）。
     pub winner: Option<Stone>,
 }
@@ -116,6 +127,8 @@ impl GameState {
             to_move: Stone::Black,
             history: Vec::new(),
             captures: (0, 0),
+            ko_point: None,
+            scoring: false,
             winner: None,
         }
     }
@@ -124,6 +137,10 @@ impl GameState {
     pub fn try_play(&mut self, mv: Move) -> Result<PlayEffect, RuleError> {
         if self.winner.is_some() {
             return Err(RuleError::GameOver);
+        }
+        if self.scoring {
+            // 终局计分阶段：落子/停一手/认输都不再接受（悔棋可退出计分态，走 undo 重放）。
+            return Err(RuleError::Scoring);
         }
 
         match mv.clone() {
@@ -140,6 +157,13 @@ impl GameState {
             Move::Pass => {
                 self.history.push(mv);
                 self.to_move = self.to_move.opponent();
+                // 围棋连续双 Pass → 终局计分。倒数第二手也是 Pass 才构成双 Pass
+                //（倒数第一手是刚推入的本手）。五子棋 Pass 只翻手（UI 不暴露）。
+                if matches!(self.kind, GameKind::Go { .. })
+                    && matches!(self.history.iter().rev().nth(1), Some(Move::Pass))
+                {
+                    self.scoring = true;
+                }
                 return Ok(PlayEffect {
                     captured: Vec::new(),
                     winner: None,
@@ -192,28 +216,33 @@ impl GameState {
 
     fn try_place_go(&mut self, coord: Coord) -> Result<PlayEffect, RuleError> {
         let stone = self.to_move;
+        let ko_point = self.ko_point;
+        let logical = self.kind.size();
 
-        // 按围棋规则落子与提子；底层 `try_place` 已处理自杀回滚，
+        // 按围棋规则落子与提子；底层 `try_place` 已处理劫检查/自杀回滚，
         // 且直接返回结构化 RuleError（审查 C4：不再做字符串匹配分类）
-        let captured = match &mut self.board {
-            BoardVariant::B15(b) => crate::go::try_place(b, coord, stone),
-            BoardVariant::B19(b) => crate::go::try_place(b, coord, stone),
+        let outcome = match &mut self.board {
+            BoardVariant::B15(b) => crate::go::try_place(b, coord, stone, ko_point, logical),
+            BoardVariant::B19(b) => crate::go::try_place(b, coord, stone, ko_point, logical),
         }?;
 
         // 更新提子统计：己方提掉的是对手的棋子。
-        let n = captured.len() as u32;
+        let n = outcome.captured.len() as u32;
         if stone == Stone::Black {
             self.captures.0 += n;
         } else {
             self.captures.1 += n;
         }
 
+        // 劫点随每手更新：非劫形态清空，构成劫则记录（undo 全量重放会自然恢复）。
+        self.ko_point = outcome.new_ko;
+
         self.history.push(Move::Place(coord));
         self.to_move = stone.opponent();
 
-        // 围棋的胜负不在落子时判定（需终局目数），此处 winner 保持 None。
+        // 围棋的胜负不在落子时判定（双 Pass 终局后区域计分），此处 winner 保持 None。
         Ok(PlayEffect {
-            captured,
+            captured: outcome.captured,
             winner: None,
         })
     }
@@ -333,5 +362,80 @@ mod tests {
         assert_eq!(err, RuleError::Suicide);
         // 轮手未变，仍为黑。
         assert_eq!(s.to_move, Stone::Black);
+    }
+
+    /// 劫争全流程：黑提子成劫 → 白立即回提被拒（Ko）→ 白他处落子后劫点清空
+    /// → 白隔一手回提成功且再次成劫。
+    #[test]
+    fn go_ko_forbids_immediate_recapture() {
+        let mut s = GameState::new(GameKind::Go { size: 9 });
+        // 黑白交错「风车」劫形：黑固定 (0,2),(2,2),(1,3)（白 Q=(1,2) 的三邻）；
+        // 白固定 (0,1),(2,1),(1,0)（黑 P=(1,1) 的三邻）；黑外子凑轮手。
+        // 白 Q 入住后仅一气 (1,1)，黑填 P 提 Q 成劫；P 单子一气。
+        let seq: [(u8, u8); 13] = [
+            (0, 2), // 1  B
+            (0, 1), // 2  W
+            (2, 2), // 3  B
+            (2, 1), // 4  W
+            (1, 3), // 5  B
+            (1, 0), // 6  W
+            (7, 7), // 7  B 外子
+            (7, 8), // 8  W 外子
+            (8, 7), // 9  B 外子
+            (8, 8), // 10 W 外子
+            (6, 7), // 11 B 外子
+            (1, 2), // 12 W Q 入住：气=(1,1) 一口（合法非自杀）
+            (1, 1), // 13 B P 填入：提白 Q=(1,2)，P 单子一气 → 成劫
+        ];
+        for (x, y) in seq {
+            assert!(s.try_play(Move::Place(Coord::new(x, y))).is_ok(), "({x},{y})");
+        }
+        // 构成劫：劫点 = 被提子位置 (1,2)，轮白。
+        assert_eq!(s.ko_point, Some(Coord::new(1, 2)));
+        assert_eq!(s.to_move, Stone::White);
+        // 白立即回提 (1,1)：黑 P 仅一气 (1,2)，正常提子成立但正是劫点 → 拒。
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(1, 2))),
+            Err(RuleError::Ko)
+        );
+        // 白改下他处，劫点清空。
+        assert!(s.try_play(Move::Place(Coord::new(6, 8))).is_ok());
+        assert_eq!(s.ko_point, None);
+        // 轮黑随手一手后，白回提成功：白 (1,2) 提黑 P=(1,1)，再成劫（劫点换为 (1,1)）。
+        assert!(s.try_play(Move::Place(Coord::new(5, 7))).is_ok()); // B
+        let eff = s.try_play(Move::Place(Coord::new(1, 2))).unwrap(); // W 回提
+        assert_eq!(eff.captured, vec![Coord::new(1, 1)]);
+        assert_eq!(s.ko_point, Some(Coord::new(1, 1)));
+    }
+
+    /// 双 Pass → 终局计分：落子/停一手均被拒（Scoring）。
+    #[test]
+    fn go_double_pass_enters_scoring() {
+        let mut s = GameState::new(GameKind::Go { size: 9 });
+        assert!(s.try_play(Move::Place(Coord::new(4, 4))).is_ok()); // B
+        assert!(s.try_play(Move::Pass).is_ok()); // W pass（单 Pass 不终局）
+        assert!(!s.scoring);
+        assert!(s.try_play(Move::Place(Coord::new(5, 5))).is_ok()); // B 继续
+        assert!(s.try_play(Move::Pass).is_ok()); // W
+        assert!(s.try_play(Move::Pass).is_ok()); // B pass → 双 Pass 终局
+        assert!(s.scoring);
+        // 计分阶段：落子与停一手都被拒。
+        assert_eq!(
+            s.try_play(Move::Place(Coord::new(6, 6))),
+            Err(RuleError::Scoring)
+        );
+        assert_eq!(s.try_play(Move::Pass), Err(RuleError::Scoring));
+        assert_eq!(s.to_move, Stone::White);
+    }
+
+    /// 五子棋双 Pass 不进入计分（Pass 对五子棋只是翻手，无终局语义）。
+    #[test]
+    fn gomoku_double_pass_not_scoring() {
+        let mut s = GameState::new(GameKind::Gomoku { size: 15 });
+        assert!(s.try_play(Move::Pass).is_ok());
+        assert!(s.try_play(Move::Pass).is_ok());
+        assert!(!s.scoring);
+        // 仍可落子。
+        assert!(s.try_play(Move::Place(Coord::new(7, 7))).is_ok());
     }
 }

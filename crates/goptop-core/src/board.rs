@@ -12,7 +12,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 /// 棋子颜色，`Empty` 表示空点。黑白之外的状态（如标记）由上层 UI 维护，不进入核心数据。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Stone {
     Empty,
     Black,

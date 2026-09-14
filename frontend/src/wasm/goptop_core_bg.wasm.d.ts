@@ -7,6 +7,7 @@ export const wasmgame_boardSize: (a: number) => number;
 export const wasmgame_new_game: (a: number, b: number) => number;
 export const wasmgame_pass: (a: number, b: number) => void;
 export const wasmgame_reset: (a: number) => void;
+export const wasmgame_score: (a: number, b: number, c: number, d: number) => void;
 export const wasmgame_try_place: (a: number, b: number, c: number, d: number) => void;
 export const wasmgame_undo_last: (a: number, b: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;
