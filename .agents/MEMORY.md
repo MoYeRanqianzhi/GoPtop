@@ -9,6 +9,8 @@
 - [2026-09-12 userId 链接+协商+聊天+观战房间](memory/2026-09-12-userid-link-negotiation-chat-spectator.md) — 链接回归 /userId?pwd=；服务器纯转发不落地；协商消息必须三链路去重；名册 ID=客户端持久 userId
 - [2026-09-15 多代理禁令恢复](memory/2026-09-07-no-parallel-agents-single-serial.md) — 用户拍板禁令继续，单代理串行为现行规则
 - [2026-09-15 传输层 Rust 化方向](memory/2026-09-15-rustification-direction-wasm-websys.md) — wasm-bindgen+web-sys 否决原生桥接（四端全 WebView）；goptop-net 纯逻辑 + goptop-transport wasm；TS 只剩 UI
+- [2026-09-15 无服务器跨设备观战设计](memory/2026-09-15-serverless-spectator-receipt.md) — specrtc 链接 + 观战回执 + 受理后自动换新链接；offer 单次消费语义
+- [2026-09-15 Rust 化第二阶段落地](memory/2026-09-15-rustification-phase2-landed.md) — 五项遗留全清；联调期六大深层 bug（FeedOffer/RenamePeer/negotiated DC/观战镜像转发/通知顺序/mDNS 环境）；验证基线全绿
 - [2026-09-13 大厅挑战修复+邀请弹窗](memory/2026-09-13-lobby-challenge-modal.md) — challenge-accepted 守卫错位+/users 走错信令两根因；邀请统一居中弹窗不设背景关闭；E2E 39 断言；跨设备实测（本机↔美国官服）挑战→弹窗→对局→黑胜全通且 WebRTC 直连成功
 - [2026-09-13 整理轮：三层拆分+规则下沉 wasm](memory/2026-09-13-cleanup-refactor-round.md) — 架构要求重申（Rust 承接一切，TS 只 UI）；wasm 规则接线（pickKind 中间帧 trap 坑）；B1-B4 根因；E2E 断言依赖 UI 文案面的教训；多代理禁令解除
 - [2026-09-14 四端实机验证+真 Windows 标题栏+六维审查](memory/2026-09-14-four-platform-testbar-review-round.md) — HTMAXBUTTON 覆盖层真 Snap Layouts（点击/悬停必须回传页面）；Android `__TAURI_INTERNALS__` 非 document-start 注入坑；HarmonyOS ArkWeb 壳（未签名 HAP 可装模拟器+CDP 驱动）；SyncState.history 必须可表达 Pass；E2E 入库 scripts/e2e/；官服部署程序
