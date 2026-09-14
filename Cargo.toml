@@ -3,7 +3,7 @@
 # frontend/ 为独立 npm 包，不纳入 Cargo workspace。
 
 [workspace]
-members = ["crates/goptop-core", "crates/goptop-net", "crates/goptop-server", "src-tauri"]
+members = ["crates/goptop-core", "crates/goptop-net", "crates/goptop-transport", "crates/goptop-server", "src-tauri"]
 resolver = "2"
 
 # 发布体积优化（用户拍板 2026-09-13：release 二进制报真实尺寸）：

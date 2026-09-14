@@ -45,7 +45,8 @@ pub enum UrlIntent {
 }
 
 /// 回执参数（TS parsePastedAnswer 返回）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnswerIntent {
     pub inviter_id: String,
     pub pwd: String,

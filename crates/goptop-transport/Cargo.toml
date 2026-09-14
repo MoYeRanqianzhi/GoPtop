@@ -1,0 +1,39 @@
+[package]
+# goptop-transport — 平台 IO 绑定层（仅 wasm32）：把 goptop-net 状态机的 Effect
+# 执行掉（WebSocket/RTCPeerConnection/BroadcastChannel/storage/crypto），IO 结果
+# 以 Event 喂回。TS 侧只剩「渲染 snapshot + 转发 DOM 事件」。
+# native 构建时空壳（web-sys 不可用）；单测全部在 goptop-net 完成。
+name = "goptop-transport"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop transport — wasm-bindgen/web-sys IO bindings for the session state machine"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[lib]
+name = "goptop_transport"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+goptop-core = { path = "../goptop-core" }
+goptop-net = { path = "../goptop-net" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window", "Storage", "Crypto", "console", "History", "Location",
+    "WebSocket", "MessageEvent", "CloseEvent", "BinaryType",
+    "BroadcastChannel",
+    "RtcPeerConnection", "RtcPeerConnectionIceEvent", "RtcIceCandidateInit",
+    "RtcSessionDescription", "RtcSessionDescriptionInit", "RtcSdpType",
+    "RtcDataChannel", "RtcDataChannelEvent", "RtcDataChannelState",
+    "RtcIceGatheringState", "RtcIceConnectionState", "RtcConfiguration",
+    "RtcIceServer", "RtcOfferOptions", "RtcAnswerOptions",
+    "EventTarget", "Event",
+]

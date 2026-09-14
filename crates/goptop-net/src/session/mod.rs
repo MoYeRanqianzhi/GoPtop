@@ -677,7 +677,8 @@ pub(crate) fn sync_mirror_from_engine(s: &mut Session) {
 }
 
 /// kind/size → core GameKind（非法组合回退默认，边界校验职责）。
-pub(crate) fn make_engine_kind(kind: &str, size: SizeT) -> GameKind {
+/// transport 构造会话时也用它，故 pub。
+pub fn make_engine_kind(kind: &str, size: SizeT) -> GameKind {
     match (kind, size) {
         ("go", 9) => GameKind::Go { size: 9 },
         ("go", 13) => GameKind::Go { size: 13 },
