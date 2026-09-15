@@ -40,6 +40,23 @@
 - tsc / vitest 34 / build / **E2E 42/42**（run.js 服务器模式全链：直连/落子/聊天/
   悔棋/换棋/重开协商/观战/发言批准/踢出/大厅挑战×2）
 
+## 跨设备真机测试（2026-09-15，router/remote/free28 + 本机）
+
+- **重大 bug 修复**：codec 手动缓冲循环在「解压输出恰好写满缓冲」边界对
+  ≥243 字符 offer 的 token 全部 Inflate 失败（**邀请/观战链接跨设备全挂的根因**，
+  本机同源 E2E 因候选交换路径不同未暴露）——改 flate2 读写封装彻底修复。
+- **无服务器观战双密钥 bug**：内层 offer 用对局 pwd 编码、观众只有 specPwd——
+  砍掉内层加密改**单密钥设计**（specrtc 直载明文 offer JSON，外层 specPwd 唯一保护）。
+- 测试结果（本机 ↔ remote 美国 RackNerd，两端 headless chromium）：
+  1. 服务器模式对局 ✓（官服 WSS 信令、跨设备加入、落子同步；直连因跨国 UDP 断开、
+     relay 兜底工作——A2 已知限制复现）
+  2. 跨设备观战 ✓（remote C 以 spectator 接入本机对局）
+  3. 无服务器回执闭环 ✓（链接→回执生成→受理→连接建立全流程，直连成败取决于运营商）
+- 部署：dist tar → router ~/web:8000（阿里云安全组未开 8000 入站，仅内网用）/
+  remote /root/goptop/frontend/dist（python SPA :5175，node=/root/node/bin，
+  playwright 依赖=/root/pw）；free28 官服 goptop-server active、health ok。
+- 测试脚本入库：scripts/e2e/xdev-a.js（本机 A）+ xdev-b.js（remote B/C）。
+
 ## 遗留
 
 - 本地对局仍走 rules.ts（goptop-core wasm 绑定薄壳）——统一走 WasmSession 后删除。
