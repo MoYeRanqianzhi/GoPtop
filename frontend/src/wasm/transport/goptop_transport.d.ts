@@ -63,6 +63,10 @@ export class WasmSession {
      */
     snapshot(): string;
     /**
+     * 【调试探针】specrtc 解码逐层结果。
+     */
+    spec_decode_probe(token: string, pwd: string): string;
+    /**
      * 安装 50ms 定时泵（App 挂载时调用一次）。
      */
     start_pump(): void;
@@ -110,13 +114,14 @@ export interface InitOutput {
     readonly wasmsession_set_avatar: (a: number, b: number, c: number) => void;
     readonly wasmsession_set_name: (a: number, b: number, c: number) => void;
     readonly wasmsession_snapshot: (a: number, b: number) => void;
+    readonly wasmsession_spec_decode_probe: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmsession_start_pump: (a: number) => void;
     readonly wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1151: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1159: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_499: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_499_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_498: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_1145: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1153: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_496: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_496_2: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_495: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

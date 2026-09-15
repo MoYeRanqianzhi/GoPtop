@@ -305,6 +305,19 @@ impl WasmSession {
         self.cmd(UiCommand::BackHome);
     }
 
+    /// 【调试探针】specrtc 解码逐层结果。
+    pub fn spec_decode_probe(&self, token: String, pwd: String) -> String {
+        let _ = self;
+        let b64 = goptop_net::codec::b64url_decode(token.trim_start_matches("G1"));
+        let enc_len = b64.as_ref().map(|v| v.len()).unwrap_or(0);
+        let dec = goptop_net::codec::decode(&token, &pwd);
+        let (ok, head) = match &dec {
+            Ok(j) => (true, j.chars().take(60).collect()),
+            Err(e) => (false, format!("{e:?}")),
+        };
+        serde_json::json!({ "encLen": enc_len, "ok": ok, "head": head }).to_string()
+    }
+
     /// 链接解析（粘贴弹窗分派用；复用 goptop-net links 解析，跨端一致）。
     /// 返回 JSON：{ok:true, intent:{mode:"user"|..., ...}} 或 {ok:false}。
     pub fn parse_link(&self, text: String) -> String {

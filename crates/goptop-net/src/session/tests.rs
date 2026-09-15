@@ -258,7 +258,8 @@ fn serverless_spectator_receipt_flow() {
     reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: None, answer_plain: None, offer_enc: Some("G1INVITE".into()), answer_enc: None }, &c);
     assert!(a.invite_url.as_deref().is_some_and(|u| u.contains("rtc=G1INVITE")));
     // 观战 offer 就绪 → specUrl 生成（含 specrtc）。
-    reduce(&mut a, Event::RtcReady { tag: "spec-pending".into(), offer_plain: None, answer_plain: None, offer_enc: Some("G1SPEC".into()), answer_enc: None }, &c);
+    // 无服务器：specrtc 直载明文 offer JSON（单密钥设计，与 bridge payload 同形）。
+    reduce(&mut a, Event::RtcReady { tag: "spec-pending".into(), offer_plain: Some(r#"{"s":"SDP-BODY","t":"offer","r":"spectator"}"#.into()), answer_plain: None, offer_enc: None, answer_enc: None }, &c);
     let spec_url = a.spec_url.clone().expect("specUrl 应生成");
     assert!(spec_url.contains("spec=1") && spec_url.contains("specrtc="));
     // 观众：以「打开链接」的真实路径处理 spec 意图（Boot 意图 → specrtc 直连）。
@@ -273,6 +274,7 @@ fn serverless_spectator_receipt_flow() {
     reduce(&mut s, Event::Boot { href: spec_url.clone() }, &c);
     // 观众 answer 就绪 → 观战回执链接生成。
     reduce(&mut s, Event::RtcReady { tag: "spec-main".into(), offer_plain: None, answer_plain: Some("G1SPECANS".into()), offer_enc: None, answer_enc: None }, &c);
+    println!("[dbg] role={:?} phase={:?} answerBack={:?}", s.role, s.phase, s.answer_back_url);
     let receipt = s.answer_back_url.clone().expect("观战回执链接应生成");
     assert!(receipt.contains("spec=1") && receipt.contains("rtcAns="));
     // 房主解析观战回执并受理。

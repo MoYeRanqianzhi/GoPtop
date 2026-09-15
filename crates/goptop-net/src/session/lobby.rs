@@ -513,7 +513,7 @@ pub(crate) fn on_rtc_ready(
     if offer_plain.is_none() && offer_enc.is_none() {
         return fx;
     }
-    let offer_plain = offer_plain.clone().or_else(|| offer_enc.clone());
+    let offer_plain = offer_plain.clone().or_else(|| offer_enc.clone()).unwrap_or_default();
     let enc = offer_enc.clone();
     // 观战受理流（pending_specs 优先匹配；服务器模式 tag=对端 ID，无服务器为 spec- 前缀）。
     if let Some(pos) = s.pending_specs.iter().position(|(t, _)| t == tag) {
@@ -527,9 +527,8 @@ pub(crate) fn on_rtc_ready(
     }
     // 观战方向（tag 以 spec- 开头）。
     if tag.starts_with("spec-") {
-        // 无服务器预生成：编进 spec 链接（自动换新，拿旧链接的观众会失败并要新的）。
-        let Some(enc2) = enc else { return fx };
-        s.refresh_spec_url_with(ctx, tag, &enc2);
+        // 无服务器预生成：specrtc 直载明文 offer JSON（自动换新）。
+        s.refresh_spec_url_with(ctx, tag, &offer_plain);
         fx.push(Effect::Emit);
         return fx;
     }
@@ -537,7 +536,7 @@ pub(crate) fn on_rtc_ready(
     let is_main = Some(tag.to_string()) == s.inviter_main;
     if let Some(p) = s.rtc_peers.iter_mut().find(|q| q.tag == tag) {
         p.offer_ready = true;
-        p.offer_plain = offer_plain.clone();
+        p.offer_plain = Some(offer_plain.clone());
     }
     if is_main && s.phase == Phase::Waiting && s.role == Role::Inviter {
         if s.server_mode {
@@ -569,11 +568,13 @@ pub(crate) fn on_rtc_ready(
 
 impl Session {
     /// 无服务器模式：观战 offer 就绪后刷新 spec 链接（拿旧链接的观众直连会失败）。
-    pub(crate) fn refresh_spec_url_with(&mut self, _ctx: &ReduceCtx, _spec_tag: &str, offer_enc: &str) {
+    pub(crate) fn refresh_spec_url_with(&mut self, _ctx: &ReduceCtx, _spec_tag: &str, offer_plain: &str) {
+        #[cfg(test)]
+        eprintln!("[dbg-refresh] offer_plain_head={:?} spec_pwd={:?}", &offer_plain[..offer_plain.len().min(30)], self.spec_pwd);
         let sp = self.spec_pwd.clone().unwrap_or_default();
         let mut url = links::spec_link_url(&self.share_origin, &self.user_id, &sp);
         url.push_str("&specrtc=");
-        url.push_str(&crate::codec::encode(&serde_json::json!({ "offer": offer_enc }).to_string(), &sp).unwrap_or_default());
+        url.push_str(&crate::codec::encode(offer_plain, &sp).unwrap_or_default());
         self.spec_url = Some(url);
     }
 }
@@ -632,11 +633,12 @@ pub(crate) fn accept_spec_offer_serverless(s: &mut Session, ctx: &ReduceCtx, hos
     let Ok(json) = payload else {
         return vec![Effect::Notice(Some("观战链接无法解码（可能不是最新的观战链接）".into()), Some(4200))];
     };
+    // specrtc 解出的整个 JSON 就是 offer 载荷（明文 SDP 信封 {"s","t","r"}；单密钥设计，
+    // 无 ["offer"] 包裹层——包裹层与直载两种口径曾不一致导致观众端解不出）。
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) else {
         return vec![Effect::Notice(Some("观战链接不完整：请向房主要求最新链接".into()), Some(4200))];
     };
-    let offer = parsed["offer"].as_str().unwrap_or("").to_string();
-    if offer.is_empty() {
+    if !parsed.is_object() || parsed["s"].as_str().is_none() {
         return vec![Effect::Notice(Some("观战链接不完整：请向房主要求最新链接".into()), Some(4200))];
     }
     s.role = Role::Spectator;
@@ -649,7 +651,7 @@ pub(crate) fn accept_spec_offer_serverless(s: &mut Session, ctx: &ReduceCtx, hos
         Effect::Nav("/p2p".into()),
         Effect::Notice(Some("正在连接对局观战…".into()), None),
         Effect::CreatePeer { tag: "spec-main".into(), inviter: false, spectator: true },
-        Effect::FeedOffer { tag: "spec-main".into(), offer, encrypted: true },
+        Effect::FeedOffer { tag: "spec-main".into(), offer: json, encrypted: false },
         Effect::Emit,
     ]
 }
@@ -669,7 +671,8 @@ pub(crate) fn accept_spec_receipt(s: &mut Session, ctx: &ReduceCtx, ans: &Answer
     slot.tag = live.clone();
     let mut fx = vec![
         Effect::RenamePeer { from: "spec-pending".into(), to: live.clone() },
-        Effect::AcceptAnswer { tag: live, answer: ans.rtc_ans.clone(), encrypted: true },
+        // 观众回执的 rtcAns 是明文 answer JSON（与邀请回执同形，单密钥设计）。
+        Effect::AcceptAnswer { tag: live, answer: ans.rtc_ans.clone(), encrypted: false },
     ];
     // 受理即预生成下一份观战 offer（链接自动换新）。
     fx.push(Effect::CreatePeer { tag: "spec-pending".into(), inviter: true, spectator: true });

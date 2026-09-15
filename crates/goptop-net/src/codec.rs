@@ -10,7 +10,10 @@
 //!   （pwd 本就在同一链接里），真正的传输安全由 WebRTC DTLS 端到端加密保证。
 //! - base64：URL 安全字母表 + 去填充。
 
-use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
+use std::io::{Read, Write};
 
 /// 版本头：未来换编码格式时可平滑迁移。
 pub const RTC_ENC_MAGIC: &str = "G1";
@@ -54,52 +57,18 @@ fn xor_bytes(bytes: &[u8], pwd: &str) -> Vec<u8> {
 }
 
 fn deflate_raw(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
-    let mut c = Compress::new(Compression::new(6), false);
-    // 压缩上界 = 输入 + 5 字节/64KB 余量（deflate 规范上界），一轮出结果。
-    let mut out = vec![0u8; bytes.len() + bytes.len() / 8 + 64];
-    let mut consumed = 0usize;
-    let mut produced = 0usize;
-    while consumed < bytes.len() {
-        let before_in = c.total_in() as usize;
-        let before_out = c.total_out() as usize;
-        let status = c
-            .compress(&bytes[consumed..], &mut out[produced..], FlushCompress::Finish)
-            .map_err(|_| CodecError::Deflate)?;
-        consumed += c.total_in() as usize - before_in;
-        produced += c.total_out() as usize - before_out;
-        if matches!(status, Status::StreamEnd) && consumed >= bytes.len() {
-            break;
-        }
-        // 输出缓冲不足（理论不可达）：扩容重试。
-        out.resize(out.len() * 2, 0);
-    }
-    out.truncate(produced);
-    Ok(out)
+    // flate2 读写封装：缓冲循环由库管理（手动 compress/decompress 循环在
+    // 「输出恰好写满且流未结束」的边界上有 Err 陷阱，曾致 243 字节以上 token 全挂）。
+    let mut e = DeflateEncoder::new(Vec::new(), Compression::new(6));
+    e.write_all(bytes).map_err(|_| CodecError::Deflate)?;
+    e.finish().map_err(|_| CodecError::Deflate)
 }
 
 fn inflate_raw(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
-    let mut d = Decompress::new(false);
-    let mut out = Vec::with_capacity(bytes.len() * 8 + 256);
-    loop {
-        let before_in = d.total_in() as usize;
-        let before_out = d.total_out() as usize;
-        if out.len() == before_out {
-            out.resize(out.len() * 2 + 256, 0);
-        }
-        let status = d
-            .decompress(&bytes[before_in.min(bytes.len())..], &mut out[before_out..], FlushDecompress::Finish)
-            .map_err(|_| CodecError::Inflate)?;
-        let new_in = d.total_in() as usize;
-        let new_out = d.total_out() as usize;
-        out.truncate(new_out);
-        if matches!(status, Status::StreamEnd) {
-            return Ok(out);
-        }
-        // 输入耗尽但流未结束：截断流——Finish 对非法结尾会 Err，这里防死循环直接报错。
-        if new_in >= bytes.len() {
-            return Err(CodecError::Inflate);
-        }
-    }
+    let mut d = DeflateDecoder::new(bytes);
+    let mut out = Vec::new();
+    d.read_to_end(&mut out).map_err(|_| CodecError::Inflate)?;
+    Ok(out)
 }
 
 /// URL 安全 base64 编码（无填充；62='-' 63='_'，对齐 TS 侧 btoa 后替换）。
@@ -218,3 +187,4 @@ mod tests {
         assert_eq!(b64url_decode("YQ==").unwrap(), b"a");
     }
 }
+
