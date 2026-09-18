@@ -38,3 +38,6 @@ wasm-pack.log
 
 # Playwright / MCP artifacts
 .playwright-mcp/
+
+# 实机测试临时产物（截图/调试导出）
+.agents/tmp/

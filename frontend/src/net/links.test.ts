@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { genPwd } from "./identity";
-import { parseUrl, parsePastedLink, parsePastedAnswer, inviteToUrl, answerToUrl, userToUrl, specLinkUrl, watchToUrl } from "./links";
+import { parseUrl, parsePastedLink, parsePastedAnswer, inviteToUrl, answerToUrl, userToUrl, specLinkUrl, watchToUrl, shareOrigin, SHARE_ORIGIN_NATIVE } from "./links";
 
 describe("genPwd", () => {
   it("固定 6 位 base36", () => {
@@ -273,5 +273,35 @@ describe("链接构造 → 解析往返", () => {
       expect(url).not.toContain(id); // 确已编码，未裸拼进 URL
       expect(parsePastedLink(url)).toMatchObject({ mode: "user", userId: id });
     }
+  });
+});
+
+/* ---------------- 分享基地址的运行时判定（2026-09-18 鸿蒙实机测试回归） ----------------
+ *
+ * 鸿蒙 ArkWeb 壳不是 Tauri（没有 __TAURI_INTERNALS__），页面宿主是虚拟域名
+ * appassets.goptop；若按「非 Tauri 就用当前 origin」处理，会生成
+ * `https://appassets.goptop/u-xxx?pwd=` 这类**对方设备根本打不开**的邀请链接。
+ */
+describe("shareOrigin 运行时判定", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("普通 Web：用当前站点 origin", () => {
+    vi.stubGlobal("window", { location: { href: "https://my.site/", origin: "https://my.site", hostname: "my.site" } });
+    expect(shareOrigin()).toBe("https://my.site");
+  });
+
+  it("Tauri 壳（有 __TAURI_INTERNALS__）：用云端部署地址", () => {
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: {},
+      location: { href: "http://tauri.localhost/", origin: "http://tauri.localhost", hostname: "tauri.localhost" },
+    });
+    expect(shareOrigin()).toBe(SHARE_ORIGIN_NATIVE);
+  });
+
+  it("鸿蒙 ArkWeb 壳（虚拟域名、无 Tauri 注入）：用云端部署地址", () => {
+    vi.stubGlobal("window", {
+      location: { href: "https://appassets.goptop/", origin: "https://appassets.goptop", hostname: "appassets.goptop" },
+    });
+    expect(shareOrigin()).toBe(SHARE_ORIGIN_NATIVE);
   });
 });

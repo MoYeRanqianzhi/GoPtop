@@ -153,9 +153,34 @@ export function isTauri(): boolean {
 /** 非 Web 环境分享链接的基地址（云端部署地址）：换域名只改这一处。 */
 export const SHARE_ORIGIN_NATIVE = "https://goptop.pages.dev";
 
-/** 分享基地址（自动）：Web 用当前站点；Tauri/非 Web 用 SHARE_ORIGIN_NATIVE。 */
+/**
+ * 鸿蒙 ArkWeb 壳的虚拟域名（承载打包资源，公网不可达）。
+ * 必须与 harmony/entry/src/main/ets/pages/Index.ets 的 SCHEME_HOST 保持一致。
+ */
+const ARKWEB_SHELL_HOST = "appassets.goptop";
+
+/**
+ * 是否运行在「没有自己公网地址」的打包壳里。
+ * 分享链接要发到别的设备上打开，所以这类环境必须改用 SHARE_ORIGIN_NATIVE：
+ * - Tauri 桌面/安卓：`__TAURI_INTERNALS__` 存在；
+ * - 鸿蒙 ArkWeb 壳：非 Tauri（没有该注入），页面宿主是虚拟域名 appassets.goptop——
+ *   曾因此在鸿蒙端生成 `https://appassets.goptop/u-xxx?pwd=` 这类对方根本打不开的
+ *   邀请链接（2026-09-18 实机测试发现）。
+ * 注意与 [`isTauri`] 区分：后者还兼作「是否显示 Windows 标题栏覆盖层」的判据，
+ * 鸿蒙壳不该算 Tauri。
+ */
+export function isShellRuntime(): boolean {
+  if (isTauri()) return true;
+  try {
+    return typeof window !== "undefined" && window.location.hostname === ARKWEB_SHELL_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/** 分享基地址（自动）：Web 用当前站点；打包壳用 SHARE_ORIGIN_NATIVE。 */
 export function shareOrigin(): string {
-  return isTauri() ? SHARE_ORIGIN_NATIVE : window.location.origin;
+  return isShellRuntime() ? SHARE_ORIGIN_NATIVE : window.location.origin;
 }
 
 /** 从粘贴的任意 URL 中提取站内意图（路径 + 查询参数），与域名无关。
