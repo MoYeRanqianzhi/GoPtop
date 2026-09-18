@@ -287,6 +287,45 @@ fn serverless_spectator_receipt_flow() {
     assert!(fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { answer, .. } if answer == "G1SPECANS")));
 }
 
+/// 服务器模式「粘贴邀请链接」必须走信令服务器 join（而非同源 presence 挑战）。
+/// 回归 2026-09-18 跨设备实测：粘贴路径曾发 presence——那是同源 BroadcastChannel 通道，
+/// 跨设备到不了对方，两端永久停在「等待对手」/「等待邀请者自动确认」。
+#[test]
+fn server_paste_invite_joins_via_server() {
+    let mut b = mk("b", true);
+    let c = ctx(1000);
+    reduce(&mut b, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
+    let fx = reduce(
+        &mut b,
+        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("p1w2e3".into()), kind: "gomoku".into(), size: 15, rtc: None }),
+        &c,
+    );
+    assert!(b.role == Role::Invitee && b.phase == Phase::Waiting);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "join" && v["to"] == "u-a" && v["payload"]["pwd"] == "p1w2e3")),
+        "粘贴邀请链接应发服务器 join 信令"
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::SendPresence(_))), "不得再走同源 presence 挑战");
+}
+
+/// 服务器未就绪时粘贴：意图挂起（pending_link），连接成立后再补发 join。
+#[test]
+fn server_paste_invite_waits_for_ready_then_flushes() {
+    let mut b = mk("b", true);
+    let c = ctx(1000);
+    // 服务器尚未 ready：不应发出任何 join。
+    let fx = reduce(
+        &mut b,
+        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("k1".into()), kind: "gomoku".into(), size: 15, rtc: None }),
+        &c,
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::SendServer(_))), "未就绪时不应发信令");
+    assert!(b.pending_link.is_some(), "意图应挂起等待服务器");
+    // 服务器就绪 → 补发 join。
+    let fx = reduce(&mut b, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
+    assert!(fx.iter().any(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "join")), "就绪后应补发 join");
+}
+
 /// 双挑战对撞：字典序大者自动让位（确定性，两端决策一致）。
 #[test]
 fn challenge_collision_tiebreak() {

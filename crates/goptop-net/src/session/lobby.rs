@@ -236,6 +236,15 @@ pub(crate) fn create_invite(s: &mut Session, ctx: &ReduceCtx) -> Vec<Effect> {
 
 /// 受邀者：向某用户发起连接（粘贴链接/主页挑战；pwd 可空）。
 pub(crate) fn accept_invite(s: &mut Session, ctx: &ReduceCtx, inviter_id: &str, pwd: Option<String>, kind: &str, size: SizeT, rtc_offer: Option<String>) -> Vec<Effect> {
+    // 服务器模式且链接不带直连 offer：join 必须走信令服务器转发。
+    // 下面 None 分支发的 presence 挑战只在**同源**（同一浏览器/同一 origin）可达，
+    // 跨设备根本到不了对方——2026-09-18 实机测试发现：粘贴邀请链接后两端永远停在
+    // 「等待对手」/「等待邀请者自动确认」，A 端连 join 信令都收不到。
+    // （Boot 路径因 process_intent 提前分流到 pending_link 而没暴露此问题。）
+    if s.server_mode && rtc_offer.is_none() {
+        s.pending_link = Some(PendingLink { target: inviter_id.to_string(), pwd, spec: false });
+        return s.flush_pending_link();
+    }
     s.close_all_rtc();
     let g = crate::identity::gen_game_id(ctx.now_ms, ctx.rand[0]);
     s.game_id = Some(g.clone());
