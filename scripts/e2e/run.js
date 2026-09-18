@@ -239,6 +239,37 @@ async function challengeFromList(c, peerName) {
   check("12e. F 自动进入对局", await bodyHas(F, "对局开始", 20000));
   check("12f. G 自动进入对局", await bodyHas(G, "对局开始", 20000));
 
+  // —— 13. 聊天停靠栏三档（用户拍板 2026-09-19）：等宽 → 压缩 → 弹窗 ——
+  // A/B 仍在局中：以 A 的视口宽度扫一遍，三种形态各断言一次。
+  // 红线：任何宽度下棋盘都不许被聊天挤小（下棋软件，棋盘优先）。
+  const chatGeom = () => A.page.evaluate(() => {
+    const q = (s) => document.querySelector(s);
+    const vis = (el) => !!el && getComputedStyle(el).display !== "none";
+    const w = (el) => (el ? Math.round(el.getBoundingClientRect().width) : 0);
+    const layout = q(".game-layout");
+    return {
+      form: vis(q(".chat-modal-bg")) ? "modal" : vis(q(".chat-dock")) ? "dock" : "none",
+      stack: w(q(".play-stack")), board: w(q(".board-wrap > .brutal-card")), dock: w(q(".chat-dock")),
+      overflow: layout.scrollWidth - layout.clientWidth,
+    };
+  });
+  const atWidth = async (width) => { await A.page.setViewportSize({ width, height: 900 }); await new Promise((r) => setTimeout(r, 450)); return chatGeom(); };
+  await A.page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => (x.getAttribute("title") || "").includes("聊天")); if (b) b.click(); });
+  await new Promise((r) => setTimeout(r, 400));
+  const chatWide = await atWidth(1400);
+  check("13a. 宽屏：聊天以停靠栏形态显示", chatWide.form === "dock", JSON.stringify(chatWide));
+  check("13b. 宽屏：停靠栏与棋盘整组等宽", chatWide.dock === chatWide.stack, `dock=${chatWide.dock} stack=${chatWide.stack}`);
+  const chatTight = await atWidth(800);
+  check("13c. 偏窄：停靠栏被压缩（棋盘不动）", chatTight.form === "dock" && chatTight.dock < chatTight.stack, JSON.stringify(chatTight));
+  check("13d. 偏窄：棋盘宽度与宽屏一致", chatTight.board === chatWide.board, `${chatTight.board} vs ${chatWide.board}`);
+  const chatNarrow = await atWidth(650);
+  check("13e. 更窄：退回弹窗形态", chatNarrow.form === "modal", JSON.stringify(chatNarrow));
+  check("13f. 更窄：棋盘仍未被挤小", chatNarrow.board === chatWide.board, `${chatNarrow.board} vs ${chatWide.board}`);
+  check("13g. 各档均无横向溢出", chatWide.overflow <= 0 && chatTight.overflow <= 0 && chatNarrow.overflow <= 0,
+    `wide=${chatWide.overflow} tight=${chatTight.overflow} narrow=${chatNarrow.overflow}`);
+  // 本段是最后一步，仍恢复原尺寸（聊天保持打开，不影响后续无步骤的事实）
+  await A.page.setViewportSize({ width: 1400, height: 900 });
+
   console.log(`\n===== RESULT: ${pass} passed, ${fail} failed =====`);
   await browser.close();
   process.exit(fail > 0 ? 1 : 0);

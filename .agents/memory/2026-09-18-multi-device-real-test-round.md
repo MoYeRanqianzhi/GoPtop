@@ -53,9 +53,10 @@
   「棋盘变小→整组变窄→卡片变高→棋盘更小」一路塌到下限（桌面壳 1100×760 实测 50px）。
   → 固定卡片高度一律在**最宽**整组下测量再算棋盘可用高度。**别在棋盘上下再加卡片行**，
   每加一行都会进一步挤扁棋盘（围棋计分卡因此改为并入既有状态行）。
-- **窄屏聊天弹窗（z-index 800）会整个盖住协商横幅**（ConfirmBanner 的静态 z-index 不生效）：
-  请求到了用户看不见。→ 有待决 confirmReq 时仅在窄屏（<1080px）自动收起聊天；
-  宽屏是侧栏不遮挡，收起反而打断用户（浏览器基线 E2E 曾因此回归）。
+- **聊天弹窗（z-index 800）会整个盖住协商横幅**（ConfirmBanner 的静态 z-index 不生效）：
+  请求到了用户看不见。→ 有待决 confirmReq 时自动收起聊天**弹窗**（2026-09-19 起判据
+  改为实测形态 `chatDocked`，不再是「视口 <1080px」）：停靠栏在侧边不遮挡，收起反而
+  打断用户（浏览器基线 E2E 曾因此回归）。
 
 ## 本轮实际跑的测试内容与结果
 
@@ -101,7 +102,7 @@
 ```bash
 cargo test                      # net 42 / core 35 / server 4
 cd frontend && npx tsc --noEmit && npx vitest run    # 37
-node scripts/e2e/run.js         # 浏览器基线 42/42
+node scripts/e2e/run.js         # 浏览器基线（2026-09-19 起 49/49，含聊天三档几何）
 node scripts/e2e/matrix.js game # 五端两两 11 对（需先起两端壳与模拟器）
 node scripts/e2e/features.js <场景> <端…>            # 设计功能
 ```

@@ -9,7 +9,7 @@
 | 端 | 规格串 | 驱动路径 | 备注 |
 |---|---|---|---|
 | web 桌面浏览器 | `web` / `web:<url>` | Playwright chromium，1400×950 | 静态服务 `node scripts/e2e/serve.js 5173 localhost frontend/dist` |
-| web 手机浏览器 | `mob` / `mob:<url>` | Playwright `devices["Pixel 5"]`（触摸） | 窄屏布局（1080px 以下走弹窗形态） |
+| web 手机浏览器 | `mob` / `mob:<url>` | Playwright `devices["Pixel 5"]`（触摸） | 窄屏布局（聊天走弹窗形态、无停靠栏） |
 | Windows 桌面壳 | `cdp:http://127.0.0.1:9222` | `connectOverCDP` | 见 §1 启动要点 |
 | 安卓 | `android` / `android:<serial>` | Playwright `_android` 驱动（adb） | **禁止 connectOverCDP**，见 §2 |
 | 鸿蒙 | `cdp:http://127.0.0.1:9444` | `connectOverCDP`（ArkWeb inspector） | 见 §3 |
@@ -130,18 +130,24 @@ node diag-watch.js web mob web                       # 观战镜像逐手诊断
   修法是**固定卡片高度一律在最宽整组下测量**再算棋盘可用高度。
   **不要在对局页棋盘上下再加卡片行**——每加一行都会进一步挤扁棋盘
   （围棋终局计分控件因此并入既有状态行，没有单独成卡）。
-- **窄屏聊天弹窗 z-index 800 会盖住协商横幅**（ConfirmBanner 的静态 z-index 不生效）：
-  有待决 `confirmReq` 时仅在窄屏（<1080px）自动收起聊天；宽屏是侧栏不遮挡，
-  收起反而打断用户（浏览器基线 E2E 曾因此回归 42→失败）。
+- **聊天弹窗 z-index 800 会盖住协商横幅**（ConfirmBanner 的静态 z-index 不生效）：
+  有待决 `confirmReq` 且聊天处于**弹窗形态**时自动收起聊天；停靠栏在侧边不遮挡，
+  收起反而打断用户（浏览器基线 E2E 曾因此回归 42→失败）。判形态只看实测结果
+  （`chatDocked`），不看视口宽度。
+- **聊天停靠栏宽度/形态全由实测决定**（App.tsx `measureChat` → `--chat-w`）：
+  空间充足与棋盘整组等宽 → 放不下先压缩聊天栏（下棋软件，棋盘完整优先）→
+  压到 240px 以下改弹窗。**`.play-stack` 不许被压窄（`flex: 0 0 auto`）**，
+  否则「停靠栏挤窄整组 → 实测又把挤窄值当基准」会锁死棋盘宽度（vw=650/600 中招）。
 - 改布局后至少在 **1100×760**（桌面壳默认窗口）与 **Pixel 5（393×851）** 两个尺寸
-  各看一次棋盘是否可点、按钮是否可达。
+  各看一次棋盘是否可点、按钮是否可达；聊天改动另看三档形态（≈1400 等宽 /
+  ≈800 压缩 / ≈650 弹窗）。
 
 ## 7. 回归口径
 
 ```bash
 cargo test                                            # net / core / server 三包
 cd frontend && npx tsc --noEmit && npx vitest run
-node scripts/e2e/run.js                               # 浏览器基线 42 断言
+node scripts/e2e/run.js                               # 浏览器基线 49 断言
 node scripts/e2e/matrix.js game                       # 五端两两 11 对（需先起壳与模拟器）
 node scripts/e2e/features.js <场景> <端…>              # 设计功能
 ```

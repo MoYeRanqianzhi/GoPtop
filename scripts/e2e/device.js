@@ -341,9 +341,10 @@ class Endpoint {
   }
 
   /**
-   * 聊天面板作用域：窄屏（手机/移动视口）聊天是 `.chat-modal-bg` 弹窗，宽屏是侧栏。
-   * 弹窗打开时侧栏仍在 DOM 里且 CSS 上「可见」——直接点全局第一个匹配会点到底下被遮罩
-   * 挡住的那个（Playwright 报「intercepts pointer events」）。有弹窗就一律在弹窗内找。
+   * 聊天面板作用域：放得下是右侧停靠栏（`.chat-dock`），放不下是 `.chat-modal-bg` 弹窗。
+   * 两者互斥渲染（2026-09-19 起），但作用域仍按「有弹窗就只在弹窗内找」：
+   * 弹窗覆盖在页面上，全局第一个匹配可能落到被遮罩挡住的元素上
+   * （Playwright 报「intercepts pointer events」）。
    */
   async chatScope() {
     const modal = this.page.locator(".chat-modal-bg").first();

@@ -98,7 +98,11 @@ footer,
   display: flex;
   flex-direction: column;
   gap: clamp(8px, 1.4vh, 14px);
-  flex: 0 1 auto;
+  /* 不许被压窄：本软件是下棋软件，棋盘整组宽度是硬锚点。聊天停靠栏那侧
+     自己按剩余空间收敛（App.tsx measureChat），放不下就退弹窗形态。
+     若允许 flex 压缩，会出现「停靠栏挤窄整组 → 实测又把挤窄后的宽度当基准
+     → 停靠栏永久占住腾出的空间」的正反馈，棋盘再也回不来（实测 vw=650/600 中招）。 */
+  flex: 0 0 auto;
   min-height: 0;
   align-items: stretch;
   justify-content: safe center;
@@ -216,16 +220,18 @@ html.app-tauri .poster-strip { padding-right: 138px; }
   align-items: stretch;
   gap: 14px;
 }
+/* 宽度由 App.tsx 的 measureChat 实测写入（--chat-w）：空间充足时 = 棋盘整组宽
+   （左右两栏等宽对称），放不下就压缩（棋盘完整优先），压到下限仍放不下则
+   根本不渲染停靠栏、改用弹窗——所以这里没有断点媒体查询，形态只认实测。 */
 .chat-dock {
-  width: 300px;
+  width: var(--chat-w, 300px);
   flex-shrink: 0;
   display: none;
   min-height: 0;
 }
-@media (min-width: 1080px) {
-  .chat-dock--open { display: flex; flex-direction: column; }
-}
-/* 窄屏聊天弹窗 */
+.chat-dock--open { display: flex; flex-direction: column; }
+/* 窄屏 / 放不下时的聊天弹窗（是否用弹窗由 App.tsx 实测决定：两者互斥渲染，
+   所以不需要「宽屏隐藏弹窗」的媒体查询兜底） */
 .chat-modal-bg {
   position: fixed;
   inset: 0;
@@ -242,10 +248,6 @@ html.app-tauri .poster-strip { padding-right: 138px; }
   display: flex;
   flex-direction: column;
   min-height: 0;
-}
-@media (min-width: 1080px) {
-  /* 宽屏下弹窗形态隐藏（用停靠栏） */
-  .chat-modal-bg { display: none; }
 }
 
 /* —— 页面壳布局（原 App.tsx 内联 <style> 块整体移入，注释随行保留） —— */

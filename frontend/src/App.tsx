@@ -24,8 +24,11 @@ import { PasteModal } from "./components/PasteModal";
 import { PosterStrip } from "./components/PosterStrip";
 
 export default function App() {
-  // 聊天面板开合：宽屏=右侧停靠栏，窄屏=弹窗（CSS .chat-dock/.chat-modal 控制形态）
+  // 聊天面板开合（形态另由 chatDocked 决定：右侧停靠栏 or 覆盖式弹窗）
   const [chatOpen, setChatOpen] = useState(false);
+  // 停靠栏还是弹窗，由实测布局决定（compute 里的 measureChat 写回）——旧的
+  // 「1080px 媒体查询」是拿视口宽度猜的，看不见「整组被高度压窄」这种显示不下。
+  const [chatDocked, setChatDocked] = useState(true);
   const mainRef = useRef<HTMLElement | null>(null);
   const s = useGameSession();
   const {
@@ -51,6 +54,31 @@ export default function App() {
     let last = 0;
     let armed = true;
     let watched: Element | null = null;
+    /* 聊天停靠栏三档（用户拍板 2026-09-19）：
+       1) 空间充足 → 与棋盘整组等宽（左右两栏对称，视觉平衡）；
+       2) 放不下 → 压缩聊天栏——本软件是下棋软件，棋盘完整优先于聊天栏；
+       3) 压到下限 CHAT_MIN_W 仍放不下 → 退回弹窗形态（与窄屏同一策略）。
+       必须在 --stack-max 落定之后量：整组宽度本身就是它决定的。 */
+    const CHAT_MIN_W = 240;
+    const measureChat = (stack: Element) => {
+      const layout = stack.parentElement;
+      if (!layout) return;
+      const gap = parseFloat(getComputedStyle(layout).columnGap) || 0;
+      let used = 0;
+      let count = 0;
+      for (const child of Array.from(layout.children)) {
+        // 停靠栏自身不算「已占用」——它要的正是剩下的空间（算进去会自反馈）
+        if (child.classList.contains("chat-dock")) continue;
+        used += child.getBoundingClientRect().width;
+        count++;
+      }
+      // 加进停靠栏就多一个间隙：n 个已有项 → n 个间隙
+      const avail = layout.clientWidth - used - gap * count;
+      const stackW = stack.getBoundingClientRect().width;
+      const dockW = Math.max(0, Math.min(stackW, Math.floor(avail)));
+      main.style.setProperty("--chat-w", `${dockW}px`);
+      setChatDocked(dockW >= CHAT_MIN_W);
+    };
     const compute = () => {
       const boardWrap = main.querySelector<HTMLElement>(".board-wrap");
       if (!boardWrap) {
@@ -81,12 +109,12 @@ export default function App() {
         }
         fixed += gap * (count + 1);
         const next = Math.max(240, Math.min(720, Math.floor(main.clientHeight - fixed)));
-        if (Math.abs(next - last) < 4) {
-          main.style.setProperty("--stack-max", `${last || next}px`);
-          return;
-        }
+        // 抖动阈值内的变化不写回（避免来回抖），但仍要走完聊天几何——否则
+        // 停靠栏宽度只在整组变宽变窄时才更新，窗口横向缩放时它不跟手。
+        const stackMax = Math.abs(next - last) < 4 ? (last || next) : next;
         last = next;
-        main.style.setProperty("--stack-max", `${next}px`);
+        main.style.setProperty("--stack-max", `${stackMax}px`);
+        measureChat(stack);
       });
     };
     const ro = new ResizeObserver(() => compute());
@@ -115,18 +143,17 @@ export default function App() {
         }
       : null;
 
-  // 窄屏下聊天弹窗（z-index 800）会整个盖住协商横幅（ConfirmBanner 在常规流里，
+  // 聊天弹窗形态（z-index 800）会整个盖住协商横幅（ConfirmBanner 在常规流里，
   // 静态 z-index 不生效）——请求到了用户根本看不见，对方只能一直等（实机测试发现：
   // 移动端开着聊天时悔棋/换棋/重开请求全部不可达）。有待决请求就收起聊天弹窗，
   // 横幅随即可见；处理完随时可再打开聊天。
   useEffect(() => {
-    if (!confirmReq || !chatOpen) return;
-    // 只在窄屏（聊天是覆盖式弹窗，1080px 以下）才收起；宽屏聊天是右侧停靠栏，
-    // 与横幅并排不遮挡——那边收起反而把用户正在看的聊天打断。
-    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1079px)").matches) setChatOpen(false);
-  }, [confirmReq, chatOpen]);
+    // 只有弹窗形态才收起；停靠栏在侧边与横幅并排不遮挡，收起反而打断用户
+    //（浏览器基线 E2E 曾因此回归）。是不是弹窗由实测布局决定，不看视口宽度。
+    if (confirmReq && chatOpen && !chatDocked) setChatOpen(false);
+  }, [confirmReq, chatOpen, chatDocked]);
 
-  // 聊天面板（宽屏右侧停靠；窄屏弹窗，形态由 CSS 控制）
+  // 聊天面板内容（停靠栏与弹窗共用同一份；形态由 chatDocked 决定）
   const chatPanel = (
     <ChatPanel
       role={role}
@@ -148,21 +175,20 @@ export default function App() {
       onRejectSpec={rejectSpecRequest}
     />
   );
-  const chatDockOpen = chatOpen && mode === "p2p" && phase === "playing";
-  const chatDock = chatDockOpen && (
-    <>
-      <aside className="brutal-card chat-dock chat-dock--open" style={{ padding: 12 }}>
+  const chatOpenable = chatOpen && mode === "p2p" && phase === "playing";
+  // 停靠栏与弹窗互斥（形态由实测布局拍板），不会同时进 DOM：
+  // 同内容渲染两份既浪费又会让「点第一个匹配」的自动化选到被遮罩的那份。
+  const chatDock = chatOpenable && chatDocked && (
+    <aside className="brutal-card chat-dock chat-dock--open" style={{ padding: 12 }}>
+      {chatPanel}
+    </aside>
+  );
+  const chatModal = chatOpenable && !chatDocked && (
+    <div className="chat-modal-bg" onClick={() => setChatOpen(false)}>
+      <div className="brutal-card chat-modal" onClick={(e) => e.stopPropagation()} style={{ padding: 12 }}>
         {chatPanel}
-      </aside>
-      {/* 窄屏：同内容以弹窗覆盖 */}
-      {chatOpen && mode === "p2p" && phase === "playing" && (
-        <div className="chat-modal-bg" onClick={() => setChatOpen(false)}>
-          <div className="brutal-card chat-modal" onClick={(e) => e.stopPropagation()} style={{ padding: 12 }}>
-            {chatPanel}
-          </div>
-        </div>
-      )}
-    </>
+      </div>
+    </div>
   );
 
   return (
@@ -243,6 +269,7 @@ export default function App() {
         </div>
         {chatDock}
         </div>
+        {chatModal}
       </main>
 
       {/* 页面壳布局样式（header 三级降级、底部三卡容器查询）在 styles/brutal.css 末尾 */}

@@ -126,8 +126,8 @@ SyncState/SyncRequest 不去重（重连 seq 归零）。**SyncState 带 `sv` �
 ## 测试
 
 - `cd frontend && npm test`（vitest 33 例）：去重、G1 编码、genPwd、链接解析。改协议面必须同步补。
-- E2E：`%TEMP%/goptop-e2e/run.js`（Playwright，42 断言）——对局/聊天/协商/观战全链/大厅挑战/
-  观战回退可见性（B1）。两个静态源（localhost:5173 跑 dist、127.0.0.1:5174）+ 本地信令服
+- E2E：`%TEMP%/goptop-e2e/run.js`（Playwright，49 断言）——对局/聊天/协商/观战全链/大厅挑战/
+  观战回退可见性（B1）/聊天停靠栏三档几何（13a-g）。两个静态源（localhost:5173 跑 dist、127.0.0.1:5174）+ 本地信令服
   （`cargo run -p goptop-server -- --listen=127.0.0.1:9527`）。断言依赖 UI 文案，改卡片文案先看它。
 - 浏览器实测脚本：go-capture.js（围棋提子/悔棋还原/五连）、ui-audit.js（515px 窄屏巡检）。
 
@@ -136,8 +136,15 @@ SyncState/SyncRequest 不去重（重连 seq 归零）。**SyncState 带 `sv` �
 - `main` 必须 `overflow:hidden`（曾改成 auto 导致整组撑开，commit a4ae1d5 修回）。
 - `.play-stack` 宽度 = `min(720px, 92vw, var(--stack-max))`；`--stack-max` 由 App 的 ResizeObserver
   实测 `.board-wrap` 剩余高度写入（旧 calc(100dvh-360px) 死数已废）。
+- **`.play-stack` 必须 `flex: 0 0 auto`（不许被压窄）**：棋盘整组宽度是硬锚点。
+  若允许 flex 压缩，聊天停靠栏会挤窄整组，而下一帧的实测又把挤窄后的宽度当基准
+  → 停靠栏永久占住腾出的空间，棋盘再也回不来（实测 vw=650/600 中招）。
 - `.board-wrap > .brutal-card` `aspect-ratio:1/1`；底部三卡容器查询切换（bp-wide/bp-swap）。
 - header 三级降级（徽章→标题→「类型」弹出）阈值见 App 收编进 brutal.css 的注释。
+- **聊天栏形态与宽度全部由实测决定**（App.tsx `measureChat`，写 `--chat-w`）：
+  空间充足 = 与棋盘整组等宽 → 放不下则压缩聊天栏（棋盘完整优先）→ 压到
+  `CHAT_MIN_W`(240) 以下改用弹窗。**不要再引入「视口宽度断点」**（旧 1080px
+  媒体查询看不见「整组被高度压窄」这种显示不下）；停靠栏与弹窗互斥渲染。
 
 ## 历史教训索引（改相关代码前先读）
 
