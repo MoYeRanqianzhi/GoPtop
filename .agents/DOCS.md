@@ -6,6 +6,7 @@
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 前端模块地图（net/state/pages 三层）、wasm 规则执行、状态/ref 双轨、对局状态机、消息三链路去重与 sv 纪元、自适应布局红线、测试（vitest + E2E 42 断言 + 浏览器脚本）、历史教训索引 |
+| [docs/real-device-testing.md](docs/real-device-testing.md) | 全维度实机测试手册：五端驱动方式（桌面壳 custom-protocol/WebView2 调试端口、安卓 `_android` 驱动禁 connectOverCDP、鸿蒙 hdc fport 与 hvigor 构建）、测试脚本用法与规格串、驱动层 9 个坑、布局红线（棋盘正反馈塌陷/窄屏横幅遮挡）、回归口径 |
 | [docs/p2p-protocol.md](docs/p2p-protocol.md) | 三链路总览、URL 格式（邀请/回执/观战 spec 链接）、G1 信令编码、GameMsg 线格式（含 sv）、同源/回执/服务器三种建连时序、观战房间信令、身份与钥匙、服务器 WS 协议、Rust 规则真源 |
 | [../review/2026-09-13-cleanup-audit.md](../review/2026-09-13-cleanup-audit.md) | 2026-09-13 整理轮开工审计（frontend/crates/文档全量精读；历史审查归档在 review/archive/） |
 | [../review/2026-09-13-review-round.md](../review/2026-09-13-review-round.md) | 六维代码审查唯一台账（各维度发现与修复状态全在此跟踪） |
@@ -22,6 +23,7 @@
 - `2026-09-12-userid-link-negotiation-chat-spectator.md` — userId 链接回归；服务器纯转发；协商三链路去重
 - `2026-09-13-lobby-challenge-modal.md` — 大厅挑战两根因修复 + 邀请统一弹窗 + 跨设备实测
 - `2026-09-13-cleanup-refactor-round.md` — 整理轮：三层拆分、规则下沉 wasm、B1-B4 修复的根因与拍板
+- `2026-09-18-multi-device-real-test-round.md` — 全维度实机测试轮：五端两两对战/聊天/观战/设计功能全通；7 个产品缺陷与 2 个布局陷阱；测试内容与结果明细
 
 ## 规范要点（新 agent 必读）
 
