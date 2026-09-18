@@ -65,7 +65,7 @@ impl Session {
                     fx.push(Effect::Broadcast(self.next_msg(self.sync_state_kind())));
                 }
             }
-            MsgKind::Move { move_, by } => fx.extend(self.apply_move(move_, by)),
+            MsgKind::Move { move_, by } => fx.extend(self.on_move_net(msg.seq, move_, by)),
             MsgKind::Reset { kind, size } => {
                 self.peer_connected = true;
                 fx.extend(self.reset_board_for(&kind, size));
@@ -240,6 +240,38 @@ impl Session {
     }
 
     /// 应用远端落子（by 为准；乱序/重放/越界防御）。
+    /// 落子消息入口：轮次对上就立即应用，对不上（乱序先到）先暂存，等轮次到了补应用。
+    ///
+    /// 为什么必须暂存而不是丢弃：`on_net` 在分发**之前**就把 (sender, seq) 记进了去重表，
+    /// 被行棋方守卫拒收的那一手因此再也等不到「另一条路径的重传」——副本会被当重复吃掉，
+    /// 这一手**永久丢失**。观战者受害最明显：它同时收「房主自己的手（直连 + 中转）」和
+    /// 「房主转发的对手手（中转）」，两路交织时乱序概率最高
+    /// （2026-09-18 实机测试：快节奏对局下观战者永久少 2 手，20s 后仍不同步）。
+    pub(crate) fn on_move_net(&mut self, seq: u64, mv: MoveT, by: Color) -> Vec<Effect> {
+        if by == self.to_move {
+            let mut fx = self.apply_move(mv, by);
+            fx.extend(self.drain_pending_moves());
+            fx
+        } else {
+            // 上限保护：正常乱序只有一两手，攒多了说明对端行为异常，丢弃最早的。
+            if self.pending_moves.len() >= 16 {
+                self.pending_moves.remove(0);
+            }
+            self.pending_moves.push((seq, mv, by));
+            Vec::new()
+        }
+    }
+
+    /// 把暂存里所有「轮次已对上」的手补应用（每轮至少移出一个元素，必然终止）。
+    fn drain_pending_moves(&mut self) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        while let Some(pos) = self.pending_moves.iter().position(|(_, _, by)| *by == self.to_move) {
+            let (_, mv, by) = self.pending_moves.remove(pos);
+            fx.extend(self.apply_move(mv, by));
+        }
+        fx
+    }
+
     fn apply_move(&mut self, mv: MoveT, by: Color) -> Vec<Effect> {
         self.peer_connected = true;
         if by != "black" && by != "white" {
@@ -297,6 +329,8 @@ impl Session {
         }
         self.sync_epoch += 1;
         sync_mirror_from_engine(self);
+        // 悔棋后轮次已变：暂存的乱序手相对新局面全是过期手，必须丢弃。
+        self.pending_moves.clear();
         let snapshot = self.next_msg(self.sync_state_kind());
         vec![Effect::Broadcast(snapshot), Effect::Emit]
     }

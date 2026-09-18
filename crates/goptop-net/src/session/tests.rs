@@ -308,6 +308,65 @@ fn server_paste_invite_joins_via_server() {
     assert!(!fx.iter().any(|e| matches!(e, Effect::SendPresence(_))), "不得再走同源 presence 挑战");
 }
 
+/// 乱序落子：后一手先到 → 暂存，等前一手补齐后自动补应用（不得永久丢失）。
+/// 回归 2026-09-18 跨端实测：观战者多路径扇出（房主自己的手 + 房主转发的对手手）
+/// 乱序时，被守卫拒收的手已记入去重表，重传副本被吃掉 → 永久少手。
+#[test]
+fn out_of_order_move_is_buffered_then_applied() {
+    let mut s = mk("s", true);
+    let c = ctx(1000);
+    // 观战者视角复现（与对局者共用同一 apply 路径）。
+    s.role = Role::Spectator;
+    s.phase = Phase::Playing;
+    s.peer_connected = true;
+    // 两手来自**不同 sender**（黑手是房主自己下的、白手是房主转发的对手手），
+    // 各自 seq 从 1 起——去重表按 sender 单调，这才对应真实乱序场景。
+    let black1 = GameMsg::new(1, "peer-a", "u-a", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 7, y: 7 } }, by: "black".into() });
+    let white2 = GameMsg::new(1, "peer-b", "u-b", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 8, y: 8 } }, by: "white".into() });
+    // 第 2 手先到：轮次未到，不落子但暂存。
+    reduce(&mut s, Event::Net(white2), &c);
+    assert_eq!(s.board[8][8], "empty", "轮次未到不应落子");
+    assert_eq!(s.pending_moves.len(), 1, "乱序手应暂存");
+    assert_eq!(s.to_move, "black");
+    // 第 1 手到达：应用它，并把暂存的第 2 手一并补上。
+    reduce(&mut s, Event::Net(black1), &c);
+    assert_eq!(s.board[7][7], "black");
+    assert_eq!(s.board[8][8], "white", "轮次到达后应补应用暂存的乱序手");
+    assert!(s.pending_moves.is_empty(), "补应用后暂存应清空");
+    assert_eq!(s.to_move, "black", "两手走完轮到黑");
+}
+
+/// 重开/悔棋后暂存的乱序手必须作废（否则过期手会污染新局）。
+#[test]
+fn pending_moves_cleared_on_reset_and_undo() {
+    let mut s = mk("s", false);
+    let c = ctx(1000);
+    s.phase = Phase::Playing;
+    s.my_color = "black".into();
+    s.peer_connected = true;
+    let white2 = GameMsg::new(2, "peer-b", "u-b", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 8, y: 8 } }, by: "white".into() });
+    reduce(&mut s, Event::Net(white2), &c);
+    assert_eq!(s.pending_moves.len(), 1);
+    // 重开清空。
+    s.reset_board_for("gomoku", 15);
+    assert!(s.pending_moves.is_empty(), "重开后暂存应清空");
+}
+
+/// 服务器模式开局必须同时给出观战链接（含 spec=1 与 specPwd）。
+/// 回归 2026-09-18 跨端实测：服务器模式从不生成 spec_url，「邀请观战」复制空串。
+#[test]
+fn server_create_invite_provides_spectator_link() {
+    let mut a = mk("a", true);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    let url = a.spec_url.clone().expect("服务器模式也应有观战链接");
+    let sp = a.spec_pwd.clone().unwrap();
+    assert!(url.contains("spec=1"), "观战链接须带 spec=1：{url}");
+    assert!(url.contains(&sp), "观战链接须带 specPwd：{url}");
+    assert!(url.contains(&a.user_id), "观战链接须指向房主：{url}");
+}
+
 /// 服务器未就绪时粘贴：意图挂起（pending_link），连接成立后再补发 join。
 #[test]
 fn server_paste_invite_waits_for_ready_then_flushes() {

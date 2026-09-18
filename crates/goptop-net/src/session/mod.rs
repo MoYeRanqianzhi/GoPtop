@@ -292,6 +292,13 @@ pub struct Session {
     /* —— 去重与序号 —— */
     pub seq: u64,
     pub dedup: DedupTable,
+    /// 乱序到达的落子暂存（(seq, 落子, 行棋方)）。
+    /// 数据面同时走 DC / 服务器中转 / BC 三条路径，到达次序不保证：一手棋先于
+    /// 它前面那手到达时，行棋方守卫会拒收；而**消息此时已记入去重表**，重传副本
+    /// 会被当重复吃掉——于是这一手永久丢失。观战者受害最明显（它的消息来自
+    /// 「房主自己的手 + 房主转发的对手手」两路交织）。暂存到轮次对上再补应用，
+    /// 见 [`matchplay::on_move_net`]。
+    pub pending_moves: Vec<(u64, crate::protocol::MoveT, Color)>,
 }
 
 impl Session {
@@ -363,6 +370,7 @@ impl Session {
             score_result: None,
             seq: 0,
             dedup: DedupTable::default(),
+            pending_moves: Vec::new(),
         }
     }
 

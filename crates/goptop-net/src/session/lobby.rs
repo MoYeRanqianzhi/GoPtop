@@ -89,6 +89,8 @@ impl Session {
         self.history.clear();
         self.last_move = None;
         self.scoring = false;
+        // 新开局/重开：上一局的乱序暂存手全部过期。
+        self.pending_moves.clear();
         self.reset_score_state();
         vec![Effect::Emit]
     }
@@ -223,6 +225,11 @@ pub(crate) fn create_invite(s: &mut Session, ctx: &ReduceCtx) -> Vec<Effect> {
         // 服务器模式：链接回归 /<userId>?pwd=（无 rtc，最短）；pwd 校验在收到 join
         // signal 时于本端进行（错误转弹窗询问），offer 在受理后发出。
         s.invite_url = Some(links::invite_to_url(&s.share_origin, &s.user_id, &p, &s.kind, s.size, None));
+        // 观战链接同样要在这里生成：观众打开后经信令 spec-join，spec_pwd 校验在房主端
+        // （server_on_spec_join → server_admit_spectator）。
+        // 过去只在无服务器分支生成 spec_url，导致服务器模式下「邀请观战」复制出空串
+        // ——2026-09-18 跨端实机测试发现。
+        s.spec_url = Some(links::spec_link_url(&s.share_origin, &s.user_id, s.spec_pwd.as_deref().unwrap_or_default()));
         fx.push(Effect::Notice(None, None));
     } else {
         // 无服务器：offer 生成完成后（RtcReady）回填邀请链接与观战链接；

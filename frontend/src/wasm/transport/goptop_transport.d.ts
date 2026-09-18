@@ -117,8 +117,8 @@ export interface InitOutput {
     readonly wasmsession_spec_decode_probe: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmsession_start_pump: (a: number) => void;
     readonly wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1145: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1153: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1146: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1154: (a: number, b: number, c: number, d: number) => void;
     readonly __wasm_bindgen_func_elem_496: (a: number, b: number, c: number) => void;
     readonly __wasm_bindgen_func_elem_496_2: (a: number, b: number, c: number) => void;
     readonly __wasm_bindgen_func_elem_495: (a: number, b: number) => void;
