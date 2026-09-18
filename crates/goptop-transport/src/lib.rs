@@ -206,8 +206,8 @@ impl WasmSession {
     pub fn create_invite(&self) {
         self.cmd(UiCommand::CreateInvite);
     }
-    pub fn accept_invite(&self, inviter_id: String, pwd: Option<String>, kind: String, size: u16, rtc: Option<String>) {
-        self.cmd(UiCommand::AcceptInvite { inviter_id, pwd, kind, size, rtc });
+    pub fn accept_invite(&self, inviter_id: String, pwd: Option<String>, kind: String, size: u16, rtc: Option<String>, spec: bool) {
+        self.cmd(UiCommand::AcceptInvite { inviter_id, pwd, kind, size, rtc, spec });
     }
     pub fn accept_receipt(&self, receipt_json: &str) {
         if let Ok(ans) = serde_json::from_str::<AnswerIntent>(receipt_json) {

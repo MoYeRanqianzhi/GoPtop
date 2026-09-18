@@ -3,7 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmsession_free: (a: number, b: number) => void;
 export const wasmsession_accept_challenge: (a: number) => void;
-export const wasmsession_accept_invite: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+export const wasmsession_accept_invite: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
 export const wasmsession_accept_receipt: (a: number, b: number, c: number) => void;
 export const wasmsession_accept_spec_receipt: (a: number, b: number, c: number) => void;
 export const wasmsession_approve_spec: (a: number, b: number, c: number) => void;

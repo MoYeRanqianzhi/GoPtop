@@ -450,7 +450,10 @@ pub enum UiCommand {
     /// 主页开启对战（waiting）。
     CreateInvite,
     /// 受邀者：粘贴链接/点用户主页发起连接（pwd 可空）。
-    AcceptInvite { inviter_id: String, pwd: Option<String>, kind: String, size: SizeT, rtc: Option<String> },
+    /// `spec=true` 表示这条是**观战**链接（链接带 spec=1）：走观战通道而非对局加入。
+    /// 曾漏传该标志致粘贴观战链接被当成对局 join，被房主按「对局中」拒绝后弹回主页
+    /// （2026-09-18 跨端实机测试发现）。
+    AcceptInvite { inviter_id: String, pwd: Option<String>, kind: String, size: SizeT, rtc: Option<String>, spec: bool },
     /// 邀请者粘贴回执（对局/观战自动识别）。
     AcceptReceipt(Box<AnswerIntent>),
     /// 同源/挑战弹窗：接受与拒绝。
@@ -587,8 +590,8 @@ fn dispatch(s: &mut Session, ev: Event, ctx: &ReduceCtx) -> Vec<Effect> {
         Event::Boot { href } => lobby::on_boot(s, &href),
         Event::Ui(cmd) => match cmd {
             UiCommand::CreateInvite => lobby::create_invite(s, ctx),
-            UiCommand::AcceptInvite { inviter_id, pwd, kind, size, rtc } => {
-                lobby::accept_invite(s, ctx, &inviter_id, pwd, &kind, size, rtc)
+            UiCommand::AcceptInvite { inviter_id, pwd, kind, size, rtc, spec } => {
+                lobby::accept_invite(s, ctx, &inviter_id, pwd, &kind, size, rtc, spec)
             }
             UiCommand::AcceptReceipt(ans) => lobby::accept_receipt(s, ctx, &ans),
             UiCommand::AcceptSpecReceipt(ans) => lobby::accept_spec_receipt(s, ctx, &ans),

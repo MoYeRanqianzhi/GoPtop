@@ -134,12 +134,18 @@ class Endpoint {
     return JSON.parse(await this.page.evaluate(() => window.__session.snapshot()));
   }
 
-  /** 轮询快照直到 pred 成立；超时抛错并带最后快照摘要。 */
+  /** 轮询快照直到 pred 成立；超时抛错并带最后快照摘要。
+   *  刚导航（打开链接）时 wasm 会话尚未挂载，evaluate 会读不到 __session——按未就绪继续轮询。 */
   async waitSnap(pred, timeout, label = "条件") {
     const t0 = Date.now();
     let last = null;
     while (Date.now() - t0 < timeout) {
-      last = await this.snap();
+      try {
+        last = await this.snap();
+      } catch {
+        await this.page.waitForTimeout(200);
+        continue;
+      }
       if (pred(last)) return last;
       await this.page.waitForTimeout(120);
     }
@@ -158,7 +164,7 @@ class Endpoint {
 
   /** 点第一个可见且文案含 text 的 button。 */
   async clickButton(text, timeout = 15000) {
-    const loc = this.page.locator("button", { hasText: text }).first();
+    const loc = this.page.locator("button:visible", { hasText: text }).first();
     await loc.waitFor({ state: "visible", timeout });
     await loc.click({ timeout });
     return this;
@@ -166,7 +172,7 @@ class Endpoint {
 
   /** 点带指定 title 的 button（聊天入口等无文案按钮）。 */
   async clickByTitle(title, timeout = 15000) {
-    const loc = this.page.locator(`button[title="${title}"]`).first();
+    const loc = this.page.locator(`button[title="${title}"]:visible`).first();
     await loc.waitFor({ state: "visible", timeout });
     await loc.click({ timeout });
     return this;
@@ -174,7 +180,7 @@ class Endpoint {
 
   /** 点第一个可见且文案含 text 的元素（非 button，如链接/页签）。 */
   async clickText(text, timeout = 15000) {
-    const loc = this.page.getByText(text, { exact: false }).first();
+    const loc = this.page.locator(`:visible`, { hasText: text }).first();
     await loc.waitFor({ state: "visible", timeout });
     await loc.click({ timeout });
     return this;
@@ -182,7 +188,7 @@ class Endpoint {
 
   /** 向输入框键入（先清空）。selector 支持 placeholder 文本。 */
   async typeInto(selector, text, { enter = false } = {}) {
-    const loc = this.page.locator(selector).first();
+    const loc = this.page.locator(`${selector}:visible`).first();
     await loc.waitFor({ state: "visible", timeout: 15000 });
     await loc.click();
     await loc.fill("");
@@ -199,18 +205,26 @@ class Endpoint {
     return this;
   }
 
-  /** 回到主页（菜单页）。 */
-  async home() {
-    const s = await this.snap();
-    if (s.phase === "home") return this;
-    // 壳/浏览器统一：优先点「离开/取消」回到大厅，再点「菜单」。
-    for (const t of [UI.backHome, "取消", "返回"]) {
-      const b = this.page.locator("button", { hasText: t }).first();
-      if (await b.count() && await b.isVisible().catch(() => false)) {
-        await b.click().catch(() => {});
-        await this.page.waitForTimeout(300);
-        break;
+  /** 回到主页（菜单页）。对局中/等待中都能用——按「离开/取消」直至 phase=home。 */
+  async home(timeout = 20000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      const s = await this.snap();
+      if (s.phase === "home" && s.role === "idle") return this;
+      let clicked = false;
+      for (const t of [UI.backHome, "取消", "返回"]) {
+        const b = this.page.locator("button:visible", { hasText: t }).first();
+        if (await b.count() && await b.isVisible().catch(() => false)) {
+          await b.click().catch(() => {});
+          clicked = true;
+          break;
+        }
       }
+      if (!clicked) {
+        // 已在菜单页但没有「离开」按钮：点顶栏「菜单」兜底。
+        await this.clickButton(UI.menuEntry).catch(() => {});
+      }
+      await this.page.waitForTimeout(400);
     }
     return this;
   }
@@ -277,6 +291,8 @@ class Endpoint {
    * 坐标换算与 BoardSvg.coordFromEvent 严格互逆（同一套 pad/cell/viewBox）。
    */
   async place(gx, gy) {
+    // 窄屏聊天弹窗若还开着会盖住棋盘，点击会被遮罩吃掉——先收起（等价用户点空白处）。
+    await this.closeChat();
     const info = await this.page.evaluate(([x, y]) => {
       const svg = document.querySelector('svg[role="grid"]');
       if (!svg) return null;
@@ -309,8 +325,11 @@ class Endpoint {
   async openChat() {
     const s = await this.snap();
     if (s.phase !== "playing") return this;
+    // 幂等：窄屏聊天是弹窗，弹窗一开就会把入口按钮盖住——再点一次必然被遮罩拦截。
+    const modal = this.page.locator(".chat-modal-bg").first();
+    if (await modal.count() && await modal.isVisible().catch(() => false)) return this;
     // 窄屏（手机）聊天是弹窗；宽屏是侧栏——两种情况都点同一个入口按钮。
-    const btn = this.page.locator(`button[title="${UI.chatOpenTitle}"]`).first();
+    const btn = this.page.locator(`button[title="${UI.chatOpenTitle}"]:visible`).first();
     if (await btn.count() && await btn.isVisible().catch(() => false)) {
       await btn.click();
       await this.page.waitForTimeout(250);
@@ -318,21 +337,65 @@ class Endpoint {
     return this;
   }
 
-  /** 发聊天消息（真实键入 + 点发送）。 */
-  async sendChat(text) {
-    await this.openChat();
-    const input = this.page.locator(`input[placeholder="${UI.chatPlaceholder}"]`).first();
-    await input.waitFor({ state: "visible", timeout: 10000 });
-    await input.click();
-    await input.type(text, { delay: 15 });
-    await this.clickButton(UI.chatSend);
+  /**
+   * 聊天面板作用域：窄屏（手机/移动视口）聊天是 `.chat-modal-bg` 弹窗，宽屏是侧栏。
+   * 弹窗打开时侧栏仍在 DOM 里且 CSS 上「可见」——直接点全局第一个匹配会点到底下被遮罩
+   * 挡住的那个（Playwright 报「intercepts pointer events」）。有弹窗就一律在弹窗内找。
+   */
+  async chatScope() {
+    const modal = this.page.locator(".chat-modal-bg").first();
+    if (await modal.count() && await modal.isVisible().catch(() => false)) return modal;
+    return this.page;
+  }
+
+  /** 在聊天面板作用域内点按钮。 */
+  async clickInChat(text, timeout = 15000) {
+    const scope = await this.chatScope();
+    const loc = scope.locator("button:visible", { hasText: text }).first();
+    await loc.waitFor({ state: "visible", timeout });
+    await loc.click({ timeout });
     return this;
   }
 
-  /** 协商请求（悔棋/重开/换棋）——在聊天面板内。 */
+  /** 发聊天消息（真实键入 + 点发送）。 */
+  async sendChat(text) {
+    await this.openChat();
+    const scope = await this.chatScope();
+    const input = scope.locator(`input[placeholder="${UI.chatPlaceholder}"]`).first();
+    await input.waitFor({ state: "visible", timeout: 10000 });
+    await input.click();
+    await input.type(text, { delay: 15 });
+    await this.clickInChat(UI.chatSend);
+    return this;
+  }
+
+  /**
+   * 收起窄屏聊天弹窗（点遮罩空白处，等价用户点一下面板外）。
+   * 发起协商的一方发完请求后弹窗仍开着，会把棋盘整个盖住——后续落子点击全被遮罩吃掉。
+   */
+  async closeChat() {
+    const modal = this.page.locator(".chat-modal-bg").first();
+    if (!(await modal.count()) || !(await modal.isVisible().catch(() => false))) return this;
+    const box = await modal.boundingBox();
+    if (box) {
+      // 面板居中且有 16px padding，四角必是遮罩而非面板。
+      const pt = [box.x + 4, box.y + 4];
+      if (this.tap) {
+        try { await this.page.touchscreen.tap(pt[0], pt[1]); }
+        catch { await this.page.mouse.click(pt[0], pt[1]); }
+      } else {
+        await this.page.mouse.click(pt[0], pt[1]);
+      }
+    }
+    await this.page.waitForTimeout(300);
+    return this;
+  }
+
+  /** 协商请求（悔棋/重开/换棋）——在聊天面板内；发完即收起面板，回到棋盘。 */
   async negotiate(kind) {
     await this.openChat();
-    await this.clickButton(UI[kind]);
+    await this.clickInChat(UI[kind]);
+    await this.closeChat();
     return this;
   }
 

@@ -172,7 +172,7 @@ fn process_intent(s: &mut Session, ctx: &ReduceCtx, it: &UrlIntent) -> Vec<Effec
                     }
                     s.invite_done_href = Some(href_key);
                     // 带 pwd 打开：自动发起带钥匙连接；邀请者校验后自动同意。
-                    fx.extend(accept_invite(s, ctx, user_id, Some(p.clone()), kind, *size, rtc.clone()));
+                    fx.extend(accept_invite(s, ctx, user_id, Some(p.clone()), kind, *size, rtc.clone(), false));
                 }
             }
             // 无 pwd：仅展示对方主页，由用户手动挑战（无 effect）。
@@ -242,7 +242,20 @@ pub(crate) fn create_invite(s: &mut Session, ctx: &ReduceCtx) -> Vec<Effect> {
 }
 
 /// 受邀者：向某用户发起连接（粘贴链接/主页挑战；pwd 可空）。
-pub(crate) fn accept_invite(s: &mut Session, ctx: &ReduceCtx, inviter_id: &str, pwd: Option<String>, kind: &str, size: SizeT, rtc_offer: Option<String>) -> Vec<Effect> {
+pub(crate) fn accept_invite(s: &mut Session, ctx: &ReduceCtx, inviter_id: &str, pwd: Option<String>, kind: &str, size: SizeT, rtc_offer: Option<String>, spec: bool) -> Vec<Effect> {
+    // 观战链接（spec=1）：与「打开链接」走同一条通道——服务器模式发 spec-join 信令，
+    // 无服务器模式用链接里的 specrtc offer 直连。粘贴与点链接必须等价
+    //（2026-09-18 实机测试：粘贴观战链接曾被当对局 join，被房主拒绝后弹回主页）。
+    if spec {
+        if s.server_mode {
+            s.pending_link = Some(PendingLink { target: inviter_id.to_string(), pwd, spec: true });
+            return s.flush_pending_link();
+        }
+        return match rtc_offer {
+            Some(offer) => accept_spec_offer_serverless(s, ctx, inviter_id.to_string(), pwd, offer),
+            None => vec![Effect::Notice(Some("此观战链接缺少直连信令：请向房主要求含直连参数的最新链接".into()), Some(4200))],
+        };
+    }
     // 服务器模式且链接不带直连 offer：join 必须走信令服务器转发。
     // 下面 None 分支发的 presence 挑战只在**同源**（同一浏览器/同一 origin）可达，
     // 跨设备根本到不了对方——2026-09-18 实机测试发现：粘贴邀请链接后两端永远停在

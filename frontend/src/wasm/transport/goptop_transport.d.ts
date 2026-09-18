@@ -8,7 +8,7 @@ export class WasmSession {
     free(): void;
     [Symbol.dispose](): void;
     accept_challenge(): void;
-    accept_invite(inviter_id: string, pwd: string | null | undefined, kind: string, size: number, rtc?: string | null): void;
+    accept_invite(inviter_id: string, pwd: string | null | undefined, kind: string, size: number, rtc: string | null | undefined, spec: boolean): void;
     accept_receipt(receipt_json: string): void;
     accept_spec_receipt(receipt_json: string): void;
     approve_spec(id: string): void;
@@ -79,7 +79,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmsession_free: (a: number, b: number) => void;
     readonly wasmsession_accept_challenge: (a: number) => void;
-    readonly wasmsession_accept_invite: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+    readonly wasmsession_accept_invite: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
     readonly wasmsession_accept_receipt: (a: number, b: number, c: number) => void;
     readonly wasmsession_accept_spec_receipt: (a: number, b: number, c: number) => void;
     readonly wasmsession_approve_spec: (a: number, b: number, c: number) => void;

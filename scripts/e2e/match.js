@@ -110,22 +110,41 @@ async function pairUp(A, B, { serverMode = process.env.XDEV_SERVER !== "none" } 
  * 下到分出胜负：每手由「当前行棋方」用真实点击落子，直到 winner 出现。
  * 返胜者。maxMoves 兜底防死循环。
  */
-async function playToVictory(A, B, { maxMoves = 260, onMove = null, levelA = "sharp", levelB = "casual" } = {}) {
-  for (let i = 0; i < maxMoves; i++) {
+/**
+ * 步进 n 手真实落子（每手等两端同步）；中途出现胜者立即返回。
+ * 返回 winner 或 null（走满 n 手仍未见胜负）。
+ */
+async function playMoves(A, B, n, { sync = true } = {}) {
+  let played = 0;
+  let guard = 0;
+  while (played < n && guard++ < n * 40 + 80) {
     const s = await A.snap();
-    if (s.winner) {
-      console.log(`[对局] 第 ${s.moveCount} 手分出胜负：${s.winner} 胜`);
-      return s.winner;
-    }
+    if (s.winner) return s.winner;
     const aMoves = s.toMove === s.myColor;
     const mover = aMoves ? A : B;
-    const mv = await playOneMove(mover, aMoves ? levelA : levelB);
-    if (!mv) { await sleep(300); continue; }
-    if (onMove) await onMove(i, mover, mv, s);
-    // 等两端看到同一局面（同步确认），再继续下一手。
-    await waitSync(A, B, 40000);
+    // 棋力按**行棋方的执色**分配（黑 sharp / 白 casual），不按端点：换棋会互换执色，
+    // 按端点分配会让两边棋力随换棋漂移。该组合已离线模拟验证：黑 37 手取胜。
+    // 注意 s 是 A 的快照，走 B 时要取反色，否则把 A 的档位套到 B 头上。
+    const moverColor = aMoves ? s.myColor : (s.myColor === "black" ? "white" : "black");
+    const level = moverColor === "black" ? "sharp" : "casual";
+    const mv = await playOneMove(mover, level);
+    if (!mv) { await sleep(250); continue; }
+    if (process.env.MATCH_DEBUG === "1" && played % 10 === 0) {
+      console.log(`  [dbg] 第${played + 1}手 ${mover.name} 执${moverColor} 档=${level} 盘面=${mv.x},${mv.y}`);
+    }
+    played++;
+    if (sync) await waitSync(A, B, 40000);
   }
-  throw new Error("达到最大手数仍未分出胜负");
+  return null;
+}
+
+/** 下到分出胜负。 */
+async function playToVictory(A, B, opts = {}) {
+  const { maxMoves = 260 } = opts;
+  const w = await playMoves(A, B, maxMoves, opts);
+  if (!w) throw new Error("达到最大手数仍未分出胜负");
+  console.log(`[对局] 第 ${(await A.snap()).moveCount} 手分出胜负：${w} 胜`);
+  return w;
 }
 
 /* ----------------------------- 场景 ----------------------------- */
@@ -144,7 +163,7 @@ async function scenarioGame(A, B) {
 async function scenarioChat(A, B) {
   await pairUp(A, B);
   // 先落两子（协商需要非空历史）。
-  for (let i = 0; i < 2; i++) { await playToVictory(A, B, { maxMoves: 1 }); await waitSync(A, B); }
+  await playMoves(A, B, 2);
 
   // 聊天双向
   await A.sendChat("你好，我是" + A.name);
@@ -198,9 +217,19 @@ async function scenarioWatch(A, B, C) {
     await C.joinByPaste(spec);
   }
   await C.waitSnap((s) => s.phase === "playing", 90000, `${C.name} 进入观战`);
+  await C.waitSnap((s) => s.peerConnected, 60000, `${C.name} 直连建立`);
   console.log(`[观战] ${C.name} role=${(await C.snap()).role}`);
   // A 落一手，观战者应看到
-  for (let i = 0; i < 6; i++) { await playToVictory(A, B, { maxMoves: 1 }); await waitSync(A, B); }
+  // 逐手落子并观察观战者同步（便于定位镜像丢失在那一手）。
+  for (let i = 0; i < 6; i++) {
+    const s = await A.snap();
+    const mover = s.toMove === s.myColor ? A : B;
+    const mv = await playOneMove(mover);
+    if (!mv) { await sleep(250); i--; continue; }
+    await waitSync(A, B, 40000);
+    const cs = await C.snap();
+    console.log(`  [观战] 第${i + 1}手 ${mover.name}(${mv.x},${mv.y}) → C 手数=${cs.moveCount}`);
+  }
   await C.waitSnap((s) => s.moveCount >= 6, 30000, "观战者看到落子");
   console.log(`[观战] 观战者同步到手数 ${(await C.snap()).moveCount} ✓`);
   const w = await playToVictory(A, B);

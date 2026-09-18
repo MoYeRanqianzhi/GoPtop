@@ -297,7 +297,7 @@ fn server_paste_invite_joins_via_server() {
     reduce(&mut b, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
     let fx = reduce(
         &mut b,
-        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("p1w2e3".into()), kind: "gomoku".into(), size: 15, rtc: None }),
+        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("p1w2e3".into()), kind: "gomoku".into(), size: 15, rtc: None, spec: false }),
         &c,
     );
     assert!(b.role == Role::Invitee && b.phase == Phase::Waiting);
@@ -367,6 +367,28 @@ fn server_create_invite_provides_spectator_link() {
     assert!(url.contains(&a.user_id), "观战链接须指向房主：{url}");
 }
 
+/// 粘贴**观战**链接（spec=1）必须走观战通道（spec-join），不能当对局 join。
+/// 回归 2026-09-18 跨端实测：UI 漏传 spec 标志，观战链接被当对局加入，
+/// 房主按「对局中」拒绝后观众被弹回主页——粘贴观战链接完全无效。
+#[test]
+fn server_paste_spectator_link_joins_as_spectator() {
+    let mut c = mk("c", true);
+    let cc = ctx(1000);
+    reduce(&mut c, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &cc);
+    let fx = reduce(
+        &mut c,
+        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("spec77".into()), kind: "gomoku".into(), size: 15, rtc: None, spec: true }),
+        &cc,
+    );
+    assert_eq!(c.role, Role::Spectator, "观战链接应进观战态");
+    assert_eq!(c.my_host.as_deref(), Some("u-a"));
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "spec-join" && v["payload"]["pwd"] == "spec77")),
+        "应发 spec-join 信令"
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "join")), "不得发对局 join");
+}
+
 /// 服务器未就绪时粘贴：意图挂起（pending_link），连接成立后再补发 join。
 #[test]
 fn server_paste_invite_waits_for_ready_then_flushes() {
@@ -375,7 +397,7 @@ fn server_paste_invite_waits_for_ready_then_flushes() {
     // 服务器尚未 ready：不应发出任何 join。
     let fx = reduce(
         &mut b,
-        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("k1".into()), kind: "gomoku".into(), size: 15, rtc: None }),
+        Event::Ui(UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: Some("k1".into()), kind: "gomoku".into(), size: 15, rtc: None, spec: false }),
         &c,
     );
     assert!(!fx.iter().any(|e| matches!(e, Effect::SendServer(_))), "未就绪时不应发信令");

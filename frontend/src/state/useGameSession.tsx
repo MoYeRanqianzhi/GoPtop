@@ -231,7 +231,7 @@ export function useGameSession() {
     const m = modal;
     if (!m || !session) return;
     if (m === "paste-invite") {
-      const parsed = JSON.parse(session.parse_link(modalInput)) as { ok: boolean; intent?: { mode: string; userId?: string; pwd?: string | null; kind?: GameKind; size?: Size; rtc?: string | null } };
+      const parsed = JSON.parse(session.parse_link(modalInput)) as { ok: boolean; intent?: { mode: string; userId?: string; pwd?: string | null; kind?: GameKind; size?: Size; rtc?: string | null; spec?: boolean } };
       if (!parsed.ok || !parsed.intent) {
         setModalErr("无法识别该链接：请完整粘贴邀请链接或主页链接");
         return;
@@ -249,7 +249,9 @@ export function useGameSession() {
         setModalInput("");
         setModalErr(null);
         setModal(null);
-        session.accept_invite(it.userId, it.pwd ?? null, it.kind ?? "gomoku", it.size ?? 15, it.rtc ?? null);
+        // spec 标志必须一起透传：观战链接（spec=1）走观战通道，否则会被当成对局 join
+        // 而被房主按「对局中」拒绝，粘贴观战链接直接无效。
+        session.accept_invite(it.userId, it.pwd ?? null, it.kind ?? "gomoku", it.size ?? 15, it.rtc ?? null, it.spec ?? false);
         return;
       }
       if (it.mode === "watch" && "gameId" in it) {
@@ -305,7 +307,7 @@ export function useGameSession() {
     submitModal,
     createInvite: () => cmd((s2) => s2.create_invite()),
     acceptInvite: (inviterId: string, pwdOrNull: string | null, k: GameKind, sz: Size, rtc?: string | null) =>
-      cmd((s2) => s2.accept_invite(inviterId, pwdOrNull, k, sz, rtc ?? null)),
+      cmd((s2) => s2.accept_invite(inviterId, pwdOrNull, k, sz, rtc ?? null, false)),
     acceptChallenge: () => cmd((s2) => s2.accept_challenge()),
     rejectChallenge: () => cmd((s2) => s2.reject_challenge()),
     backHome: () => cmd((s2) => s2.back_home()),

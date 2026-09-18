@@ -22,9 +22,10 @@ export class WasmSession {
      * @param {string | null | undefined} pwd
      * @param {string} kind
      * @param {number} size
-     * @param {string | null} [rtc]
+     * @param {string | null | undefined} rtc
+     * @param {boolean} spec
      */
-    accept_invite(inviter_id, pwd, kind, size, rtc) {
+    accept_invite(inviter_id, pwd, kind, size, rtc, spec) {
         const ptr0 = passStringToWasm0(inviter_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         var ptr1 = isLikeNone(pwd) ? 0 : passStringToWasm0(pwd, wasm.__wbindgen_export, wasm.__wbindgen_export2);
@@ -33,7 +34,7 @@ export class WasmSession {
         const len2 = WASM_VECTOR_LEN;
         var ptr3 = isLikeNone(rtc) ? 0 : passStringToWasm0(rtc, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         var len3 = WASM_VECTOR_LEN;
-        wasm.wasmsession_accept_invite(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, size, ptr3, len3);
+        wasm.wasmsession_accept_invite(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, size, ptr3, len3, spec);
     }
     /**
      * @param {string} receipt_json

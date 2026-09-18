@@ -95,6 +95,14 @@ export default function App() {
         }
       : null;
 
+  // 窄屏下聊天弹窗（z-index 800）会整个盖住协商横幅（ConfirmBanner 在常规流里，
+  // 静态 z-index 不生效）——请求到了用户根本看不见，对方只能一直等（实机测试发现：
+  // 移动端开着聊天时悔棋/换棋/重开请求全部不可达）。有待决请求就收起聊天弹窗，
+  // 横幅随即可见；处理完随时可再打开聊天。
+  useEffect(() => {
+    if (confirmReq && chatOpen) setChatOpen(false);
+  }, [confirmReq, chatOpen]);
+
   // 聊天面板（宽屏右侧停靠；窄屏弹窗，形态由 CSS 控制）
   const chatPanel = (
     <ChatPanel
