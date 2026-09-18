@@ -70,6 +70,10 @@ export class WasmSession {
      * 安装 50ms 定时泵（App 挂载时调用一次）。
      */
     start_pump(): void;
+    /**
+     * 【调试探针】观战/服务器内部状态（E2E 诊断用）。
+     */
+    state_debug(): string;
     toggle_dead(x: number, y: number): void;
 }
 
@@ -116,12 +120,13 @@ export interface InitOutput {
     readonly wasmsession_snapshot: (a: number, b: number) => void;
     readonly wasmsession_spec_decode_probe: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmsession_start_pump: (a: number) => void;
+    readonly wasmsession_state_debug: (a: number, b: number) => void;
     readonly wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1146: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1154: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_496: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_496_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_495: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_1151: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1159: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_498: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_498_2: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_497: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

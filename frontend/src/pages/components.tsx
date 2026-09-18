@@ -386,6 +386,9 @@ export function BoardPanel(props: {
   actions?: ReactNode;
   /** P2P 对局：原悔棋/重开按钮位替换为聊天入口（协商动作移入聊天面板）。 */
   chatButton?: ReactNode;
+  /** 围棋终局计分：已标死子（红叉）与「可点已有点」开关，透传给棋盘。 */
+  dead?: Coord[];
+  allowOccupied?: boolean;
 }) {
   const { kind, size, board, toMove, winner, lastMove, hover, onHover, disabled, onPlace } = props;
   /* 底部三卡（2026-09-07 用户拍板）：宽时「规则」「对局」并排；显示不下时两宽卡收起，
@@ -445,7 +448,7 @@ export function BoardPanel(props: {
       </div>
 
       <div className="board-wrap">
-        <BoardSvg size={size} board={board} onPlace={onPlace} lastMove={lastMove} hover={hover} onHover={onHover} disabled={disabled} kind={kind} />
+        <BoardSvg size={size} board={board} onPlace={onPlace} lastMove={lastMove} hover={hover} onHover={onHover} disabled={disabled} kind={kind} dead={props.dead} allowOccupied={props.allowOccupied} />
       </div>
 
       {/* 底部（用户拍板 2026-09-07）：宽时「规则/对局」两张原卡并排；显示不下时两卡都收起，

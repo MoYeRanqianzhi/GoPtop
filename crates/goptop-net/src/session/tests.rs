@@ -367,6 +367,52 @@ fn server_create_invite_provides_spectator_link() {
     assert!(url.contains(&a.user_id), "观战链接须指向房主：{url}");
 }
 
+/// 挑战受理到达时，挑战者必须被带到对局页（他在名册页发起的挑战）。
+/// 回归 2026-09-18 实机测试：受理方自动进入对局，挑战方却停在名册页。
+#[test]
+fn challenge_accepted_navigates_challenger_to_game() {
+    let mut a = mk("a", true);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
+    // 挑战者在主页向对方发起挑战（他会留在名册页）。
+    reduce(&mut a, Event::Ui(UiCommand::ServerChallenge("u-b".into())), &c);
+    assert!(a.phase == Phase::Home, "挑战发起后仍在主页");
+    // 对方受理 → 挑战者应被导航到 /p2p。
+    let fx = reduce(&mut a, Event::Server(ServerEvt::Signal { from: "u-b".into(), kind: "challenge-accepted".into(), payload: serde_json::json!({ "name": "乙" }) }), &c);
+    assert!(fx.iter().any(|e| matches!(e, Effect::Nav(p) if p == "/p2p")), "挑战者应被带到对局页");
+}
+
+/// 认输：认输者未必正在行棋——胜负必须按**认输者的执色**判，且认输不增加手数。
+/// 回归 2026-09-18 实机测试：黑落一手后（轮到白）点认输，被判「黑胜」；镜像还把
+/// 认输记成一手停手，手数从 1 变 2。
+#[test]
+fn resign_by_non_moving_side_judges_by_resigner_color() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    a.phase = Phase::Playing;
+    a.role = Role::Inviter;
+    a.my_color = "black".into();
+    a.peer_connected = true;
+    // 黑落一手 → 轮到白（此时黑认输 = 非行棋方认输）。
+    reduce(&mut a, Event::Ui(UiCommand::Place { x: 7, y: 7 }), &c);
+    assert_eq!(a.to_move, "white");
+    assert_eq!(a.history.len(), 1);
+    // 黑认输。
+    let fx = reduce(&mut a, Event::Ui(UiCommand::Resign), &c);
+    assert_eq!(a.winner.as_deref(), Some("white"), "认输者执黑 → 白胜");
+    assert_eq!(a.history.len(), 1, "认输不是一手棋，手数不得增加");
+    let msg = fx.iter().find_map(|e| match e { Effect::Broadcast(m) => Some(m.clone()), _ => None }).expect("应广播认输");
+    // 对手收到：即使轮到白、by=black 也必须立即生效（不得被轮次守卫拦下）。
+    let mut b = mk("b", false);
+    b.phase = Phase::Playing;
+    b.role = Role::Invitee;
+    b.my_color = "white".into();
+    b.peer_connected = true;
+    b.to_move = "white".into();
+    reduce(&mut b, Event::Net(msg), &c);
+    assert_eq!(b.winner.as_deref(), Some("white"), "对手应立刻收到认输结果");
+}
+
 /// 粘贴**观战**链接（spec=1）必须走观战通道（spec-join），不能当对局 join。
 /// 回归 2026-09-18 跨端实测：UI 漏传 spec 标志，观战链接被当对局加入，
 /// 房主按「对局中」拒绝后观众被弹回主页——粘贴观战链接完全无效。
@@ -439,4 +485,21 @@ fn kick_sends_notice_before_removal() {
     let idx_sync = fx.iter().position(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "spec-sync"));
     assert!(idx_kick.is_some() && idx_sync.is_some() && idx_kick < idx_sync);
     assert!(a.spectators.is_empty());
+}
+
+/// 观战者申请发言：向自己的 host 发 spec-chat-req 信令。
+#[test]
+fn spectator_request_chat_sends_signal_to_host() {
+    let mut c = mk("c", true);
+    c.role = Role::Spectator;
+    c.my_host = Some("u-a".into());
+    c.server_state = "ready".into();
+    c.phase = Phase::Playing;
+    let cc = ctx(1000);
+    let fx = reduce(&mut c, Event::Ui(UiCommand::RequestSpecChat), &cc);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "spec-chat-req" && v["to"] == "u-a")),
+        "应发 spec-chat-req 给 host；实际 effects={:?}",
+        fx.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
+    );
 }

@@ -673,14 +673,16 @@ pub(crate) fn sync_mirror_from_engine(s: &mut Session) {
     s.to_move = stone_to_color(s.engine.to_move);
     s.winner = s.engine.winner.map(stone_to_color);
     s.scoring = s.engine.scoring;
+    // 认输**不进**镜像历史：它不是落子也不是停手，协议 HistoryEntry 只表达 Place/Pass，
+    // 早先把它映射成 Pass 会让手数虚增一手（认输后手数 +1，2026-09-18 实机测试发现）。
     s.history = s
         .engine
         .history
         .iter()
-        .map(|m| match m {
-            Move::Place(c) => crate::protocol::HistoryEntry::Place(CoordT { x: u16::from(c.x), y: u16::from(c.y) }),
-            Move::Pass => crate::protocol::HistoryEntry::Pass("pass".into()),
-            Move::Resign => crate::protocol::HistoryEntry::Pass("pass".into()),
+        .filter_map(|m| match m {
+            Move::Place(c) => Some(crate::protocol::HistoryEntry::Place(CoordT { x: u16::from(c.x), y: u16::from(c.y) })),
+            Move::Pass => Some(crate::protocol::HistoryEntry::Pass("pass".into())),
+            Move::Resign => None,
         })
         .collect();
     // lastMove 语义是最后一颗落子：向前找最近坐标。

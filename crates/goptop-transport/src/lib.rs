@@ -305,6 +305,21 @@ impl WasmSession {
         self.cmd(UiCommand::BackHome);
     }
 
+    /// 【调试探针】观战/服务器内部状态（E2E 诊断用）。
+    pub fn state_debug(&self) -> String {
+        let c = self.core.borrow();
+        let s = &c.session;
+        serde_json::json!({
+            "role": format!("{:?}", s.role),
+            "phase": format!("{:?}", s.phase),
+            "myHost": s.my_host,
+            "serverState": s.server_state,
+            "serverMode": s.server_mode,
+            "spectators": s.spectators.len(),
+            "opponent": s.opponent,
+        }).to_string()
+    }
+
     /// 【调试探针】specrtc 解码逐层结果。
     pub fn spec_decode_probe(&self, token: String, pwd: String) -> String {
         let _ = self;

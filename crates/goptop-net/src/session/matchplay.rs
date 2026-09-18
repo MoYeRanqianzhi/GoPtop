@@ -248,6 +248,10 @@ impl Session {
     /// 「房主转发的对手手（中转）」，两路交织时乱序概率最高
     /// （2026-09-18 实机测试：快节奏对局下观战者永久少 2 手，20s 后仍不同步）。
     pub(crate) fn on_move_net(&mut self, seq: u64, mv: MoveT, by: Color) -> Vec<Effect> {
+        // 认输不参与轮次：它不是落子/停手，任何时候都必须立即生效（否则会被暂存到天荒地老）。
+        if matches!(mv, MoveT::Resign) {
+            return self.apply_move(mv, by);
+        }
         if by == self.to_move {
             let mut fx = self.apply_move(mv, by);
             fx.extend(self.drain_pending_moves());
@@ -434,6 +438,9 @@ pub(crate) fn resign(s: &mut Session, ctx: &ReduceCtx) -> Vec<Effect> {
         return Vec::new();
     }
     sync_mirror_from_engine(s);
+    // 引擎的 Resign 语义是「当前行棋方认输」（它不知道是谁点的）——认输者未必正在行棋，
+    // 必须按自己的执色重定胜负，否则会出现「我认输、却判我赢」（2026-09-18 实机测试发现）。
+    s.winner = Some(if me == "black" { "white".into() } else { "black".into() });
     vec![Effect::Broadcast(s.next_msg(MsgKind::Move { move_: MoveT::Resign, by: me })), Effect::Emit]
 }
 

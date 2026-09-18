@@ -3,6 +3,7 @@
  * home 大厅 / waiting 等待卡+棋盘 / playing 对局卡+棋盘。
  * 服务器模式观战链接 specUrl 原在 App 计算，只在本页使用，随之归属本页。
  */
+import { useState } from "react";
 import { nav, specLinkUrl } from "../net/links";
 import type { GameSession } from "../state/useGameSession";
 import { BoardPanel, PeerList } from "./components";
@@ -18,9 +19,18 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
     inviteUrl, watchUrl, notice, answerBackUrl, copyFb, myHomeUrl,
     serverMode, serverState, spectateEnabled, specPwd,
     linkLamp, statusText, boardDisabled, moveCount,
+    scoring, myScoreOk, peerScoreOk, scoreResult, myDead, peerDead,
     setModal, setModalInput, setModalErr, setHover,
     createInvite, acceptInvite, backHome, copyText, handlePlace, serverChallengePeer,
+    handlePass, toggleDead, confirmScore, handleResign,
   } = s;
+  // 认输两步确认（终局动作不可逆，单击即认输太容易误触）。
+  const [resignArm, setResignArm] = useState(false);
+
+  // —— 围棋终局计分（2026-09-18 实机测试发现页面层未接线：引擎/状态机/wasm 早已就绪，
+  //    但没有任何组件渲染停一手与计分入口，用户实际走不到这两个功能）——
+  const scoringActive = kind === "go" && scoring && !winner;
+  const deadMarked = myDead.length + peerDead.length;
 
   // 观战链接：Rust 状态机权威生成（服务器模式 spec 链接；无服务器含 specrtc 直连参数）。
   // 快照无值时回退本地拼接（兼容无服务器流程前的展示）。
@@ -127,11 +137,44 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
               </UrlRow>
             )}
           </div>
+
+          {/* 围棋终局计分卡：双方各标死子（标记同步），都确认后自动数目出结果。
+              此前完全没有 UI——双 Pass 后玩家只能看到「黑/白 落子」的普通对局态，
+              既标不了死子也确认不了，终局卡死（实机测试发现）。 */}
+          {scoringActive && (
+            <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", flexDirection: "column", gap: 8 }}>
+              <span className="brutal-label">终局计分</span>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, lineHeight: 1.6 }}>
+                双方连续停一手，进入终局。点击棋盘上的棋子标记死子（双方标记实时同步，已标 {deadMarked} 子），
+                都点「确认计分」后按中国规则数目（黑贴 7.5 目）。
+              </div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
+                  我方：{myScoreOk ? "已确认" : "待确认"}　对方：{peerScoreOk ? "已确认" : "待确认"}
+                </span>
+                <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={confirmScore} disabled={myScoreOk}>
+                  {myScoreOk ? "已确认，等对方" : "确认计分"}
+                </button>
+              </div>
+              {scoreResult && (
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 800 }}>
+                  黑 {scoreResult.black} 目 · 白 {scoreResult.white} 目 → {scoreResult.winner === "black" ? "黑" : "白"} 胜
+                  （标死 {scoreResult.deadRemoved} 子）
+                </div>
+              )}
+            </div>
+          )}
+
           <BoardPanel
             kind={kind} size={size} board={board} toMove={toMove} winner={winner}
             lastMove={lastMove} hover={hover} onHover={setHover}
-            disabled={boardDisabled} onPlace={handlePlace}
-            statusText={statusText} statusNote={`${myColor === "black" ? "执黑" : "执白"}`}
+            /* 计分阶段：点棋子=标死子，且不受轮次限制（双方都要能标） */
+            disabled={scoringActive ? false : boardDisabled}
+            onPlace={scoringActive ? (c) => toggleDead(c) : handlePlace}
+            dead={[...myDead, ...peerDead]}
+            allowOccupied={scoringActive}
+            statusText={scoringActive ? "终局计分" : statusText}
+            statusNote={scoringActive ? "点击棋子标记死子" : `${myColor === "black" ? "执黑" : "执白"}`}
             moveCount={moveCount}
             onUndo={null} onReset={null}
             chatButton={
@@ -142,7 +185,25 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
                 </svg>
               </button>
             }
-            actions={specUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl, "观战链接已复制")}>复制观战链接</button>}
+            actions={
+              <>
+                {/* 围棋：停一手（双 Pass 触发终局计分）；计分阶段不再提供 */}
+                {kind === "go" && !winner && !scoring && toMove === myColor && (
+                  <button className="brutal-btn brutal-btn--sm" onClick={handlePass} title="停一手（双方连续停一手进入终局计分）">停一手</button>
+                )}
+                {/* 认输：两步确认（终局动作不可逆） */}
+                {!winner && !scoring && (
+                  <button
+                    className="brutal-btn brutal-btn--sm"
+                    onClick={() => { if (resignArm) { handleResign(); setResignArm(false); } else setResignArm(true); }}
+                    title="认输（对手获胜）"
+                  >
+                    {resignArm ? "再点确认认输" : "认输"}
+                  </button>
+                )}
+                {specUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl, "观战链接已复制")}>复制观战链接</button>}
+              </>
+            }
           />
         </>
       )}

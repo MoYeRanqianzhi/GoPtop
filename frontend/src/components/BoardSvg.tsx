@@ -46,6 +46,8 @@ export function BoardSvg({
   onHover,
   disabled,
   kind,
+  allowOccupied = false,
+  dead = [],
 }: {
   size: number;
   board: StoneColor[][];
@@ -55,6 +57,14 @@ export function BoardSvg({
   onHover: (c: Coord | null) => void;
   disabled?: boolean;
   kind: "gomoku" | "go";
+  /**
+   * 允许点击**已有点**（围棋终局标死子用）。
+   * 默认 false：落子语义下点已有棋子应当被忽略；标死子是点「棋子上」，
+   * 若沿用默认守卫，整个棋盘一颗子都标不了（2026-09-18 实机测试发现）。
+   */
+  allowOccupied?: boolean;
+  /** 已标记为死子的点（终局计分）：画红叉，双方标记合起来展示。 */
+  dead?: Coord[];
 }) {
   const padding = 30;
   const cell = 36;
@@ -100,7 +110,7 @@ export function BoardSvg({
           if (disabled) return;
           const c = coordFromEvent(e);
           if (!c) return;
-          if (board[c.y]?.[c.x] !== "empty") return;
+          if (!allowOccupied && board[c.y]?.[c.x] !== "empty") return;
           onPlace(c);
         }}
         role="grid"
@@ -153,6 +163,17 @@ export function BoardSvg({
             );
           }),
         )}
+        {/* 死子标记 — 红叉（终局计分，双方标记合并显示） */}
+        {dead.map((d) => {
+          const cx = padding + d.x * cell;
+          const cy = padding + d.y * cell;
+          return (
+            <g key={`dead-${d.x}-${d.y}`} stroke="#D62828" strokeWidth={3} strokeLinecap="round">
+              <line x1={cx - 11} y1={cy - 11} x2={cx + 11} y2={cy + 11} />
+              <line x1={cx + 11} y1={cy - 11} x2={cx - 11} y2={cy + 11} />
+            </g>
+          );
+        })}
       </svg>
     </div>
   );

@@ -100,7 +100,10 @@ export default function App() {
   // 移动端开着聊天时悔棋/换棋/重开请求全部不可达）。有待决请求就收起聊天弹窗，
   // 横幅随即可见；处理完随时可再打开聊天。
   useEffect(() => {
-    if (confirmReq && chatOpen) setChatOpen(false);
+    if (!confirmReq || !chatOpen) return;
+    // 只在窄屏（聊天是覆盖式弹窗，1080px 以下）才收起；宽屏聊天是右侧停靠栏，
+    // 与横幅并排不遮挡——那边收起反而把用户正在看的聊天打断。
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1079px)").matches) setChatOpen(false);
   }, [confirmReq, chatOpen]);
 
   // 聊天面板（宽屏右侧停靠；窄屏弹窗，形态由 CSS 控制）

@@ -130,7 +130,12 @@ impl Session {
                 if self.phase != Phase::Home && !(self.phase == Phase::Waiting && self.role == Role::Inviter) {
                     return Vec::new();
                 }
-                self.server_admit_challenger(from, ctx)
+                let mut fx = self.server_admit_challenger(from, ctx);
+                // 挑战者是从「在线用户」页发起挑战的，受理到达时他人还在名册页——
+                // 必须把他带到对局页，否则只有一句「前往 P2P 页」的手动链接，
+                // 而受理方是自动进入的（2026-09-18 实机测试发现的不一致）。
+                fx.push(Effect::Nav("/p2p".into()));
+                fx
             }
             // —— 观战请求：pwd 对自动同意，错/无转聊天区私有申请 ——
             "spec-join" => self.server_on_spec_join(from, pl, ctx),
