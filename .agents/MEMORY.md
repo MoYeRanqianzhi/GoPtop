@@ -14,4 +14,4 @@
 - [2026-09-15 Rust 化第二阶段落地](memory/2026-09-15-rustification-phase2-landed.md) — 五项遗留全清；联调期六大深层 bug（FeedOffer/RenamePeer/negotiated DC/观战镜像转发/通知顺序/mDNS 环境）；验证基线全绿
 - [2026-09-13 大厅挑战修复+邀请弹窗](memory/2026-09-13-lobby-challenge-modal.md) — challenge-accepted 守卫错位+/users 走错信令两根因；邀请统一居中弹窗不设背景关闭；E2E 39 断言；跨设备实测（本机↔美国官服）挑战→弹窗→对局→黑胜全通且 WebRTC 直连成功
 - [2026-09-13 整理轮：三层拆分+规则下沉 wasm](memory/2026-09-13-cleanup-refactor-round.md) — 架构要求重申（Rust 承接一切，TS 只 UI）；wasm 规则接线（pickKind 中间帧 trap 坑）；B1-B4 根因；E2E 断言依赖 UI 文案面的教训；多代理禁令解除
-- [2026-09-14 四端实机验证+真 Windows 标题栏+六维审查](memory/2026-09-14-four-platform-testbar-review-round.md) — HTMAXBUTTON 覆盖层真 Snap Layouts（点击/悬停必须回传页面）；Android `__TAURI_INTERNALS__` 非 document-start 注入坑；HarmonyOS ArkWeb 壳（未签名 HAP 可装模拟器+CDP 驱动）；SyncState.history 必须可表达 Pass；E2E 入库 scripts/e2e/；官服部署程序
+- [2026-09-14 四端实机验证+真 Windows 标题栏+六维审查](memory/2026-09-14-four-platform-testbar-review-round.md) — HTMAXBUTTON 覆盖层真 Snap Layouts（点击/悬停必须回传页面；恒返回非客户区命中码 ⇒ 只收 WM_NCMOUSEMOVE/NCMOUSELEAVE，须配 TME_NONCLIENT，2026-09-19 补修）；Android `__TAURI_INTERNALS__` 非 document-start 注入坑；HarmonyOS ArkWeb 壳（未签名 HAP 可装模拟器+CDP 驱动）；SyncState.history 必须可表达 Pass；E2E 入库 scripts/e2e/；官服部署程序

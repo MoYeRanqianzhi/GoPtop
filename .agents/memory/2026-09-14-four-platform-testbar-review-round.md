@@ -54,6 +54,36 @@
 `scripts/e2e/run.js` + 部署官服后跑 `official-smoke.js`；改 crates/goptop-core 后
 重跑 scripts/build-wasm.sh 并提交产物。
 
+## 补修 2026-09-19：最大化键悬停底色从不生效（非客户区消息）
+
+用户报「放大缩小按钮鼠标放上去背景不变色」。**根因**：覆盖层 `WM_NCHITTEST` 恒返回
+`HTMAXBUTTON`（非客户区命中码），系统把该窗口的鼠标输入**整体走非客户区通道**——
+到达的是 `WM_NCMOUSEMOVE`(160) / `WM_NCMOUSELEAVE`(674) / `WM_NCLBUTTONDOWN`，
+`WM_MOUSEMOVE`(512) / `WM_MOUSELEAVE`(675) 一条都不来。原实现只收客户区消息，
+悬停分支是死代码 → `titlebar://max-hover` 从不触发 → `.wc-btn--hover` 从不挂上。
+（点击本来就正常：它收的正是非客户区的 `WM_NCLBUTTONDOWN`，所以只有悬停这一路哑。）
+
+- 修法：改收 `WM_NCMOUSEMOVE` / `WM_NCMOUSELEAVE`；`TrackMouseEvent` 的 `dwFlags`
+  必须加 `TME_NONCLIENT`（只给 `TME_LEAVE` 只跟踪客户区，永远收不到离开消息，
+  底色会挂着不撤）。
+- 顺带修：Alt+Tab 切走时光标不离开按钮，不产生离开消息 → 失焦窗口一直亮着按钮
+  （真 Windows 失焦即清）。补 `WM_ACTIVATE`+`WA_INACTIVE` 清悬停态（默认处理照走）。
+- **实测证据（本机 Win11 26200 / 150% DPI）**：临时探针落盘覆盖层收到的消息，
+  悬停时只有 `msg=160`（周期性的 NCHITTEST+WM_NCMOUSEMOVE）；修后 DOM 侧
+  `document.querySelectorAll('.wc-btn:hover')` 为空而 `.wc-btn--hover` 命中「最大化」、
+  计算背景 `rgb(43,43,43)`；屏幕取色在按钮物理区间（1840..1902）取到 #2B2B2B。
+- **坐标换算坑（诊断时踩到）**：截图/MCP 屏幕坐标是物理 px，页面 CSS 坐标要乘
+  `devicePixelRatio` 再加 `window.screenX/screenY`（实测 screenX*1.5 与 Rust 侧
+  `GetWindowRect(overlay)` 一致）；靠缩放截图目测字形认按钮会认错（曾把最小化当最大化，
+  CSS `:hover` 因此假阳性）。判定「是哪条路径生效」用 DOM 探针（`:hover` vs `--hover` 类），
+  不要只看颜色变了没有。GDI `GetPixel` 返回 COLORREF 是 **BGR** 序（`303BFF` = #FF3B30）。
+
+**Why:** 这是「单测/编译全绿但用户一眼可见」的缺陷，且第三版才定位到消息类型；
+非客户区命中会改变整条鼠标消息通道这件事，是这条覆盖层路线最容易漏的一条规则。
+
+**How to apply:** 改 titlebar.rs 后按上面 DOM 探针法复验（悬停进入/离开/失焦/最大化态
+四种转换），并确认 Snap Layouts 弹层仍在（那是 OS 基于 HTMAXBUTTON 给的，别动命中返回）。
+
 ## 会话收尾状态（2026-09-14，全部已推送 origin/main 至 2554fd5）
 
 全部完成：四端实机验证、真 Windows 标题栏、六维审查 #1-#6、修复批

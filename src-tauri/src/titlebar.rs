@@ -9,6 +9,8 @@
 //! **动作必须回传页面**（emit `titlebar://max-click`，前端执行 toggleMaximize）：
 //! decorations:false 下根窗口没有 caption 语义，向根窗口转发 WM_NCLBUTTONDOWN
 //! 是无效动作——第一版的踩坑点（技能/模板原文「必须把悬停和点击事件回传页面」）。
+//! 恒返回非客户区命中码的连带后果：本窗口的鼠标输入全部走非客户区通道，只收
+//! `WM_NCMOUSEMOVE`/`WM_NCMOUSELEAVE`/`WM_NCLBUTTONDOWN`，客户区消息一条不来。
 //! 最小化/关闭不经本层（前端经 Tauri window API 转发，技能允许的窄例外）。
 //!
 //! 窗口样式约束（缺一即失效）：必须 WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS；
@@ -24,8 +26,7 @@ mod imp {
         Win32::{
             Foundation::*,
             System::LibraryLoader::GetModuleHandleW,
-            UI::Controls::WM_MOUSELEAVE,
-            UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT},
+            UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT},
             UI::WindowsAndMessaging::*,
         },
     };
@@ -57,30 +58,46 @@ mod imp {
                     }
                     LRESULT(0)
                 }
-                // 悬停态回传：覆盖层吞掉了按钮的 mousemove，CSS :hover 失效——
-                // 状态转换（进入/离开）各发一次事件，前端手动上悬停底色（第二版踩坑点）
-                WM_MOUSEMOVE => {
+                // 悬停态回传：覆盖层吞掉了按钮的鼠标消息，CSS :hover 失效——
+                // 状态转换（进入/离开）各发一次事件，前端手动上悬停底色（第二版踩坑点）。
+                // **必须收非客户区消息**：WM_NCHITTEST 恒返回 HTMAXBUTTON（非客户区命中码），
+                // 系统于是把本窗口的鼠标输入整体走非客户区通道——到达的是 WM_NCMOUSEMOVE /
+                // WM_NCMOUSELEAVE，WM_MOUSEMOVE / WM_MOUSELEAVE 永不出现（第三版踩坑点：
+                // 悬停时实测只收到 msg=160，客户区分支是死代码，悬停底色从不生效）。
+                WM_NCMOUSEMOVE => {
                     if !MAX_HOVER.swap(true, Ordering::SeqCst) {
                         if let Some(app) = APP.get() {
                             let _ = app.emit(MAX_HOVER_EVENT, true);
                         }
                     }
-                    // 注册 TME_LEAVE：光标离层时产生 WM_MOUSELEAVE
+                    // TME_NONCLIENT 是另一半：不加它 TrackMouseEvent 只跟踪客户区，
+                    // 非客户区命中下永远不会产生离开消息，悬停底色会一直挂着不撤。
                     let tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
+                        dwFlags: TME_LEAVE | TME_NONCLIENT,
                         hwndTrack: hwnd,
                         dwHoverTime: 0,
                     };
                     let _ = TrackMouseEvent(&tme as *const TRACKMOUSEEVENT as *mut TRACKMOUSEEVENT);
                     LRESULT(0)
                 }
-                WM_MOUSELEAVE => {
+                WM_NCMOUSELEAVE => {
                     MAX_HOVER.store(false, Ordering::SeqCst);
                     if let Some(app) = APP.get() {
                         let _ = app.emit(MAX_HOVER_EVENT, false);
                     }
                     LRESULT(0)
+                }
+                // 窗口失活时主动清悬停态：Alt+Tab 切走光标并不离开按钮，不产生
+                // WM_NCMOUSELEAVE，残留的高亮会让失焦窗口一直亮着按钮（真 Windows
+                // 失焦即清）。默认处理照走，别吞掉 WM_ACTIVATE。
+                WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => {
+                    if MAX_HOVER.swap(false, Ordering::SeqCst) {
+                        if let Some(app) = APP.get() {
+                            let _ = app.emit(MAX_HOVER_EVENT, false);
+                        }
+                    }
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
