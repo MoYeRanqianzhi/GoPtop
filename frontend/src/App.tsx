@@ -63,8 +63,28 @@ export default function App() {
       armed = false;
       requestAnimationFrame(() => {
         armed = true;
-        const next = Math.max(220, Math.floor(boardWrap.clientHeight));
-        if (Math.abs(next - last) < 4) return;
+        const stack = boardWrap.parentElement;
+        if (!stack) return;
+        // 关键：固定卡片（非棋盘）的高度必须在**最宽**的 stack 下量。
+        // 卡片宽度越窄内容越换行、越高——若按当前（可能已被挤窄的）宽度量，
+        // 会形成「棋盘变小 → stack 变窄 → 卡片变高 → 棋盘更小」的正反馈，
+        // 一路塌陷到宽度下限（桌面壳 1100×760 实测棋盘只剩 50px，肉眼不可用）。
+        // 先临时撑到最大宽度量一次，再算棋盘可用高度（同一帧内改回，不会闪）。
+        main.style.setProperty("--stack-max", "720px");
+        const gap = parseFloat(getComputedStyle(stack).rowGap) || 0;
+        let fixed = 0;
+        let count = 0;
+        for (const child of Array.from(stack.children)) {
+          if (child === boardWrap) continue;
+          fixed += child.getBoundingClientRect().height;
+          count++;
+        }
+        fixed += gap * (count + 1);
+        const next = Math.max(240, Math.min(720, Math.floor(main.clientHeight - fixed)));
+        if (Math.abs(next - last) < 4) {
+          main.style.setProperty("--stack-max", `${last || next}px`);
+          return;
+        }
         last = next;
         main.style.setProperty("--stack-max", `${next}px`);
       });

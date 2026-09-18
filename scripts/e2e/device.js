@@ -293,6 +293,9 @@ class Endpoint {
   async place(gx, gy) {
     // 窄屏聊天弹窗若还开着会盖住棋盘，点击会被遮罩吃掉——先收起（等价用户点空白处）。
     await this.closeChat();
+    // 先把棋盘滚进视口：mouse.click 用的是视口坐标，棋盘在折叠线下会点空
+    //（短窗口下加了计分条后踩到）。等价用户先把棋盘滑到眼前。
+    await this.page.locator('svg[role="grid"]').first().scrollIntoViewIfNeeded().catch(() => {});
     const info = await this.page.evaluate(([x, y]) => {
       const svg = document.querySelector('svg[role="grid"]');
       if (!svg) return null;

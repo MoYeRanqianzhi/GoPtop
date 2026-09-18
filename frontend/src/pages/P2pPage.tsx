@@ -138,33 +138,12 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
             )}
           </div>
 
-          {/* 围棋终局计分卡：双方各标死子（标记同步），都确认后自动数目出结果。
+          {/* 围棋终局计分：**不新增卡片**，控件并入下面 BoardPanel 的状态行。
               此前完全没有 UI——双 Pass 后玩家只能看到「黑/白 落子」的普通对局态，
-              既标不了死子也确认不了，终局卡死（实机测试发现）。 */}
-          {scoringActive && (
-            <div className="brutal-card" style={{ padding: "10px 12px", background: "#fffbeb", display: "flex", flexDirection: "column", gap: 8 }}>
-              <span className="brutal-label">终局计分</span>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, lineHeight: 1.6 }}>
-                双方连续停一手，进入终局。点击棋盘上的棋子标记死子（双方标记实时同步，已标 {deadMarked} 子），
-                都点「确认计分」后按中国规则数目（黑贴 7.5 目）。
-              </div>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
-                  我方：{myScoreOk ? "已确认" : "待确认"}　对方：{peerScoreOk ? "已确认" : "待确认"}
-                </span>
-                <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={confirmScore} disabled={myScoreOk}>
-                  {myScoreOk ? "已确认，等对方" : "确认计分"}
-                </button>
-              </div>
-              {scoreResult && (
-                <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 800 }}>
-                  黑 {scoreResult.black} 目 · 白 {scoreResult.white} 目 → {scoreResult.winner === "black" ? "黑" : "白"} 胜
-                  （标死 {scoreResult.deadRemoved} 子）
-                </div>
-              )}
-            </div>
-          )}
-
+              既标不了死子也确认不了，终局卡死（实机测试发现）。
+              为什么不单独做一张卡：play-stack 的宽度由「棋盘剩余高度」反推，
+              多一张卡会把棋盘压扁（桌面壳 1100×760 实测从 230px 掉到 92px，
+              点不准棋子），而这个反馈环会一路收敛到宽度下限。 */}
           <BoardPanel
             kind={kind} size={size} board={board} toMove={toMove} winner={winner}
             lastMove={lastMove} hover={hover} onHover={setHover}
@@ -187,6 +166,23 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
             }
             actions={
               <>
+                {/* 终局计分控件（标死子进度 / 双方确认态 / 确认按钮 / 计分结果） */}
+                {scoringActive && (
+                  <>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>
+                      已标 {deadMarked} 子　我方{myScoreOk ? "✓" : "待"} 对方{peerScoreOk ? "✓" : "待"}
+                    </span>
+                    {scoreResult ? (
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
+                        黑 {scoreResult.black} : 白 {scoreResult.white} → {scoreResult.winner === "black" ? "黑" : "白"} 胜
+                      </span>
+                    ) : (
+                      <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={confirmScore} disabled={myScoreOk}>
+                        {myScoreOk ? "已确认，等对方" : "确认计分"}
+                      </button>
+                    )}
+                  </>
+                )}
                 {/* 围棋：停一手（双 Pass 触发终局计分）；计分阶段不再提供 */}
                 {kind === "go" && !winner && !scoring && toMove === myColor && (
                   <button className="brutal-btn brutal-btn--sm" onClick={handlePass} title="停一手（双方连续停一手进入终局计分）">停一手</button>

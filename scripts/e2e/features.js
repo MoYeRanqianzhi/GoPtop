@@ -133,10 +133,24 @@ async function scenarioLocal(ep) {
 
 /* ------------------------- 场景：围棋提子 + 终局计分 ------------------------- */
 
+/**
+ * 选围棋 9 路。顺序很重要：尺寸按钮随当前规则变（五子棋是 15/19，围棋才有 9/13/19），
+ * 所以必须先切围棋再选 9×9。窄屏（手机/短窗口）两者都收在「类型」折叠面板里，
+ * 且面板选完规则会自动收起——每步都要重新判断是否需要再展开。
+ */
+async function pickGo9(ep) {
+  const vis = async (t) => {
+    const b = ep.page.locator("button:visible", { hasText: t }).first();
+    return (await b.count()) > 0 && (await b.isVisible().catch(() => false));
+  };
+  if (!(await vis("围棋"))) { await ep.clickButton("类型"); await sleep(350); }
+  await ep.clickButton("围棋"); await sleep(400);
+  if (!(await vis("9×9"))) { await ep.clickButton("类型"); await sleep(350); }
+  await ep.clickButton("9×9"); await sleep(350);
+}
+
 async function scenarioGo(A, B) {
-  // A 选围棋 9 路再开局（顶部选择器在主页可用）
-  await A.clickButton("围棋"); await sleep(300);
-  await A.clickButton("9×9"); await sleep(300);
+  await pickGo9(A);
   await pairUp(A, B);
   const [sa, sb] = [await A.snap(), await B.snap()];
   check("围棋 9 路建局", sa.kind === "go" && sa.size === 9 && sb.kind === "go" && sb.size === 9, `${sa.kind}/${sa.size}`);
@@ -172,10 +186,17 @@ async function scenarioGo(A, B) {
 
   // 标记死子（点盘上一颗黑子）
   const first = sc.board.flatMap((row, y) => row.map((c, x) => ({ c, x, y }))).find((p) => p.c === "black");
-  if (first) { await A.place(first.x, first.y); await waitSync(A, B); }
-  const marked = await B.snap();
+  if (first) {
+    const rect = await A.page.evaluate(() => { const el = document.querySelector('svg[role="grid"]'); const r = el.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) }; });
+    console.log(`  [诊断] 点击 (${first.x},${first.y})，A 棋盘 ${JSON.stringify(rect)}`);
+    await A.place(first.x, first.y);
+    await sleep(800);
+    console.log(`  [诊断] A 自身标记=${JSON.stringify((await A.snap()).myDead)}`);
+  }
+  // 标记不改变手数，waitSync 会立即返回——必须显式等对方收到 ScoreMark。
+  const marked = await B.waitSnap((s) => s.peerDead.length >= 1 || s.myDead.length >= 1, 20000, "死子标记同步");
   check("死子标记同步到对方", marked.peerDead.length >= 1 || marked.myDead.length >= 1,
-    `我方=${marked.myDead.length} 对方=${marked.peerDead.length}`);
+    `对方收到=${marked.peerDead.length} 子`);
 
   // 双方确认 → 出计分结果
   await A.clickButton("确认计分");
