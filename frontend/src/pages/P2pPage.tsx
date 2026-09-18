@@ -3,7 +3,6 @@
  * home 大厅 / waiting 等待卡+棋盘 / playing 对局卡+棋盘。
  * 服务器模式观战链接 specUrl 原在 App 计算，只在本页使用，随之归属本页。
  */
-import { useState } from "react";
 import { nav, specLinkUrl } from "../net/links";
 import type { GameSession } from "../state/useGameSession";
 import { BoardPanel, PeerList } from "./components";
@@ -11,8 +10,8 @@ import { NoticeLine } from "../components/NoticeLine";
 import { StatusLamp } from "../components/StatusLamp";
 import { UrlRow } from "../components/UrlRow";
 
-export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) => void }) {
-  const { s, setChatOpen } = props;
+export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
+  const { s, toggleChat } = props;
   const {
     kind, size, board, toMove, winner, lastMove, hover,
     tabUser, peers, role, phase, myColor,
@@ -22,10 +21,8 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
     scoring, myScoreOk, peerScoreOk, scoreResult, myDead, peerDead,
     setModal, setModalInput, setModalErr, setHover,
     createInvite, acceptInvite, backHome, copyText, handlePlace, serverChallengePeer,
-    handlePass, toggleDead, confirmScore, handleResign,
+    handlePass, toggleDead, confirmScore,
   } = s;
-  // 认输两步确认（终局动作不可逆，单击即认输太容易误触）。
-  const [resignArm, setResignArm] = useState(false);
 
   // —— 围棋终局计分（2026-09-18 实机测试发现页面层未接线：引擎/状态机/wasm 早已就绪，
   //    但没有任何组件渲染停一手与计分入口，用户实际走不到这两个功能）——
@@ -157,7 +154,9 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
             moveCount={moveCount}
             onUndo={null} onReset={null}
             chatButton={
-              <button className="brutal-btn brutal-btn--sm" onClick={() => setChatOpen(true)} title="聊天 / 悔棋 / 重开 / 换棋">
+              /* 开关同一个按钮：开着再点即收起（停靠栏形态下面板自身也有「收起」，
+                 两者等价——实机用户就是点这个按钮发现关不掉的） */
+              <button className="brutal-btn brutal-btn--sm" onClick={toggleChat} title="聊天 / 悔棋 / 重开 / 换棋 / 认输">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" style={{ display: "block" }}>
                   <path d="M21 12a8 8 0 0 1-8 8H4l2.4-3A8 8 0 1 1 21 12z" strokeLinejoin="round" />
                   <circle cx="9" cy="12" r="0.6" fill="currentColor" /><circle cx="13" cy="12" r="0.6" fill="currentColor" /><circle cx="17" cy="12" r="0.6" fill="currentColor" />
@@ -187,16 +186,8 @@ export function P2pPage(props: { s: GameSession; setChatOpen: (open: boolean) =>
                 {kind === "go" && !winner && !scoring && toMove === myColor && (
                   <button className="brutal-btn brutal-btn--sm" onClick={handlePass} title="停一手（双方连续停一手进入终局计分）">停一手</button>
                 )}
-                {/* 认输：两步确认（终局动作不可逆） */}
-                {!winner && !scoring && (
-                  <button
-                    className="brutal-btn brutal-btn--sm"
-                    onClick={() => { if (resignArm) { handleResign(); setResignArm(false); } else setResignArm(true); }}
-                    title="认输（对手获胜）"
-                  >
-                    {resignArm ? "再点确认认输" : "认输"}
-                  </button>
-                )}
+                {/* 认输已移入聊天区（对局操作集合区）——棋盘旁的操作行只留
+                    棋盘/终局直接相关的东西，见 pages/components.tsx ChatPanel */}
                 {specUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => copyText(specUrl, "观战链接已复制")}>复制观战链接</button>}
               </>
             }

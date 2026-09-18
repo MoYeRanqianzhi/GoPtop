@@ -7,7 +7,7 @@
  *   node features.js local <端>                     本地对战：落子/悔棋/重开
  *   node features.js go <A> <B>                     围棋：提子 → 双停一手 → 终局计分
  *   node features.js challenge <A> <B>              大厅挑战（在线用户 → 挑战 → 弹窗同意）
- *   node features.js resign <A> <B>                 认输（两步确认）
+ *   node features.js resign <A> <B>                 认输（聊天区内两步确认）
  *   node features.js specchat <A> <B> <C>           观战者申请发言（双方批准后发言到达）
  *   node features.js kick <A> <B> <C>               房主踢出观战者
  *
@@ -261,8 +261,11 @@ async function scenarioChallenge(A, B) {
 async function scenarioResign(A, B) {
   await pairUp(A, B);
   await playOneMove(A); await waitSync(A, B);
-  await A.clickButton("认输"); await sleep(300);
-  await A.clickButton("再点确认认输");
+  // 认输在聊天区（对局操作集合区），不在棋盘旁的操作行——先进聊天面板再点
+  await A.openChat();
+  await A.clickInChat("认输"); await sleep(300);
+  await A.clickInChat("再点确认认输");
+  await A.closeChat();
   await B.waitSnap((s) => !!s.winner, 30000, "B 收到认输");
   const [ra, rb] = [await A.snap(), await B.snap()];
   check("认输判负、对手获胜", ra.winner === rb.winner && ra.winner === "white", `A(黑)认输 → winner=${ra.winner}`);

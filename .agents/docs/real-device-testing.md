@@ -82,7 +82,7 @@ hdc fport tcp:9444 localabstract:webview_devtools_remote_<pid>            # sock
 | `device.js` | 端点抽象（browser / mob / android / cdp 四种构造）+ 真实输入原语 + 五子棋对局策略 |
 | `match.js` | 两两对战三场景：`game`（下到分出胜负）/ `chat`（聊天+悔棋+换棋+重开+收尾完局）/ `watch`（第三方观战） |
 | `matrix.js` | 矩阵批跑：内置 11 对端组合，逐对 spawn `match.js` 并汇总 |
-| `features.js` | 设计功能：`local` / `go` / `challenge` / `resign` / `specchat` / `kick` |
+| `features.js` | 设计功能：`local` / `go` / `challenge` / `resign`（聊天区内两步确认）/ `specchat` / `kick` |
 | `diag-pair.js` / `diag-watch.js` | 配对与观战镜像诊断（逐手打印各端手数与盘面差异） |
 | `run.js` / `go-capture.js` / `ui-audit.js` / `challenge-server.js` | 既有浏览器基线（见同目录 README） |
 
@@ -103,11 +103,14 @@ node diag-watch.js web mob web                       # 观战镜像逐手诊断
 
 ## 5. 驱动层踩过的坑（写脚本前先看）
 
-1. **隐藏的同名元素**：窄屏下聊天面板同时存在「停靠栏」与「弹窗」两份 DOM，
+1. **隐藏的同名元素**：聊天面板与其它卡片可能同时存在多份同名结构，
    `.locator(...).first()` 会选中 `display:none` 的那份且永远不可点。
-   所有选择器统一加 `:visible`；聊天相关操作先取 `.chat-modal-bg` 为作用域
-   （弹窗开着时侧栏按钮会被遮罩拦截，Playwright 报 `intercepts pointer events`）。
-2. **openChat 要幂等**：弹窗一开就会盖住聊天入口按钮，重复点必然超时。
+   所有选择器统一加 `:visible`；聊天相关操作先取 `.chat-modal-bg` / `.chat-dock`
+   为作用域（弹窗开着时侧栏按钮会被遮罩拦截，Playwright 报 `intercepts pointer events`）。
+2. **openChat 必须幂等**：聊天入口按钮是**开关**（开着再点即收起），
+   弹窗形态下它还会被遮罩盖住。点之前先判 `.chat-dock` / `.chat-modal-bg` 是否可见
+   （`device.js` 的 `chatPanel()` 与 `run.js` 的 `openChat()` 都是这么做的）。
+   2026-09-19 改成开关语义后，run.js 里三处「盲目点入口」的写法全炸过一遍。
 3. **发起协商后要收起弹窗**：移动端发起方发完请求，弹窗仍开着会盖住棋盘，
    后续落子点击全被遮罩吃掉。`closeChat()` 点遮罩空白处（面板居中且有 padding，四角必是遮罩）。
 4. **落子前先 `scrollIntoViewIfNeeded`**：`mouse.click` 用视口坐标，棋盘滑到折叠线下会点空。
@@ -138,6 +141,11 @@ node diag-watch.js web mob web                       # 观战镜像逐手诊断
   空间充足与棋盘整组等宽 → 放不下先压缩聊天栏（下棋软件，棋盘完整优先）→
   压到 240px 以下改弹窗。**`.play-stack` 不许被压窄（`flex: 0 0 auto`）**，
   否则「停靠栏挤窄整组 → 实测又把挤窄值当基准」会锁死棋盘宽度（vw=650/600 中招）。
+- **聊天面板必须有「收起」入口**：停靠栏形态没有遮罩可点，此前（2026-09-19 修）
+  停靠栏**根本关不掉**——面板里最像关闭的「关闭观战」是关观战功能，点了反而把观战关掉。
+  现在：面板标题行常驻「收起」，棋盘旁的聊天入口按钮是**开关**（开着再点即收起）。
+- **认输在聊天区内**（对局操作集合区：悔棋/重开/换棋/认输同排），不在棋盘旁的操作行——
+  聊天区存在的意义就是收纳这些按钮，棋盘旁只留棋盘/终局直接相关的东西。
 - 改布局后至少在 **1100×760**（桌面壳默认窗口）与 **Pixel 5（393×851）** 两个尺寸
   各看一次棋盘是否可点、按钮是否可达；聊天改动另看三档形态（≈1400 等宽 /
   ≈800 压缩 / ≈650 弹窗）。
@@ -147,7 +155,7 @@ node diag-watch.js web mob web                       # 观战镜像逐手诊断
 ```bash
 cargo test                                            # net / core / server 三包
 cd frontend && npx tsc --noEmit && npx vitest run
-node scripts/e2e/run.js                               # 浏览器基线 49 断言
+node scripts/e2e/run.js                               # 浏览器基线 58 断言
 node scripts/e2e/matrix.js game                       # 五端两两 11 对（需先起壳与模拟器）
 node scripts/e2e/features.js <场景> <端…>              # 设计功能
 ```

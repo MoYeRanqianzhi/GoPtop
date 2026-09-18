@@ -28,7 +28,8 @@ const UI = {
   pasteInvite: "粘贴邀请链接",
   pasteSubmit: "连接",
   copyInvite: "复制",
-  chatOpenTitle: "聊天 / 悔棋 / 重开 / 换棋",
+  chatOpenTitle: "聊天 / 悔棋 / 重开 / 换棋 / 认输", // 入口即开关（开着再点即收起）
+  chatCloseTitle: "收起聊天面板",                    // 面板内「收起」按钮（两种形态共用）
   chatPlaceholder: "说点什么…",
   chatSend: "发送",
   undo: "悔棋",
@@ -324,14 +325,24 @@ class Endpoint {
     return this;
   }
 
-  /** 打开聊天面板（协商动作也在里面）。 */
+  /**
+   * 已展开的聊天面板（弹窗或停靠栏），没有则 null。
+   * 注意入口按钮是**开关**（开着再点即收起），所以任何「打开聊天」的调用
+   * 都必须先用它判重，否则会把已经开着的面板点关。
+   */
+  async chatPanel() {
+    for (const sel of [".chat-modal-bg", ".chat-dock"]) {
+      const loc = this.page.locator(sel).first();
+      if (await loc.count() && await loc.isVisible().catch(() => false)) return loc;
+    }
+    return null;
+  }
+
+  /** 打开聊天面板（协商动作与认输都在里面）。 */
   async openChat() {
     const s = await this.snap();
     if (s.phase !== "playing") return this;
-    // 幂等：窄屏聊天是弹窗，弹窗一开就会把入口按钮盖住——再点一次必然被遮罩拦截。
-    const modal = this.page.locator(".chat-modal-bg").first();
-    if (await modal.count() && await modal.isVisible().catch(() => false)) return this;
-    // 窄屏（手机）聊天是弹窗；宽屏是侧栏——两种情况都点同一个入口按钮。
+    if (await this.chatPanel()) return this; // 幂等：已展开就别再点（入口是开关）
     const btn = this.page.locator(`button[title="${UI.chatOpenTitle}"]:visible`).first();
     if (await btn.count() && await btn.isVisible().catch(() => false)) {
       await btn.click();
@@ -374,12 +385,20 @@ class Endpoint {
   }
 
   /**
-   * 收起窄屏聊天弹窗（点遮罩空白处，等价用户点一下面板外）。
+   * 收起聊天面板。弹窗形态点遮罩空白（等价用户点面板外）；停靠栏形态点面板内「收起」。
    * 发起协商的一方发完请求后弹窗仍开着，会把棋盘整个盖住——后续落子点击全被遮罩吃掉。
    */
   async closeChat() {
     const modal = this.page.locator(".chat-modal-bg").first();
-    if (!(await modal.count()) || !(await modal.isVisible().catch(() => false))) return this;
+    if (!(await modal.count()) || !(await modal.isVisible().catch(() => false))) {
+      // 停靠栏形态：没有遮罩可点，走用户会点的那个「收起」按钮
+      const btn = this.page.locator(`button[title="${UI.chatCloseTitle}"]:visible`).first();
+      if (await btn.count() && await btn.isVisible().catch(() => false)) {
+        await btn.click();
+        await this.page.waitForTimeout(300);
+      }
+      return this;
+    }
     const box = await modal.boundingBox();
     if (box) {
       // 面板居中且有 16px padding，四角必是遮罩而非面板。

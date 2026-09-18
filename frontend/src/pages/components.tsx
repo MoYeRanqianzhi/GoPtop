@@ -96,9 +96,16 @@ export function ChatPanel(props: {
   onRequestSpecChat: () => void;
   onApproveSpec: (from: string) => void;
   onRejectSpec: (from: string) => void;
+  onClose: () => void;
+  /** 认输（对手获胜）。终局动作，面板内做两步确认。 */
+  onResign: () => void;
+  /** 能否认输：终局已定 / 围棋计分阶段不给（App 按 winner/scoring 算好传入）。 */
+  canResign: boolean;
 }) {
   const { role, chatLog, peerAvatars, spectators, specRequests, specCanChat, spectateEnabled } = props;
   const [text, setText] = useState("");
+  // 认输两步确认（终局动作不可逆，单击即认输太容易误触）
+  const [resignArm, setResignArm] = useState(false);
   const isPlayer = role === "inviter" || role === "invitee";
   const listRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -114,12 +121,31 @@ export function ChatPanel(props: {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, height: "100%", minHeight: 0 }}>
-      {/* 协商动作（仅对局者） */}
+      {/* 标题行 + 关闭入口：停靠栏形态没有遮罩可点，此前**没有任何关闭入口**
+          （面板里最像关闭的「关闭观战」是关观战功能，点了反而把观战关掉）——
+          实机用户报「点击按钮根本关都关不掉」。两种形态共用这一个按钮。 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span className="brutal-label">聊天</span>
+        <span style={{ flex: 1 }} />
+        <button className="brutal-btn brutal-btn--sm" onClick={props.onClose} title="收起聊天面板">收起</button>
+      </div>
+      {/* 对局操作区（仅对局者）：聊天区的存在意义就是收纳这些操作——棋盘上下
+          放不下那么多按钮。悔棋/重开/换棋/认输一律在这里，不再往棋盘旁边的
+          操作行里塞（实机反馈：认输放外面是设计错位）。 */}
       {isPlayer && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button className="brutal-btn brutal-btn--sm" onClick={props.onUndo}>悔棋</button>
           <button className="brutal-btn brutal-btn--sm" onClick={props.onReset}>重开</button>
           <button className="brutal-btn brutal-btn--sm" onClick={props.onSwap}>换棋</button>
+          {props.canResign && (
+            <button
+              className="brutal-btn brutal-btn--sm"
+              onClick={() => { if (resignArm) { props.onResign(); setResignArm(false); } else setResignArm(true); }}
+              title="认输（对手获胜）"
+            >
+              {resignArm ? "再点确认认输" : "认输"}
+            </button>
+          )}
         </div>
       )}
       {/* 观战者：申请发言 / 已批准可发言 */}

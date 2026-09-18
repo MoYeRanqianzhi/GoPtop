@@ -54,12 +54,24 @@ function moveCount(c) {
   });
 }
 
+/** 聊天面板是否已展开（弹窗或停靠栏）。入口按钮是开关：已展开时再点会把它关掉。 */
+async function chatForm(c) {
+  return c.page.evaluate(() => {
+    const vis = (s) => { const el = document.querySelector(s); return !!el && getComputedStyle(el).display !== "none"; };
+    return vis(".chat-modal-bg") ? "modal" : vis(".chat-dock") ? "dock" : "closed";
+  });
+}
+
 async function openChat(c) {
+  if ((await chatForm(c)) !== "closed") return; // 幂等：别再点开关
   await c.page.evaluate(() => {
     const btn = [...document.querySelectorAll("button")].find((b) => b.querySelector("svg"));
     if (btn) btn.click();
   });
-  await c.page.waitForSelector('input[placeholder="说点什么…"]', { timeout: 5000 });
+  await c.page.waitForFunction(() => {
+    const vis = (s) => { const el = document.querySelector(s); return !!el && getComputedStyle(el).display !== "none"; };
+    return vis(".chat-dock") || vis(".chat-modal-bg");
+  }, null, { timeout: 5000 });
 }
 
 async function sendChat(c, text) {
@@ -170,10 +182,7 @@ async function challengeFromList(c, peerName) {
   }
 
   // —— 9. 观战发言申请：双 host 批准（C 面板无输入框，只有「申请发言」） ——
-  await C.page.evaluate(() => {
-    const btn = [...document.querySelectorAll("button")].find((b) => b.querySelector("svg"));
-    if (btn) btn.click();
-  });
+  await openChat(C);
   await C.page.waitForSelector('button:text-is("申请发言")', { timeout: 6000 });
   await C.page.evaluate(() => { [...document.querySelectorAll("button")].find((b) => b.textContent === "申请发言").click(); });
   check("9a. C 申请已发送", await bodyHas(C, "发言申请已发送", 4000));
@@ -197,11 +206,8 @@ async function challengeFromList(c, peerName) {
   await new Promise((r) => setTimeout(r, 900));
   check("9j. 观战者看到回退", (await moveCount(C)) === "0");
 
-  // —— 10. 踢出（观战管理在聊天面板内：先点聊天图标展开） ——
-  await A.page.evaluate(() => {
-    const btn = [...document.querySelectorAll("button")].find((b) => b.querySelector("svg"));
-    if (btn) btn.click();
-  });
+  // —— 10. 踢出（观战管理在聊天面板内：先确保面板展开——入口是开关） ——
+  await openChat(A);
   await new Promise((r) => setTimeout(r, 500));
   await A.page.evaluate(() => {
     const rows = [...document.querySelectorAll(".brutal-card")].filter((d) => d.innerText.includes("观战（"));
@@ -254,7 +260,7 @@ async function challengeFromList(c, peerName) {
     };
   });
   const atWidth = async (width) => { await A.page.setViewportSize({ width, height: 900 }); await new Promise((r) => setTimeout(r, 450)); return chatGeom(); };
-  await A.page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => (x.getAttribute("title") || "").includes("聊天")); if (b) b.click(); });
+  await openChat(A); // 幂等展开（入口是开关，盲目点会把它关掉）
   await new Promise((r) => setTimeout(r, 400));
   const chatWide = await atWidth(1400);
   check("13a. 宽屏：聊天以停靠栏形态显示", chatWide.form === "dock", JSON.stringify(chatWide));
@@ -267,7 +273,50 @@ async function challengeFromList(c, peerName) {
   check("13f. 更窄：棋盘仍未被挤小", chatNarrow.board === chatWide.board, `${chatNarrow.board} vs ${chatWide.board}`);
   check("13g. 各档均无横向溢出", chatWide.overflow <= 0 && chatTight.overflow <= 0 && chatNarrow.overflow <= 0,
     `wide=${chatWide.overflow} tight=${chatTight.overflow} narrow=${chatNarrow.overflow}`);
-  // 本段是最后一步，仍恢复原尺寸（聊天保持打开，不影响后续无步骤的事实）
+
+  // —— 14. 聊天关得掉吗（实机用户报「点按钮根本关都关不掉」：停靠栏形态此前
+  //        没有任何关闭入口，面板里最像关闭的「关闭观战」是关观战功能） ——
+  const clickEntry = () => A.page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => (x.getAttribute("title") || "").startsWith("聊天 /")); if (b) b.click(); });
+  const clickClose = () => A.page.evaluate(() => { const b = [...document.querySelectorAll('button[title="收起聊天面板"]')].find((x) => x.offsetParent !== null); if (b) b.click(); });
+  const settle = () => new Promise((r) => setTimeout(r, 400));
+  // 入口是开关：先归零到「已关闭」，否则盲目点会反向（本段第一版就因此假通过过）
+  const ensureClosed = async () => {
+    if ((await chatForm(A)) === "closed") return;
+    await clickClose(); await settle();
+    if ((await chatForm(A)) === "closed") return;
+    await clickEntry(); await settle();
+  };
+
+  await atWidth(1400);
+  await ensureClosed();
+  check("14a. 前置：聊天当前为关闭态", (await chatForm(A)) === "closed");
+  await clickEntry(); await settle();
+  check("14b. 宽屏入口可展开聊天（停靠栏）", (await chatForm(A)) === "dock");
+  await clickClose(); await settle();
+  check("14c. 停靠栏「收起」按钮能关掉聊天", (await chatForm(A)) === "closed");
+  await clickEntry(); await settle();
+  check("14d. 入口按钮可再次展开", (await chatForm(A)) === "dock");
+  await clickEntry(); await settle();
+  check("14e. 入口按钮可收起（开关语义）", (await chatForm(A)) === "closed");
+
+  await atWidth(650);
+  await clickEntry(); await settle();
+  check("14f. 窄屏入口可展开聊天（弹窗）", (await chatForm(A)) === "modal");
+  await clickClose(); await settle();
+  check("14g. 弹窗「收起」按钮能关掉聊天", (await chatForm(A)) === "closed");
+
+  // 认输位置（用户拍板：聊天区就是对局操作集合区，认输不放在棋盘旁的操作行）
+  await atWidth(1400);
+  const resignOutside = await A.page.evaluate(() => [...document.querySelectorAll("button")].some((b) => b.textContent.trim() === "认输" && !b.closest(".chat-dock, .chat-modal-bg")));
+  check("14h. 棋盘旁操作行已无「认输」", !resignOutside);
+  await clickEntry(); await settle();
+  const resignInChat = await A.page.evaluate(() => {
+    const dock = document.querySelector(".chat-dock");
+    return !!dock && [...dock.querySelectorAll("button")].some((b) => b.textContent.trim() === "认输");
+  });
+  check("14i. 聊天区内有「认输」", resignInChat);
+
+  // 本段是最后一步，仍恢复原尺寸
   await A.page.setViewportSize({ width: 1400, height: 900 });
 
   console.log(`\n===== RESULT: ${pass} passed, ${fail} failed =====`);

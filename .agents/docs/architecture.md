@@ -126,8 +126,8 @@ SyncState/SyncRequest 不去重（重连 seq 归零）。**SyncState 带 `sv` �
 ## 测试
 
 - `cd frontend && npm test`（vitest 33 例）：去重、G1 编码、genPwd、链接解析。改协议面必须同步补。
-- E2E：`%TEMP%/goptop-e2e/run.js`（Playwright，49 断言）——对局/聊天/协商/观战全链/大厅挑战/
-  观战回退可见性（B1）/聊天停靠栏三档几何（13a-g）。两个静态源（localhost:5173 跑 dist、127.0.0.1:5174）+ 本地信令服
+- E2E：`%TEMP%/goptop-e2e/run.js`（Playwright，58 断言）——对局/聊天/协商/观战全链/大厅挑战/
+  观战回退可见性（B1）/聊天停靠栏三档几何（13a-g）/聊天开与关两种形态（14a-i）。两个静态源（localhost:5173 跑 dist、127.0.0.1:5174）+ 本地信令服
   （`cargo run -p goptop-server -- --listen=127.0.0.1:9527`）。断言依赖 UI 文案，改卡片文案先看它。
 - 浏览器实测脚本：go-capture.js（围棋提子/悔棋还原/五连）、ui-audit.js（515px 窄屏巡检）。
 

@@ -102,7 +102,7 @@
 ```bash
 cargo test                      # net 42 / core 35 / server 4
 cd frontend && npx tsc --noEmit && npx vitest run    # 37
-node scripts/e2e/run.js         # 浏览器基线（2026-09-19 起 49/49，含聊天三档几何）
+node scripts/e2e/run.js         # 浏览器基线（2026-09-19 起 58/58，含聊天三档几何与开关）
 node scripts/e2e/matrix.js game # 五端两两 11 对（需先起两端壳与模拟器）
 node scripts/e2e/features.js <场景> <端…>            # 设计功能
 ```

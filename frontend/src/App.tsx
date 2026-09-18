@@ -41,6 +41,7 @@ export default function App() {
     sendChat, requestUndo, requestReset, requestSwap,
     approveSpecRequest, rejectSpecRequest, kickSpectator, muteSpectator,
     disableSpectate, requestSpecChat, confirmApprove, confirmDecline,
+    handleResign, winner, scoring,
     topLocked, topLockedTitle,
   } = s;
 
@@ -173,6 +174,9 @@ export default function App() {
       onRequestSpecChat={requestSpecChat}
       onApproveSpec={approveSpecRequest}
       onRejectSpec={rejectSpecRequest}
+      onClose={() => setChatOpen(false)}
+      onResign={handleResign}
+      canResign={!winner && !scoring}
     />
   );
   const chatOpenable = chatOpen && mode === "p2p" && phase === "playing";
@@ -253,7 +257,7 @@ export default function App() {
           {mode === "local" && <LocalPage kind={kind} size={size} />}
 
           {/* —— P2P 对战 `/p2p`：大厅 / 等待 / 对局三段 —— */}
-          {mode === "p2p" && <P2pPage s={s} setChatOpen={setChatOpen} />}
+          {mode === "p2p" && <P2pPage s={s} toggleChat={() => setChatOpen((v) => !v)} />}
 
           {/* —— 在线用户 `/users` —— */}
           {mode === "users" && <UsersPage s={s} />}
