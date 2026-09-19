@@ -134,10 +134,12 @@ napi_value AiPost(napi_env env, napi_callback_info info) {
     return nullptr;
   }
   auto *job = new AiJob{Arg(env, argv[0]), 0};
+  int ticket = 0;
   {
     std::lock_guard<std::mutex> lock(g_mu);
-    job->ticket = g_next_ticket++;
-    g_results[job->ticket] = "";  // 占位：空串即「还没算完」
+    ticket = g_next_ticket++;
+    job->ticket = ticket;
+    g_results[ticket] = "";  // 占位：空串即「还没算完」
   }
   // `async_resource_name` **不能传 nullptr**：Node 的 NAPI 文档写明它是必填，
   // 传空在 OHOS 上会让 napi_create_async_work 直接返回 napi_invalid_arg，
@@ -150,14 +152,16 @@ napi_value AiPost(napi_env env, napi_callback_info info) {
   if (qst != napi_ok) {
     OH_LOG_ERROR(LOG_APP, "AI 任务排队失败 create=%{public}d queue=%{public}d", (int)cst, (int)qst);
     std::lock_guard<std::mutex> lock(g_mu);
-    g_results.erase(job->ticket);
+    g_results.erase(ticket);
     delete job;
     napi_throw_error(env, nullptr, "无法排队 AI 分析任务");
     return nullptr;
   }
-  // work 句柄本身由运行时在完成后回收；票号是给 JS 侧的唯一凭据
+  // 票号取自局部变量而不是 `job->ticket`：任务已经排队，若它跑得够快，
+  // `AiComplete` 会在这一行之前把 `job` 删掉——读它就是一个 use-after-free。
+  // work 句柄则由运行时在完成后回收。
   napi_value out = nullptr;
-  napi_create_int32(env, job->ticket, &out);
+  napi_create_int32(env, ticket, &out);
   return out;
 }
 
