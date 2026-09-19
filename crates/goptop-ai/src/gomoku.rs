@@ -386,6 +386,12 @@ mod tests {
     /// 超支**（600ms 预算实测 629~846ms）：节点代价被放大后，deadline 的检查间隔
     /// 就摊得开了——这是构建档位的性质，不是时间控制写错。断言留 500ms 余量，
     /// 在两种档位下都不假阳，但仍能抓住成倍的超支。
+    ///
+    /// 上界必须跟构建档位走，不能一个数通吃：`cargo test` 默认并行开用例，重活互相
+    /// 抢 CPU，debug 下 600ms 预算实耗会顶到 930~1032ms（本机，并行跑整套），比
+    /// release 那一档再高约 25%。原先把 debug 也压在同一个 1175ms 上，余量只剩 14%，
+    /// 实测连跑 6 次挂 1 次。debug 改取 `2×budget+500`，余量约 65%——「时间控制整个
+    /// 失效」那种成倍超支（figrid 会一路搜到 `MAX_DEPTH`）照样抓得住。
     #[test]
     fn time_budget_is_respected() {
         let st = state_from(&[(7, 7), (0, 0), (8, 7), (0, 2), (9, 7)]);
@@ -396,7 +402,11 @@ mod tests {
             budget_ms: budget,
             want_move: true,
         });
-        let ceiling = u64::from(budget) + u64::from(budget) / 8 + 500;
+        let ceiling = if cfg!(debug_assertions) {
+            u64::from(budget) * 2 + 500
+        } else {
+            u64::from(budget) + u64::from(budget) / 8 + 500
+        };
         println!("budget={budget}ms elapsed={}ms depth={} nodes={}", r.elapsed_ms, r.depth, r.nodes);
         assert!(
             r.elapsed_ms <= ceiling,

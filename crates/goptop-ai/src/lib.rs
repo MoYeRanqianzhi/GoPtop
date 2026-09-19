@@ -45,7 +45,9 @@ pub struct AnalyzeResult {
     pub best_move: Option<(u8, u8)>,
     /// 视角方（`my_color`）的胜率，0.0..=1.0。
     pub win_rate: f64,
-    /// 搜索深度（五子棋=α-β 深度；围棋=按 playout 数折算的等价信息，见各模块注释）。
+    /// 搜索深度。五子棋=α-β 搜到的深度；围棋=MCTS 树展开到的最大层数
+    /// （见 `go::Search::max_depth`），空盘上只有 2~3 层——围棋树很宽，同预算下
+    /// 铺开比扎深划算，不要把这两个数放在一起比较。
     pub depth: u32,
     /// 搜索规模（五子棋=节点数；围棋=playout 数）。
     pub nodes: u64,
