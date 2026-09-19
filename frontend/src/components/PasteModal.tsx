@@ -62,6 +62,7 @@ export function PasteModal(props: {
               autoFocus
               value={modalInput}
               onChange={(e) => setModalInput(e.target.value)}
+              /* isComposing 守卫：中文输入法组字中按 Enter 是「上屏候选词」而非提交 */
               onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) submitModal(); }}
               placeholder={modal === "paste-invite" ? "粘贴邀请链接或主页链接"
                 : "粘贴受邀者发来的回执链接"}

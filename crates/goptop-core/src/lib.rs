@@ -5,9 +5,9 @@
 //! - `gomoku` — 五子棋规则（五连判定等）。
 //! - `go`     — 围棋规则（落子、提子、气等，最小可玩子集先行）。
 //! - `game`   — 统一的 `GameState`/`GameKind`/`Move` 状态机，屏蔽 Gomoku/Go 差异。
-//! - `protocol` — 联机消息 `GameMsg`（serde）参考实现。**注意：现行联机协议的
-//!   唯一真源是前端 `frontend/src/net/protocol.ts`**（TS 线格式含 sender/userId/
-//!   SyncState 等，与本模块不同）；本模块尚未接线，对接 Rust 传输前须先对齐。
+//! - `protocol` — 早期参考实现，**已被 `crates/goptop-net/src/protocol.rs` 取代**
+//!   （GameMsg/MsgKind 线格式的唯一真源在那里，字段名对齐历史 TS 线格式；
+//!   本模块除本文件的 re-export 外无消费者）。
 //! - `wasm`   — 仅在 `feature = "wasm"` 时编译，为前端暴露 `WasmGame` 绑定。
 //!   **已接线（2026-09-13 起）**：Web 与 Tauri WebView 的所有落子/悔棋判定都
 //!   经 `frontend/src/game/rules.ts` 走本模块；改规则后重跑 scripts/build-wasm.sh

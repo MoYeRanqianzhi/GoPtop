@@ -1,5 +1,5 @@
 /**
- * P2P 对战页 `/p2p`（原 App.tsx 三段 JSX 原样搬出，禁止行为变化）：
+ * P2P 对战页 `/p2p`（D1 拆分自 App.tsx；此后已在其上补齐围棋停一手/终局计分、聊天停靠栏）：
  * home 大厅 / waiting 等待卡+棋盘 / playing 对局卡+棋盘。
  * 服务器模式观战链接 specUrl 原在 App 计算，只在本页使用，随之归属本页。
  */
@@ -138,15 +138,17 @@ export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
           {/* 围棋终局计分：**不新增卡片**，控件并入下面 BoardPanel 的状态行。
               此前完全没有 UI——双 Pass 后玩家只能看到「黑/白 落子」的普通对局态，
               既标不了死子也确认不了，终局卡死（实机测试发现）。
-              为什么不单独做一张卡：play-stack 的宽度由「棋盘剩余高度」反推，
-              多一张卡会把棋盘压扁（桌面壳 1100×760 实测从 230px 掉到 92px，
-              点不准棋子），而这个反馈环会一路收敛到宽度下限。 */}
+              为什么不单独做一张卡：--stack-max（整组宽度锚点）= main 剩余高度 − 非棋盘卡片总高
+              （App.tsx 一律在最宽态量），卡片高度直接从这份剩余高度里扣——多一张卡等于从棋盘
+              高度里拿走一整张卡的高度（桌面壳 1100×760 实测棋盘掉到 92px 级别，点不准棋子）。
+              （正反馈塌陷在 569f155 已由「最宽态测量」修掉，不再是本取舍的理由。） */}
           <BoardPanel
             kind={kind} size={size} board={board} toMove={toMove} winner={winner}
             lastMove={lastMove} hover={hover} onHover={setHover}
             /* 计分阶段：点棋子=标死子，且不受轮次限制（双方都要能标） */
             disabled={scoringActive ? false : boardDisabled}
             onPlace={scoringActive ? (c) => toggleDead(c) : handlePlace}
+            /* 上屏用并集：双方各自标的死子都画出来供对照；计分只取交集（Rust 侧 my_dead ∩ peer_dead） */
             dead={[...myDead, ...peerDead]}
             allowOccupied={scoringActive}
             statusText={scoringActive ? "终局计分" : statusText}
@@ -165,7 +167,6 @@ export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
             }
             actions={
               <>
-                {/* 终局计分控件（标死子进度 / 双方确认态 / 确认按钮 / 计分结果） */}
                 {scoringActive && (
                   <>
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, flexShrink: 0 }}>

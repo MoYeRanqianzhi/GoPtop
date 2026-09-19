@@ -33,7 +33,7 @@ export function setMyName(n: string) {
 }
 
 /** 每局轮换的一次性 pwd（邀请钥匙）。CSPRNG 生成，固定 6 位 base36。
- *  pwd 同时是信令编码密钥（encodeRtcPayload），必须不可预测且长度稳定。 */
+ *  pwd 同时是信令编码密钥（G1 token 的 XOR 密钥，见 crates/goptop-net/src/codec.rs:131 encode），必须不可预测且长度稳定。 */
 export function genPwd(): string {
   const buf = new Uint32Array(1);
   crypto.getRandomValues(buf);

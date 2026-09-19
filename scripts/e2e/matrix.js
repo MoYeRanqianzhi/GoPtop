@@ -2,7 +2,7 @@
  * matrix.js — 跨端对局矩阵批跑：逐对执行场景并汇总结果。
  *
  * 用法：
- *   node matrix.js                       # 跑内置全矩阵（device 场景）
+ *   node matrix.js                       # 跑内置全矩阵（默认 game 场景）
  *   node matrix.js chat                  # 用 chat 场景跑全矩阵
  *   node matrix.js game "web|mob" "web|cdp:http://127.0.0.1:9222"
  *

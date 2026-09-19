@@ -1,8 +1,9 @@
-/** 跨设备测试·本机 A 端。用法：
- *  node xdev-a.js stage1 server    —— 服务器模式开局，输出邀请/观战链接（path+query）到 /tmp/xdev-a.json
- *  node xdev-a.js stage1 noserver  —— 无服务器模式开局（含 specrtc），同上
- *  node xdev-a.js stage2 server    —— 服务器模式对局断言（B 加入后跑）：直连/中转、落子同步
- *  node xdev-a.js stage2 noserver  —— 读取 /tmp/xdev-receipt.json 粘贴观战回执，断言 C 连上
+/** 跨设备测试·本机 A 端。用法（mode 在前、stage 在后）：
+ *  node xdev-a.js server stage1    —— 服务器模式开局，输出邀请/观战链接（path+query）到 <os.tmpdir()>/xdev-a.json
+ *  node xdev-a.js noserver stage1  —— 无服务器模式开局（含 specrtc），同上
+ *  node xdev-a.js server stage2    —— 服务器模式对局断言（B 加入后跑）：直连/中转、落子同步
+ *  node xdev-a.js noserver stage2  —— 读取 <os.tmpdir()>/xdev-receipt.json 粘贴观战回执，断言 C 连上
+ *  node xdev-a.js server full      —— 保持在线跑完整轮（含落子与 ice_debug）
  */
 const { chromium } = require("playwright");
 const fs = require("fs");

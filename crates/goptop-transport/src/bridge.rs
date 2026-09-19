@@ -63,7 +63,8 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             let bc = core.borrow().presence_bc.clone();
             if let Some(bc) = bc {
                 if t == "announce" {
-                    // announce 由 2s 循环重放：status/gameId 存进 Core 供循环读取。
+                    // 无 2s 重放循环：announce 只由状态机在阶段切换时发一次，且走 SendServer
+                    // 信令侧（不经本通道），这里只做转发。
                     core.borrow_mut().session.server_url = core.borrow().session.server_url.clone();
                 }
                 bc.post(&v);

@@ -83,7 +83,8 @@ impl RtcPeer {
             *peer.dc.borrow_mut() = Some(ch);
         }
 
-        // 全量 gathering 模型：候选已含在 SDP 里，onicecandidate 仅等待 null（完成信号）。
+        // 全量 gathering 模型：候选已含在 SDP 里，onicecandidate 无需转发候选（空处理器仅占位）；
+        // 完成信号由 wait_gathering 轮询 iceGatheringState 判定，见文件尾。
         {
             let cb = Closure::<dyn FnMut(JsValue)>::new(|_ev: JsValue| {});
             pc.set_onicecandidate(Some(cb.as_ref().unchecked_ref()));

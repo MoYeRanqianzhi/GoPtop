@@ -1,9 +1,10 @@
-//! 联机消息 — 参考实现（**尚未接线，前端未使用**）。
+//! 联机消息 — 早期参考实现，**已被 `crates/goptop-net/src/protocol.rs` 取代**。
 //!
-//! 现行协议唯一真源：`frontend/src/net/protocol.ts`（GameMsg 判别联合，
-//! MsgKind 含 SyncState/SyncRequest/Reset、Move 带 by 颜色、Chat/Avatar、
-//! 协商 Req/Ack）。本模块与其是两套格式；在 Rust 侧真正
-//! 接入传输前，两者不可混用。对接路线：链接信令 + WebRTC（见 .agents/docs/p2p-protocol.md），
+//! 线格式唯一真源是那里的 `GameMsg`/`MsgKind`（字段名对齐历史 TS 线格式，
+//! ScoreMark/ScoreConfirmReq 等新类型只在那里）；本模块除 lib.rs 的 re-export 外无消费者，
+//! `frontend/src/net/protocol.ts` 现仅保留 UI 侧基础类型（StoneColor/Coord/GameKind/Size）。
+//! core 的 GameKind/Stone serde 形状与线格式不同，两者不可混用。
+//! 对接路线：链接信令 + WebRTC（见 .agents/docs/p2p-protocol.md），
 //! 端到端加密由 WebRTC DTLS 提供（非 iroh）。
 
 use crate::game::GameKind;
@@ -51,7 +52,7 @@ impl GameMsg {
 /// Rust 侧对接时如仍需票据再实现，此前保持占位保证模块可独立编译。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomTicket {
-    /// 票据的字符串表示（base64/URL-safe），Phase 3 由 `iroh::NodeAddr` 编码。
+    /// 票据的字符串表示（URL 安全 base64；编码方案见 `crates/goptop-net/src/codec.rs` 与前端 links）。
     pub ticket: String,
 }
 

@@ -6,7 +6,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-/** 造一个可控的 localStorage 替身（jsdom 自带的也能用，但显式清空更直观）。 */
+/** 造一个可控的 localStorage 替身（本仓无 jsdom，vitest 默认 environment=node，没有全局 localStorage，必须显式注入）。 */
 function stubLocal(init: Record<string, string> = {}) {
   const box = new Map(Object.entries(init));
   const ls = {

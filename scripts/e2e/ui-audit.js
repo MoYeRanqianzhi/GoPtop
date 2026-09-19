@@ -1,5 +1,6 @@
 /** UI 审查截图脚本：515px 窄屏遍历全部页面/状态，输出 shots/audit-*.png 供人工核验。
- *  全程按钮导航（pushState），不用 page.goto——整页刷新会清空内存对局状态，非人类路径。 */
+ *  A 页全程按钮导航（pushState），不用 page.goto——整页刷新会清空内存对局状态，非人类路径。
+ *  B/C 是新上下文、本就无对局状态，可直接 goto（B 进 /p2p、C 开观战链接都是真实用户路径）。 */
 const { chromium } = require("playwright");
 
 const CFG = JSON.stringify([{ id: "local", label: "local", url: "ws://127.0.0.1:9527/ws", builtin: false }]);

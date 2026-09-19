@@ -45,6 +45,8 @@ export function KindSizePicker(props: {
           </button>
         </div>
         <div style={{ width: 1, height: 26, background: "var(--ink)", opacity: 0.18 }} />
+        {/* 尺寸表必须与 RulesEngine 的合法性门逐项一致（game/rules.ts 的 15 / 9|13|19，
+            Rust 同源门在 goptop-core game.rs 的 is_valid）；下方弹出面板是同一份列表，一起改 */}
         <div style={{ display: "flex", gap: 6 }}>
           {(kind === "gomoku" ? [15] : [9, 13, 19]).map((s) => (
             <button

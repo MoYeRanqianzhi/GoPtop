@@ -1,6 +1,6 @@
 /**
- * 协商/审批横幅（原 App.tsx JSX 原样搬出，禁止行为变化）：
- * 悔棋、重开、换棋、错钥匙连接、观战发言批准，同意/拒绝由对方拍板。
+ * 协商/审批横幅：悔棋、重开、换棋、错钥匙连接、观战发言批准、计分确认（score-confirm），
+ * 同意/拒绝由对方拍板。
  */
 import type { ConfirmRequest } from "../state/sessionContext";
 
@@ -14,6 +14,7 @@ export function ConfirmBanner(props: { req: ConfirmRequest | null; onApprove: ()
         {req.kind === "swap" && `${req.fromName} 请求换棋（黑白互换并重开），是否同意？`}
         {req.kind === "wrong-pwd" && `${req.fromName} 请求连接（邀请钥匙不正确），是否接受？`}
         {req.kind === "spec-chat" && `${req.fromName} 申请参与聊天，是否同意？`}
+        {req.kind === "score-confirm" && `${req.fromName} 请求确认计分结果，是否同意？`}
       </span>
       <span style={{ flex: 1 }} />
       <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={onApprove}>同意</button>

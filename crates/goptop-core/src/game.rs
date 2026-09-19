@@ -76,12 +76,12 @@ pub struct PlayEffect {
     pub winner: Option<Stone>,
 }
 
-/// 统一游戏状态，唯一真源。所有可序列化，便于存档、重放与网络同步。
+/// 统一游戏状态，唯一真源。可序列化，便于存档与重放；**它不是线格式** ——
+/// 联机走 `crates/goptop-net/src/protocol.rs` 的字符串标签格式（`"go"` + 独立 size），两套不可混用。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameState {
     /// 游戏种类与尺寸。
     pub kind: GameKind,
-    /// 棋盘。
     pub board: BoardVariant,
     /// 轮到谁走。
     pub to_move: Stone,
@@ -144,6 +144,8 @@ impl GameState {
         }
 
         match mv.clone() {
+            // 胜者由 to_move 反推（本函数不知道是谁点的认输，认输者也未必正在行棋）：
+            // 调用方须按认输者执色重定 winner，否则会「我认输却判我赢」（见 goptop-net matchplay.rs 的 resign）。
             Move::Resign => {
                 let w = self.to_move.opponent();
                 self.winner = Some(w);

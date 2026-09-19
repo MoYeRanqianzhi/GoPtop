@@ -15,6 +15,8 @@ impl Session {
         let (status, gid) = match (self.phase, self.role) {
             (Phase::Home, _) => ("idle", None),
             (Phase::Waiting, _) => ("waiting", self.game_id.clone()),
+            // 观战者报 idle（不是 in-game）：in-game 的语义是「本人是对局者且在对局中」，
+            // 此处 gameId 只用于定位观战房间。该 status 直接决定在线用户页挑战按钮是否禁用。
             (Phase::Playing, Role::Spectator) => ("idle", self.game_id.clone()),
             (Phase::Playing, _) => ("in-game", self.game_id.clone()),
         };
@@ -65,7 +67,8 @@ impl Session {
 
     /// userId 链接意图就绪执行（连接 ready 后发 join/spec-join）。
     /// 不查名册判在线：ready 与首份名册广播的先后不确定，误判会把拿有效链接的人
-    /// 弹回主页——直接发信号，无人受理由超时兜底。
+    /// 弹回主页——直接发信号。对局 join 由 join-timeout（15s）兜底；
+    /// spec-join 目前没有超时兜底，观众会停在「正在连接对局观战…」直到房主受理。
     pub(crate) fn flush_pending_link(&mut self) -> Vec<Effect> {
         let Some(link) = self.pending_link.take() else { return Vec::new() };
         if self.server_state != "ready" {

@@ -32,7 +32,6 @@ const brief = (s) => `role=${s.role} phase=${s.phase} my=${s.myColor} peer=${s.p
   const link = await A.createInvite();
   console.log("A 邀请链接:", link);
   console.log("A userId:", (await A.snap()).userId, " B userId:", (await B.snap()).userId);
-  // B 粘贴链接（壳端点路径）
   await B.joinByPaste(link);
   const total = Number(secs || 30);
   for (let i = 0; i <= total; i += 3) {

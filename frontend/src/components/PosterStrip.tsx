@@ -143,7 +143,7 @@ export function PosterStrip() {
     } catch { /* 权限缺失或非 Tauri 环境：按钮无效即静默 */ }
   }
 
-  // 移动端（Android）：纯装饰黑条（兼作状态栏底色），无三键、无拖拽区；
+  // 非桌面 Tauri（Android 与桌面 Web 浏览器）：纯装饰黑条，无三键、无拖拽区；窄屏（≤520px）兼作状态栏底色（仅 Android 有意义）
   // 窄屏媒体查询会把长文案换成短文案（styles/brutal.css）
   if (!desktopTauri) {
     return (

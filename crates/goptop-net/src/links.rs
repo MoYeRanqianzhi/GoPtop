@@ -62,7 +62,7 @@ pub struct AnswerIntent {
 const FORM_SAFE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'*').remove(b'-').remove(b'.').remove(b'_');
 
-/// encodeURIComponent 口径：不编码 `A-Za-z0-9-_.!~*'()`；`%` 在 [`encode_path_segment`] 先行转义。
+/// encodeURIComponent 口径：不编码 `A-Za-z0-9-_.!~*'()`；`%` 也在 PATH_SAFE 内（会被编成 `%25`），无需先行转义。
 const PATH_SAFE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-').remove(b'_').remove(b'.').remove(b'!').remove(b'~').remove(b'*')
     .remove(b'\'').remove(b'(').remove(b')');
@@ -70,7 +70,7 @@ const PATH_SAFE: &AsciiSet = &NON_ALPHANUMERIC
 /* ---------------- 最小 URL 切分与解码原语 ---------------- */
 
 /// 从粘贴文本/地址栏 href 提取 `(path, query_pairs)`。
-/// - 无协议补 `https://`（TS pasted 分支）；
+/// - 协议头由调用方补齐（无协议时前置 `https://`，见 [`parse_pasted_link`]/[`parse_pasted_answer`]）；
 /// - `#fragment` 全弃（TS new URL 同样不进 searchParams）；
 /// - path 不做整体解码（浏览器 pathname 原样保留 %XX），由调用方逐段解码。
 fn split_href(text: &str) -> Option<(String, Vec<(String, String)>)> {

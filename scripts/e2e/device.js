@@ -8,8 +8,10 @@
  *   快照（`window.__session.snapshot()`）只用于**读取**与断言，不用于写入。
  * - 三类端点统一为同一套方法：
  *   - `browser`：Playwright 自起 chromium（可开手机仿真）；
+ *   - `android`：Playwright `_android` 驱动（adb 直连，拿到真实 Page）；**禁用 connectOverCDP**
+ *     （原因见 android() 注释）；
  *   - `cdp`：connectOverCDP 接管已运行的 WebView（桌面壳开 remote-debugging-port；
- *     安卓经 adb forward；鸿蒙经 hdc fport + ArkWeb inspector）。
+ *     鸿蒙经 hdc fport + ArkWeb inspector）。
  * - 棋盘是 SVG（role="grid"），落子 = 把格点换算成 client 坐标后点真实鼠标/手指。
  *
  * 用法见 match.js；单端调试可直接 node -e 引本文件。
@@ -123,7 +125,6 @@ class Endpoint {
 
   /* ---------------- 基础读取 ---------------- */
 
-  /** 等 wasm 会话挂载完成（壳/浏览器统一就绪信号）。 */
   /**
    * 写一条设置到**该端真正的存储位置**（shell 端不再是 localStorage 了）：
    * Tauri 壳走 Rust store 命令（~/.goptop 或应用私有目录），鸿蒙壳走 ArkTS 桥，
@@ -156,6 +157,7 @@ class Endpoint {
     }, key);
   }
 
+  /** 等 wasm 会话挂载完成（壳/浏览器统一就绪信号）。 */
   async ready(timeout = 30000) {
     await this.page.waitForFunction(() => !!(window.__session && window.__session.snapshot), null, { timeout, polling: 200 });
     // 首帧快照可能仍是空壳，再等 userId 落地。
@@ -304,7 +306,8 @@ class Endpoint {
     return this;
   }
 
-  /** 读当前观战链接（无服务器模式才有 specrtc；服务器模式为 watch 链接）。 */
+  /** 读当前观战链接：specUrl 优先——服务器模式＝不带 specrtc 的 `<userId>?pwd=..&spec=1`，
+   *  无服务器模式带 specrtc 直连参数；无则回落同源 watchUrl（仅无服务器模式生成）。 */
   async specLink() {
     const s = await this.snap();
     return s.specUrl || s.watchUrl || "";
@@ -329,21 +332,21 @@ class Endpoint {
     // 先把棋盘滚进视口：mouse.click 用的是视口坐标，棋盘在折叠线下会点空
     //（短窗口下加了计分条后踩到）。等价用户先把棋盘滑到眼前。
     await this.page.locator('svg[role="grid"]').first().scrollIntoViewIfNeeded().catch(() => {});
-    const info = await this.page.evaluate(([x, y]) => {
+    // pad/cell 由模块常量传入（它们声明的「必须与 BoardSvg 保持一致」由此才成立）
+    const info = await this.page.evaluate(([x, y, pad, cell]) => {
       const svg = document.querySelector('svg[role="grid"]');
       if (!svg) return null;
       const vbArr = (svg.getAttribute("viewBox") || "0 0 600 600").split(/\s+/).map(Number);
       const vb = vbArr[2];
       const r = svg.getBoundingClientRect();
       const scale = vb / r.width;
-      const pad = 30, cell = 36;
       return {
         cx: r.left + (pad + x * cell) / scale,
         cy: r.top + (pad + y * cell) / scale,
         size: Number((svg.getAttribute("aria-label") || "").match(/(\d+)x\1/)?.[1] || 15),
         rect: { w: r.width, h: r.height },
       };
-    }, [gx, gy]);
+    }, [gx, gy, BOARD_PAD, BOARD_CELL]);
     if (!info) throw new Error(`[${this.name}] 找不到棋盘 SVG`);
     if (!info.rect.w || !info.rect.h) throw new Error(`[${this.name}] 棋盘尺寸为 0（未渲染）`);
     if (gx >= info.size || gy >= info.size) throw new Error(`[${this.name}] 落子越界 (${gx},${gy}) 盘=${info.size}`);
@@ -538,7 +541,8 @@ function analyze(board, x, y, color, size) {
  *
  * `level` 是**棋力档位**，模拟两名水平不同的真人：
  * - `"sharp"`：看得见双威胁（四三 / 双四 / 双活三），能主动做杀；
- * - `"solid"`：只挡成五、四、单活三，看不见双威胁——稳健但会被杀棋击穿。
+ * - `"casual"`：只挡成五、四、活三（挡对方活三时另有 45% 确定性看漏，见 `miss`），
+ *   看不见双威胁——稳健但会被杀棋击穿。
  * 实测同等棋力互相封死会一路下到满盘和棋（225 手），无法「决出胜负」；
  * 两档不同棋力才是真实对局形态，也才能收敛出胜者。
  */

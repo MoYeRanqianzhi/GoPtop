@@ -5,14 +5,15 @@
  * - `/local`         本地对战
  * - `/p2p`           P2P 对战大厅
  * - `/users`         在线用户
- * - `/settings`      设置（含 STUN 线路：国服A区/国服B区/外服/自定义）
+ * - `/settings`      设置（含 STUN 线路：内置线路开关 + 自定义线路）
  * - `/<userId>`      用户主页；邀请链接自动含信令：
  *   `?pwd=&kind=&size=`（同源直传）或 `?pwd=&kind=&size=&rtc=<offer>`（跨设备一键直连）
  * - `/watch/<game>`  观战
  * - 兼容旧链接：`?room=` 视为观战旧房间；`?u=` 视为用户主页；`?watch=` 视为观战。
  *
- * 观战口径：服务器模式观战（spec 链接 `/<userId>?pwd=<specPwd>&spec=1`）已实现，
- * 跨设备可用；无服务器模式 `/watch` 仍限同源（别的设备打开收不到棋局）。
+ * 观战口径：服务器模式观战与无服务器跨设备观战均已实现——同一 spec 链接
+ * `/<userId>?pwd=<specPwd>&spec=1`（无服务器模式再追加 `&specrtc=<G1 观战 offer>`，
+ * 观众回执经 rtcAns 由房主受理）；`/watch/<gameId>` 仅同源可用（别的设备打开收不到棋局）。
  *
  * - 跨设备信令：用户只传一次邀请链接。offer/answer 编码进邀请 URL 的 `&rtc=` 参数
  *   （同源页面间经 Presence 自动回传）；跨设备时受邀者把回执链接发给邀请者，邀请者在
@@ -111,7 +112,8 @@ export function userToUrl(userId: string): string {
 }
 
 /** 观战链接：`<分享域名>/<userId>?pwd=<specPwd>&spec=1`（观战钥匙整局有效，
- *  服务器模式点开即连房主；pwd 错/无 → 房主聊天区私有申请）。 */
+ *  服务器模式点开即连房主；pwd 错/无 → 房主聊天区私有申请）。
+ *  本函数仅服务器模式兜底（只拼 pwd+spec=1）；带 `specrtc` 的无服务器链接由 Rust 状态机生成。 */
 export function specLinkUrl(userId: string, specPwd: string): string {
   const url = new URL(shareOrigin());
   url.pathname = `/${encodeURIComponent(userId)}`;
@@ -185,7 +187,9 @@ export function shareOrigin(): string {
 
 /** 从粘贴的任意 URL 中提取站内意图（路径 + 查询参数），与域名无关。
  *  兼容旧 query 风格（`?u=` `?room=` `?watch=`）与路径风格（`/<userId>` `/watch/<id>`）。
- *  返回 null 表示这段文本不是可识别的 GoPtop 链接。 */
+ *  返回 null 表示这段文本不是可识别的 GoPtop 链接。
+ *  注意：生产粘贴解析已由 Rust 承担（useGameSession 调 session.parse_link → crates/goptop-net/src/links.rs），
+ *  本函数只服务本文件单测、且未跟进 Rust 的 specrtc 扩展——改这里不改变运行时行为。 */
 export function parsePastedLink(text: string): UrlIntent | null {
   try {
     const raw = text.trim();

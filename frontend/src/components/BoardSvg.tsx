@@ -66,6 +66,8 @@ export function BoardSvg({
   /** 已标记为死子的点（终局计分）：画红叉，双方标记合起来展示。 */
   dead?: Coord[];
 }) {
+  // 棋盘几何：viewBox = padding*2 + (size-1)*cell。E2E 驱动按同一套 pad/cell 复算落点坐标
+  //（scripts/e2e/device.js 的 BOARD_PAD/BOARD_CELL，与 coordFromEvent 严格互逆），改这里必须同步改那边。
   const padding = 30;
   const cell = 36;
   const extent = (size - 1) * cell;
@@ -88,6 +90,8 @@ export function BoardSvg({
   }
 
   const colLabels = Array.from({ length: size }, (_, i) => {
+    // 围棋惯例：字母表跳过 I（免与数字 1 混淆），H 之后直接 J；19 路正好用到 T。
+    // 勿「修正」成连续字母表——J 起会整体左移一格。
     const letters = "ABCDEFGHJKLMNOPQRST";
     return letters[i] ?? String(i + 1);
   });
@@ -128,7 +132,7 @@ export function BoardSvg({
             </g>
           );
         })}
-        {/* 坐标 — 14/24 外移，避免与边线重合；左右数字各外移 22 */}
+        {/* 坐标 — 上下外移 14 / 24，左右数字各外移 24，避免与边线重合 */}
         {colLabels.map((ch, i) => (
           <g key={`label-${i}`}>
             <text x={padding + i * cell} y={padding - 14} textAnchor="middle" fontFamily="var(--font-mono)" fontWeight={700} fontSize={11} fill="#0A0A0A">{ch}</text>

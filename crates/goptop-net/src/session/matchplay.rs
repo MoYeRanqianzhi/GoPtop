@@ -12,6 +12,8 @@ impl Session {
         if msg.sender == self.peer_id {
             return fx;
         }
+        // 这张字符串表是 dedup::is_dedupable 的入参：字面量必须与 dedup.rs 的清单逐字一致，
+        // 不匹配不会编译报错，只让该类型静默失去去重（三链路重传的副本被二次应用）。
         let kind_type = match &msg.kind {
             MsgKind::Hello { .. } => "Hello",
             MsgKind::Move { .. } => "Move",

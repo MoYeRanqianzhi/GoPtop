@@ -9,7 +9,7 @@ const { chromium } = require("playwright");
 const ORIGIN = "http://localhost:5173";
 const MY_NAME = "本机甲";
 const PEER_NAME = "远端乙";
-const BLACK_MOVES = [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4]]; // 第 0 行连五
+const BLACK_MOVES = [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4]]; // 第 0 列连五（x=0 固定，y 递增）
 const SIZE = 15;
 
 function log(obj) { console.log("JSON " + JSON.stringify(obj)); }

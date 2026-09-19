@@ -5,7 +5,7 @@
  *   web              本机 chromium 桌面视口（http://localhost:5173）
  *   web:<url>        本机 chromium 桌面视口（指定地址）
  *   mob / mob:<url>  本机 chromium 手机仿真（Pixel 5，触摸）
- *   cdp:<url>        接管已运行 WebView（桌面壳 9222 / 安卓 adb forward / 鸿蒙 hdc fport）
+ *   cdp:<url>        接管已运行 WebView（桌面壳 9222 / 鸿蒙 hdc fport）
  *
  * 用法：
  *   node match.js game  web cdp:http://127.0.0.1:9222            # 一盘下到分出胜负
@@ -106,10 +106,6 @@ async function pairUp(A, B, { serverMode = process.env.XDEV_SERVER !== "none" } 
 }
 
 /**
- * 下到分出胜负：每手由「当前行棋方」用真实点击落子，直到 winner 出现。
- * 返胜者。maxMoves 兜底防死循环。
- */
-/**
  * 步进 n 手真实落子（每手等两端同步）；中途出现胜者立即返回。
  * 返回 winner 或 null（走满 n 手仍未见胜负）。
  */
@@ -137,7 +133,7 @@ async function playMoves(A, B, n, { sync = true } = {}) {
   return null;
 }
 
-/** 下到分出胜负。 */
+/** 下到分出胜负；maxMoves 兜底防死循环（默认 260 手）。 */
 async function playToVictory(A, B, opts = {}) {
   const { maxMoves = 260 } = opts;
   const w = await playMoves(A, B, maxMoves, opts);

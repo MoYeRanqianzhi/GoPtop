@@ -1,4 +1,4 @@
-//! WebSocket 服务器通道 — hello/心跳 25s/指数退避重连（1s→10s 封顶）/下行事件。
+//! WebSocket 服务器通道 — hello/心跳 25s/固定 8s 间隔重连/下行事件。
 
 use super::SharedCore;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use wasm_bindgen::JsCast;
 pub(crate) struct ServerSocket {
     url: String,
     inner: web_sys::WebSocket,
-    /// 手动关闭（被顶替）：不重连。
+    /// 手动关闭：本意不重连；但 manual_close 无写入点，当前实现仍会重连（见 onclose 分支）。
     manual_close: bool,
     // 闭包持有（防 drop 失效）。
     _closures: Vec<Closure<dyn FnMut(JsValue)>>,
@@ -19,7 +19,7 @@ pub(crate) struct ServerSocket {
 
 impl ServerSocket {
     /// 打开连接：onopen 发 hello + 启动心跳；onmessage 解析为 ServerEvt；
-    /// onclose 指数退避重连。
+    /// onclose 后按固定 8s 间隔重连（retry 恒为 3，非指数退避——见该分支内的说明）。
     pub fn open(core: SharedCore, url: String) -> ServerSocket {
         let ws = web_sys::WebSocket::new(&url).expect("WebSocket::new");
         let mut closures: Vec<Closure<dyn FnMut(JsValue)>> = Vec::new();
@@ -104,7 +104,9 @@ impl ServerSocket {
             closures.push(cb);
         }
 
-        // —— onclose：重连（指数退避；manualClose 时由 taken-over 分支已置位）——
+        // —— onclose：重连（固定 8s，见下方 delay 计算）。manual_close 无任何写入点（close_manual
+        // 收 &self、字段非 Cell），Effect::ServerClose/ServerConnect 全仓也无构造点——close_manual
+        // 后仍会重连，「手动关闭不重连」尚未接通 ——
         {
             let core = core.clone();
             let url2 = url.clone();
@@ -116,7 +118,7 @@ impl ServerSocket {
                 queue_event(Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
                 let core2 = core.clone();
                 let url3 = url2.clone();
-                let retry = 3u32; // 简化：固定 2s 重连（指数退避在重试计数上逐步恢复）
+                let retry = 3u32; // retry 恒为 3 → 1000*2^3 = 8s 固定间隔；min(10_000) 上限永不生效（真退避需按连接次数递增 retry，当前无计数）
                 let delay = (1000 * 2u32.pow(retry.min(4))).min(10_000);
                 let reconnect = Closure::<dyn FnMut()>::new(move || {
                     let socket = ServerSocket::open(core2.clone(), url3.clone());
@@ -145,7 +147,7 @@ impl ServerSocket {
         self.inner.ready_state() == web_sys::WebSocket::OPEN
     }
 
-    /// 手动关闭（被顶替/设置切换）：不触发重连。
+    /// 手动关闭：只关 socket，不置 manual_close；「不触发重连」尚未生效。
     pub fn close_manual(&self) {
         let _ = self.inner.close();
     }

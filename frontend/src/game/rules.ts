@@ -61,12 +61,15 @@ export class RulesEngine {
     return JSON.parse(this.game.undo_last()) as UndoResult;
   }
 
-  /** 采纳全量快照（SyncState）：棋盘/行棋方/胜者照收，历史按坐标/"pass"
-   *  重建供后续 undo。Rust 侧对非法值（维度/颜色/越界坐标）返回 false；
-   *  快照是远端输入（系统边界），拒绝时必须留痕，否则引擎与 TS 静默分叉
+  /** 采纳全量快照（SyncState）：Rust 侧按 history 从新局全量重放，重放终态与快照的棋盘/行棋方
+   *  一致才采纳（captures/ko_point/scoring 来自重放，board/to_move/winner 仍按快照回填——胜者
+   *  允许「重放 None、快照 Some」的放宽）。重放失败或与快照矛盾（维度/颜色/越界坐标/远端脏数据）
+   *  整体拒绝返回 false。快照是远端输入（系统边界），拒绝时必须留痕，否则引擎与 TS 静默分叉
    *  （审查 #5 P2-1）。 */
   adopt(board: StoneColor[][], toMove: StoneColor, winner: StoneColor | null, history: (Coord | "pass")[]) {
     if (!this.game) return;
+    // winner 的线上约定是字符串："null"/"" 表示无胜者（wasm 侧 match "null" | "" → None），
+    // 形参是 &str 不接受 JS null；传 "empty" 会被判非法而整份快照被丢弃——勿简化成 winner ?? null。
     const ok = this.game.adopt(JSON.stringify(board), toMove, winner ?? "null", JSON.stringify(history));
     if (!ok) console.warn("[rules] adopt 被引擎拒绝：快照与当前对局尺寸/格式不符，已忽略该快照");
   }

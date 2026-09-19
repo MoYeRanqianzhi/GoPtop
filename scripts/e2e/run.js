@@ -112,6 +112,7 @@ async function challengeFromList(c, peerName) {
 
 (async () => {
   const browser = await chromium.launch({
+    // 本机 playwright npm 包与浏览器缓存版本不匹配，必须显式指定可执行文件（见 memory 2026-09-12，同 crossnet-local.js）
     executablePath: "C:/Users/MoYeR/AppData/Local/ms-playwright/chromium-1228/chrome-win64/chrome.exe",
     headless: true,
   args: ["--disable-features=WebRtcHideLocalIpsWithMdns", "--enforce-webrtc-ip-permission-check=false"],
@@ -122,7 +123,7 @@ async function challengeFromList(c, peerName) {
   await gotoP2P(A);
   await gotoP2P(B);
 
-  // —— 1. A 开局，拿邀请链接与观战链接 ——
+  // —— 1. A 开局，拿邀请链接（观战链接在第 8 步对局开始后才出现） ——
   await A.page.evaluate(() => { [...document.querySelectorAll("button")].find((b) => b.textContent.includes("开启对战")).click(); });
   await A.page.waitForFunction(() => { const c = document.querySelector("code"); return c && c.textContent.includes("pwd="); }, null, { timeout: 15000 });
   const inviteUrl = await A.page.evaluate(() => document.querySelector("code").textContent);

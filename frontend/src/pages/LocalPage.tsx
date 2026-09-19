@@ -1,5 +1,7 @@
 /**
- * 本地对战页（D1 拆分）——与 P2P 同一套棋盘 UI，只是没有邀请链接。
+ * 本地对战页（D1 拆分）——复用 P2P 的 BoardPanel，但只接落子/悔棋/重开：
+ * 没有邀请/观战链接，没有聊天区（悔棋/重开用面板默认按钮），
+ * 也尚未接线围棋的停一手与终局计分（本地围棋因此走不到计分，winner 恒为 null）。
  * 落子/悔棋判定走 Rust 规则引擎（wasm，game/rules.ts），与 P2P 同一真源。
  * 规则/尺寸由顶部选择器统一控制。
  */
@@ -18,6 +20,8 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
   const [winner, setWinner] = useState<StoneColor | null>(null);
   const [lastMove, setLastMove] = useState<Coord | null>(null);
   const [hover, setHover] = useState<Coord | null>(null);
+  // 本地历史只记落子坐标：本页不提供停一手，TS 历史与引擎历史逐手一一对应
+  //（undo 门控与「最后一手」标记都依赖这条不变量；将来补停一手这里必须能表达 "pass"）
   const [history, setHistory] = useState<Coord[]>([]);
 
   // 顶部切换规则/尺寸时重建 Rust 引擎并重置棋盘

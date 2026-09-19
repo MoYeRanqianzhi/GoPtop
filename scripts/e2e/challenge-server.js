@@ -9,6 +9,7 @@
  *   POST /challenge {peer}→ 在用户列表点该用户行的「挑战」
  *   POST /accept          → 点邀请弹窗「同意」
  *   POST /place {x,y}     → 真实点击棋盘交叉点
+ *   POST /eval {expr,arg} → 在页面执行 (expr)(arg)（调试用：可跑任意页面 JS，勿暴露到公网）
  */
 const { chromium } = require("playwright");
 const http = require("http");

@@ -13,7 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 线格式棋子颜色（TS StoneColor）。
+/// 线格式棋子颜色（TS StoneColor）：仅 `"empty"` / `"black"` / `"white"`，与 frontend/src/net/protocol.ts
+/// 的联合类型逐字对齐（跨端常量）；空点必须是 `"empty"`（未知串会被静默当作 Empty）。
 pub type Color = String;
 
 /// 线格式坐标（TS Coord）。
@@ -50,7 +51,9 @@ pub enum MsgKind {
         move_: MoveT,
         by: Color,
     },
-    /// 全量快照（可选字段 sv = 回退纪元，见 useGameSession 审计 B1 注释）。
+    /// 全量快照。`sv` = 回退纪元：悔棋/重开使 history 变短是合法回退，接收端按 (sv, history.len)
+    /// 双键比较，sv 更旧或同 sv 但更短才丢弃（只比 length 会把回退快照误当旧快照丢掉，观战者看不到回退）；
+    /// 见 matchplay.rs::apply_sync_state 与 .agents/docs/p2p-protocol.md 的 `SyncState.sv` 条。
     /// history 可表达停一手（字符串 "pass"，untagged）。
     SyncState {
         #[serde(default)]
@@ -81,13 +84,14 @@ pub enum MsgKind {
     ResetAck { ok: bool },
     SwapReq,
     SwapAck { ok: bool },
-    // —— 围棋终局计分（2026-09-15 新增）：死子标记与计分确认同步 ——
+    // —— 围棋终局计分：死子标记与计分确认同步 ——
     /// 死子标记同步：发送方当前标记的死子集合（双方各自标记，求交集为真死子）。
     ScoreMark { dead: Vec<CoordT> },
     /// 计分确认请求/批复（复用协商模式：一方点「确认计分」→ 对方弹窗 → Ack）。
     ScoreConfirmReq,
     ScoreConfirmAck { ok: bool },
-    /// 头像：圆形裁剪后的 dataURL（≤128px，几 KB），走 P2P 不经服务器。
+    /// 头像：圆形裁剪后的 dataURL（≤128px，几 KB）。随 `Effect::Broadcast` 走 BC + DataChannel
+    /// + 服务器 relay 兜底——并非「不经服务器」，服务器模式转发观战者时经服务器（server.rs 的 `"spec-avatar"`）。
     Avatar { #[serde(rename = "dataUrl")] data_url: String },
 }
 

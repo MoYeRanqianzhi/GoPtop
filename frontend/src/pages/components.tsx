@@ -17,10 +17,10 @@ import {
 } from "../net/servers";
 import type { ServerEntry } from "../net/servers";
 import { storeGet } from "../net/store";
-/** 名册用户（与 goptop-net session::PeerInfo 快照字段一致；presence.ts 已迁 Rust）。 */
+/** 名册用户（id/name/status/gameId 来自 goptop-net session::PeerInfo 快照；ts 为 TS 侧合成字段（useGameSession.tsx:158），渲染未用；presence.ts 已迁 Rust）。 */
 export type PeerInfo = { id: string; name: string; status: "idle" | "waiting" | "in-game"; gameId: string | null; ts: number };
 
-/* ---------------- 头像（圆形，本地存储，P2P 交换） ---------------- */
+/* ---------------- 头像（圆形；落平台存储 net/store；对端头像只有接收分支 matchplay.rs:77 / server.rs:227——本端发送尚未接线） ---------------- */
 
 /** 圆形头像：有图显示图，无图显示首字。dataUrl 由调用方保证已圆形裁剪。 */
 export function Avatar(props: { dataUrl: string | null; name: string; size: number }) {
@@ -35,7 +35,9 @@ export function Avatar(props: { dataUrl: string | null; name: string; size: numb
   );
 }
 
-/** 选图 → 居中方形裁剪 → 圆形 mask → 128px PNG dataURL。 */
+/** 选图 → 居中方形裁剪 → 圆形 mask → 128px PNG dataURL。
+ *  尺寸与接收端准入线耦合：对端只收 data:image/ 且长度 < 20000 的 dataURL（goptop-net
+ *  matchplay.rs / server.rs，超限静默丢弃），128px PNG 已贴近上限——调大或换高码率编码会被丢。 */
 export async function cropAvatarToCircle(file: File): Promise<string> {
   const bitmap = await createImageBitmap(file);
   const side = Math.min(bitmap.width, bitmap.height);
@@ -69,7 +71,7 @@ export function AvatarSettings(props: { dataUrl: string | null; onSave: (dataUrl
         }} />
       <button className="brutal-btn brutal-btn--sm" onClick={() => fileRef.current?.click()}>上传头像</button>
       {dataUrl && <button className="brutal-btn brutal-btn--sm" onClick={() => onSave(null)}>清除</button>}
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>圆形裁剪 · 存本地 · 对局开始后自动发给对手</span>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>圆形裁剪 · 存本机</span>
     </div>
   );
 }
@@ -210,10 +212,11 @@ export function ChatPanel(props: {
           ))}
         </div>
       )}
-      {/* 输入框：观战者需批准；禁言/关闭后不可发 */}
+      {/* 输入框：观战者需双方批准（specCanChat）且观战未关闭；对局者恒可发（禁言只改名单标记，不拦发言） */}
       {role === "spectator" && (!specCanChat || !spectateEnabled) ? null : (
         <div style={{ display: "flex", gap: 6 }}>
           <input value={text} onChange={(e) => setText(e.target.value)}
+            /* isComposing 守卫：中文输入法组字中按 Enter 是「上屏候选词」而非发送 */
             onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) send(); }}
             placeholder="说点什么…"
             style={{ flex: 1, minWidth: 0, border: "3px solid var(--ink)", padding: "6px 9px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" }} />
@@ -485,6 +488,8 @@ export function BoardPanel(props: {
           <div className="brutal-label">对局</div>
           {gameBody}
         </div>
+        {/* display:"none" 是内联基准态（内联优先于类选择器），只有 styles/brutal.css 的容器查询
+            用 !important 才能翻成 flex——两处必须成对改 */}
         <div
           className={`brutal-card bp-swap${bottomTab === "rules" ? " brutal-card--paper" : ""}`}
           style={{ flex: 1, minWidth: 0, padding: 14, background: bottomTab === "game" ? "#fff" : undefined, display: "none", flexDirection: "column" }}

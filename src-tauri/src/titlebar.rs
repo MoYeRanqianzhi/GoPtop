@@ -15,6 +15,8 @@
 //!
 //! 窗口样式约束（缺一即失效）：必须 WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS；
 //! 禁 WS_EX_LAYERED（丢命中测试）与 WS_EX_TRANSPARENT（命中穿透）。
+//! 透明来自「从不绘制」：WNDCLASSW 不设 hbrBackground、WndProc 不处理 WM_PAINT/WM_ERASEBKGND
+//! ——补上背景刷或 WM_PAINT 会让覆盖层变成盖住系统按钮的实心方块。
 
 #[cfg(windows)]
 mod imp {

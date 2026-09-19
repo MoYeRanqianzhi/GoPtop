@@ -24,6 +24,8 @@ const SHOTS = require("path").join(__dirname, "shots", "phase5");
     await page.evaluate(([gx, gy]) => {
       const svg = document.querySelector('svg[role="grid"]');
       const r = svg.getBoundingClientRect();
+      // 9 路 viewBox 宽 = 2×30(padding) + 8×36(cell)，与 BoardSvg.tsx 的 padding/cell 同源：
+      // 改棋盘几何这里必须同步（下方 30 + gx*36 与 stones() 的 (cx-30)/36 同理）
       const vb = 60 + 8 * 36;
       const cx = r.left + ((30 + gx * 36) / vb) * r.width;
       const cy = r.top + ((30 + gy * 36) / vb) * r.height;

@@ -19,8 +19,9 @@ export function UserPage(props: { s: GameSession }) {
     acceptInvite, serverChallengePeer, createInvite, backHome, copyText,
     reset, handlePlace, saveName, loadMyAvatar, saveMyAvatar,
   } = props.s;
-  // 头像落平台存储（net/store 门面）、保存动作不触发 session state：预览必须用本地
-  // state 驱动，否则上传/清除后页面毫无反应（审查 #4 P1-2）
+  // 头像落平台存储（net/store 门面）；set_avatar 会回传一次 Emit（lobby.rs:728 → bridge.rs:30 →
+  // goptopOnChange），但快照的 avatar 没挂在 GameSession 返回对象上（useGameSession.tsx:287-306）——
+  // 预览必须用本地 state 驱动，否则上传/清除后页面毫无反应
   const [myAvatar, setMyAvatar] = useState(loadMyAvatar);
   return viewedUserId ? (
     <>

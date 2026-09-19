@@ -96,8 +96,8 @@ fn ok_reply(state: &GameState, captured: &[Coord]) -> String {
 }
 
 fn err_reply(err: &str) -> String {
-    // error 字符串是稳定契约（occupied/out_of_bounds/suicide/ko/scoring/game_over/no_move），
-    // 前端据此决定静默忽略还是提示。
+    // error 字符串是稳定契约（out_of_bounds/occupied/suicide/ko/scoring/game_over/other/no_move/bad_dead/replay_failed）；
+    // 前端目前只判 ok 字段、一律静默忽略，新增码时同步 frontend/src/game/rules.ts 的 PlaceResult/UndoResult 注释与前端分支。
     format!("{{\"ok\":false,\"error\":\"{err}\"}}")
 }
 

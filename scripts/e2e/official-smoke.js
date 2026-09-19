@@ -1,4 +1,4 @@
-/** 官服回归冒烟：两客户端连 wss://goptopserver.meowoo.org/ws 走一轮邀请→对局→聊天。 */
+/** 官服回归冒烟：两客户端连 wss://goptopserver.meowoo.org/ws 走一轮邀请→对局→落子同步。 */
 const { chromium } = require("playwright");
 const OFFICIAL_CFG = JSON.stringify([{ id: "official", label: "official", url: "wss://goptopserver.meowoo.org/ws", builtin: true }]);
 

@@ -2,7 +2,9 @@
  * GoPtop HarmonyOS 壳页面：ArkWeb Web 组件加载打包进 rawfile 的前端构建产物。
  *
  * 方案（2026-09-13）：Tauri 没有 HarmonyOS target，Web 组件壳是唯一路径。
- * - 前端 dist 整体拷贝到 resources/rawfile/app/（构建前由脚本同步）。
+ * - 前端 dist 整体拷贝到 resources/rawfile/app/（**无自动脚本**：改完前端须手工重拷——
+ *   删旧目录再整体复制 frontend/dist 并去掉 _redirects，步骤见
+ *   .agents/docs/real-device-testing.md；漏拷则壳里跑的是旧产物）。
  * - 用虚拟域名 https://appassets.goptop 承载，onInterceptRequest 把路径映射到
  *   rawfile：带扩展名 → 静态资源；无扩展名 → SPA 路由回退 index.html。
  *   history.pushState 路由（nav()）在刷新/直达时也能命中回退。
@@ -11,13 +13,18 @@
  *
  * 平台存储（用户拍板 2026-09-19：数据按平台规定位置落盘）：鸿蒙不是 Tauri，Web 侧
  * 没有 Rust 后端，因此由本壳注入 `goptopStore` 代理，把前端 net/store 门面的读写
- * 落到**应用私有目录 filesDir/store.json**（卸载即清除，无需任何权限）。
+ * 落到**应用私有目录 filesDir/store.json**（无需任何权限）。注意：本模块 backup_config.json
+ * 开了 allowToBackupRestore 且未配 includes，store.json 落在系统默认备份集内——「卸载即清除」
+ * 只描述本地文件，系统备份/恢复可把它带回重装后的设备。
  * 前端探测到该代理即用平台存储，探测不到才回落 localStorage。
  */
 import { webview } from '@kit.ArkWeb';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 
+// 虚拟域名（承载打包资源，公网不可达）。host 必须与前端 frontend/src/net/links.ts 的
+// ARKWEB_SHELL_HOST 逐字一致：isShellRuntime() 靠它判定「打包壳」并决定分享链接基地址，
+// 只改一处会让分享链接指向对方打不开的 appassets.goptop。
 const SCHEME_HOST = 'https://appassets.goptop/';
 
 /** 存储文件名（与桌面壳 Rust 侧同名，便于排查时对照）。 */

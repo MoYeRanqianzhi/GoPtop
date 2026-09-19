@@ -53,7 +53,7 @@ struct Peer {
 #[derive(Default)]
 struct StateInner {
     peers: HashMap<String, Peer>,
-    /// 每连接限速计数：conn_id -> (窗口起点, 已收条数)。
+    /// 每 ID 限速计数：user_id -> (窗口起点, 已收条数)（同 ID 顶替时沿用旧桶，重连不清零）。
     rates: HashMap<String, (Instant, u32)>,
 }
 type AppState = Arc<RwLock<StateInner>>;
@@ -195,6 +195,8 @@ fn handle_event(state: &AppState, me: &str, ev: C2S) -> Result<(), String> {
     let st = state.write().unwrap();
     match ev {
         C2S::Announce { status, game_id } => {
+            // 白名单必须与客户端 announce 的取值逐字一致（goptop-net session/server.rs 的 announce）：
+            // 多一个少一个都会在此被拒，客户端只看到一条 3s 提示，名册状态停在旧值。
             if !matches!(status.as_str(), "idle" | "waiting" | "in-game") {
                 return Err("bad status".into());
             }
@@ -217,8 +219,8 @@ fn handle_event(state: &AppState, me: &str, ev: C2S) -> Result<(), String> {
             }
             send_to(&st, &to, &json!({ "t": "relayed", "from": me, "payload": payload }));
         }
-        // hello 在握手层已消费；循环内再收到说明客户端状态异常（或探测），
-        // 温和拒绝并断开——绝不 panic（release panic=abort 会拖垮整个进程）。
+        // hello 在握手层已消费；循环内再收到说明客户端状态异常（或探测），温和拒绝
+        // （只回 error，不断开；真正的断开交给限速/解析失败路径）——绝不 panic（release panic=abort 会拖垮整个进程）。
         C2S::Hello { .. } => return Err("already registered".into()),
         C2S::Ping => unreachable!("handled by caller before dispatch"),
     }

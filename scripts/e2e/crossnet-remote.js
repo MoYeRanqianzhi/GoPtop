@@ -1,6 +1,7 @@
 /**
  * 跨设备真实对战测试——remote 端（受邀者，执白）。
- * 用法：node challenge-bot.js  → stdout 打 JSON 状态行，全程自足，结束自动退出。
+ * 用法：node crossnet-remote.js  → stdout 打 JSON 状态行，全程自足，结束自动退出
+ * （远端须另起静态服务于 127.0.0.1:8000，本机侧跑 crossnet-local.js）。
  * 流程：开官服 → 等挑战者上名册 → 等邀请弹窗 → 同意 → 执白按计划落子 → 等黑胜。
  */
 const { chromium } = require("playwright");
@@ -8,7 +9,7 @@ const { chromium } = require("playwright");
 const ORIGIN = "http://127.0.0.1:8000";
 const MY_NAME = "远端乙";
 const PEER_NAME = "本机甲";
-const WHITE_MOVES = [[1, 0], [1, 1], [1, 2], [1, 3]]; // 让黑连五：白只在第 1 行陪跑
+const WHITE_MOVES = [[1, 0], [1, 1], [1, 2], [1, 3]]; // 让黑连五：白只在第 1 列陪跑
 const SIZE = 15;
 
 function log(obj) { console.log("JSON " + JSON.stringify(obj)); }

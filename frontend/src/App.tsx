@@ -125,8 +125,10 @@ export default function App() {
     return () => { ro.disconnect(); mo.disconnect(); };
   }, []);
 
-  // 对局邀请统一弹窗（用户拍板 2026-09-13：横幅不够明显）。服务器挑战（serverIncoming）
-  // 与同源 presence 挑战（incoming）同一形态；只在主页状态出现，必须明确同意/拒绝，
+  // 对局邀请统一弹窗（用户拍板 2026-09-13：横幅不够明显）。快照只有一个挑战槽 serverIncoming：
+  // 服务器挑战（server.rs:376）与同源 presence 挑战（lobby.rs:343）都写 Rust 的 self.incoming，
+  // useGameSession 里 incoming 与 serverIncoming 是同一字段（useGameSession.tsx:166/302），故下面
+  // incoming 分支不可达，可简化为 serverIncoming 单分支。只在主页状态出现，必须明确同意/拒绝，
   // 不设背景点击关闭——静默忽略会让挑战方停在「等待对方同意」。
   const inviteReq = serverIncoming
     ? {
@@ -275,8 +277,6 @@ export default function App() {
         </div>
         {chatModal}
       </main>
-
-      {/* 页面壳布局样式（header 三级降级、底部三卡容器查询）在 styles/brutal.css 末尾 */}
 
       {/* —— 对局邀请弹窗（服务器挑战 / 同源挑战统一；必须明确选择） —— */}
       {inviteReq && (

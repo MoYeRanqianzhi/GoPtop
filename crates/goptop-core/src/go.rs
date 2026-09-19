@@ -85,7 +85,8 @@ fn block_and_liberties<const N: usize>(
 /// - `ko_point`：当前劫点（来自 `GameState`，随历史重放恢复）。落子在劫点直接拒。
 /// - `logical`：逻辑棋盘边长（围棋 9/13 路物理盘 19×19，只统计 0..logical）。
 /// - 成功：返回 [`CaptureOutcome`]（被提子 + 新劫点），棋盘已更新。
-/// - 失败：返回结构化 [`RuleError`]，棋盘保持不变（调用方需在外层回滚或先克隆）。
+/// - 失败：返回结构化 [`RuleError`]，棋盘由本函数回滚至调用前状态（早退检查都在落子前，
+///   自杀路径恢复落子点与被提子），调用方无需克隆或回滚。
 pub fn try_place<const N: usize>(
     board: &mut Board<N>,
     coord: Coord,

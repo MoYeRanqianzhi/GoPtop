@@ -1,6 +1,8 @@
 //! 棋盘原语 — 棋子、坐标、棋盘容器。
 //!
-//! 五子棋与围棋在数据层完全一致：棋盘是 `N×N` 的 `Stone` 矩阵，`N` 为 15（五子棋）或 19/13/9（围棋）。
+//! 五子棋与围棋在数据层完全一致：棋盘是 `N×N` 的 `Stone` 矩阵，`N` 只有 15（五子棋）与 19
+//! （围棋；9/13 路的逻辑尺寸由 `GameKind::Go { size }` 限制，物理存储仍为 19×19，
+//! `BoardVariant` 只实例化 B15/B19）。
 //! 本模块仅提供数据与基础操作（读写、越界检查、遍历），不含任何规则。
 
 use serde::{
@@ -255,7 +257,8 @@ impl BoardVariant {
         self.get(c) == Some(Stone::Empty)
     }
 
-    /// 是否在逻辑范围内（含尺寸限制）。
+    /// 是否在物理棋盘内。`BoardVariant` 不含逻辑尺寸：9/13 路围棋的边界由
+    /// `GameState::try_play` 里的 `kind.size()` 判定——(9,0) 在这里仍返回 true。
     #[must_use]
     pub fn in_bounds(&self, c: Coord) -> bool {
         match self {

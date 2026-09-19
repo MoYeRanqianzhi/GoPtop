@@ -12,7 +12,8 @@ use wasm_bindgen::JsCast;
 
 pub(crate) type SharedCore = Rc<RefCell<Core>>;
 
-/// 启动同源 presence（announce 循环在 effect 侧 2s 定时器驱动；这里建 channel 收件）。
+/// 启动同源 presence（announce 无循环重放，只在阶段切换时发一次；effect 侧无 2s 定时器——
+/// 这里只建 channel 收件）。
 pub(crate) fn start_presence(core: &SharedCore) {
     let bc = bc::Bc::open("goptop-presence-v1", {
         let core = core.clone();
@@ -22,9 +23,9 @@ pub(crate) fn start_presence(core: &SharedCore) {
                 let me = core.borrow().session.user_id.clone();
                 match t {
                     "announce" => {
-                        // 名册条目更新由 announce effect 的定时广播 + 本端收件合并——
-                        // presence 名册语义：收到的 announce 刷新该 peer 的存活（简化：
-                        // 状态机直接以单条 announce 更新名册条目）。
+                        // 收到的 announce 仅当存活信号：本层下发空名册（Peers{peers: Vec::new()}），
+                        // 而状态机在非服务器模式下用整份 peers 覆盖 s.peers（lobby.rs:321）——
+                        // 即当前实现等于清空名册，属已知简化；改这里前先看 lobby.rs:316。
                         queue_event(Event::Presence(PresenceEvt::Peers { peers: Vec::new() }));
                         let _ = &me;
                     }
@@ -68,7 +69,8 @@ pub(crate) fn connect_server(core: &SharedCore) {
     core.borrow_mut().ws = Some(Rc::new(socket));
 }
 
-/// 服务器选择（localStorage 配置读取；与历史键名一致）。
+/// 服务器选择（经 crate::storage_get 读宿主存储：桌面 ~/.goptop、移动端私有目录、Web 端
+/// localStorage；键名与历史一致）。
 pub(crate) fn selected_server_url() -> Option<String> {
     const BUILTIN: &str = r#"[{"id":"official","label":"官方服务器","url":"wss://goptopserver.meowoo.org/ws","builtin":true}]"#;
     let sel = crate::storage_get("goptop:server-sel").unwrap_or_else(|| "official".into());

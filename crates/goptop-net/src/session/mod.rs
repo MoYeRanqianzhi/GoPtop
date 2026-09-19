@@ -208,7 +208,8 @@ pub struct Session {
     pub size: SizeT,
     /// 规则引擎；与 kind/size/board/to_move/winner/history 严格一致。
     pub engine: GameState,
-    /// TS 侧镜像的棋盘/轮手/胜负（以 engine 的权威回复同步；board 为逻辑尺寸二维表）。
+    /// TS 侧镜像的棋盘/轮手/胜负（以 engine 的权威回复同步）。board 为逻辑尺寸 n×n 表，
+    /// 索引恒为 [y][x]——写成 [x][y] 不会报错，只会把整盘镜像。
     pub board: Vec<Vec<Color>>,
     pub to_move: Color,
     pub winner: Option<Color>,
@@ -244,7 +245,8 @@ pub struct Session {
     pub rtc_peers: Vec<PeerSlot>,
     /// 邀请者的主对局连接 tag（等 answer 用）。
     pub inviter_main: Option<String>,
-    /// 观战者连接的房主（服务器 ID / 无服务器 = "main"）。
+    /// 观战者连接的房主 ID（服务器模式 = spec-join 链接 target 的房主 ID；无服务器 = 观战链接里的房主 userId）。
+    /// answer 回传与聊天/发言申请按此路由；无服务器直连的 RTC tag 是 "spec-main"，不写进本字段。
     pub my_host: Option<String>,
     /// 服务器通道状态："off" | "connecting" | "ready" | "error"。
     pub server_state: String,
@@ -252,7 +254,8 @@ pub struct Session {
     /* —— 意图与信件 —— */
     pub pending_link: Option<PendingLink>,
     pub incoming: Option<Incoming>,
-    /// 已发起的同源挑战目标（双向对撞 tiebreak 用）。
+    /// 已发起的服务器大厅挑战目标（server_challenge_peer 写入；双向对撞时按 userId 字典序
+    /// 确定性 tiebreak——见 server_on_challenge）。同源 presence 挑战不入此字段。
     pub outgoing_challenge: Option<String>,
     pub processed_href: Option<String>,
     pub invite_done_href: Option<String>,
@@ -433,8 +436,7 @@ pub enum Event {
     Server(ServerEvt),
     /// 对局消息三链路统一入口（BC / DataChannel / relay 已在此汇合，去重在本层）。
     Net(GameMsg),
-    /// 同源 presence 下行（announce 名册在 transport 侧直接进 ServerEvt::Peers？——
-    /// presence 是独立通道，单独事件）。
+    /// 同源 presence 下行（名册/挑战/受理/拒绝；与服务器 ServerEvt 是两条独立通道）。
     Presence(PresenceEvt),
     /// RTC 连接状态变化。
     PeerState { tag: String, opened: bool, closed: bool, failed: bool },
@@ -556,7 +558,8 @@ pub enum Effect {
     LeaveChannel,
     /// 定时器（毫秒；重复 id 应重置）。
     Timer { id: TimerId, ms: u64 },
-    /// localStorage/sessionStorage 写。
+    /// 设置类键值落盘（经宿主存储钩子 `goptopStorageSet`：桌面 ~/.goptop、移动端应用私有目录、
+    /// 鸿蒙 filesDir、Web 端 localStorage；钩子缺失/抛错时才回落 localStorage——见 transport/storage_set）。
     SetStorage { key: String, value: Option<String> },
     /// 剪贴板复制（成功提示文案一并给出）。
     Copy { text: String, ok_msg: String },

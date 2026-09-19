@@ -15,7 +15,9 @@ impl Session {
         }
     }
 
-    /// 关闭全部 P2P 连接与棋盘 channel（换局入口与 backHome 共用）。
+    /// 丢弃全部 P2P 槽位与棋盘 channel 的本端记账（换局入口与 backHome 共用）。
+    /// 注意：它不产出 Effect，真正关闭连接/BC channel 要靠调用点补发 ClosePeers / LeaveChannel
+    /// （目前只有 do_back_home:43-44 补了）；漏发时旧连接会留在 transport 里。
     pub(crate) fn close_all_rtc(&mut self) {
         self.rtc_peers.clear();
         self.inviter_main = None;
@@ -121,8 +123,9 @@ pub(crate) fn on_navigate(s: &mut Session, href: &str) -> Vec<Effect> {
     process_intent(s, &ctx_fallback(), &links::parse_url(href))
 }
 
-/// Boot/Navigate 不需要随机源：意图处理本身不生成随机值。
-/// （函数签名仍带 ctx 以防未来扩展。）
+/// Boot/Navigate 无真实随机源：只能给零值 ctx（now_ms=0、rand=[0;4]）。
+/// 但意图处理不是纯函数——带 rtc 的无服务器邀请链接会经 accept_invite 调 gen_game_id，
+/// 受理后 gameId 恒为「g-000000000000」，同源多个此类局共用同一个 BC 频道；要真随机需由 transport 注入 ctx。
 #[allow(clippy::needless_pass_by_value)]
 fn ctx_fallback() -> ReduceCtx {
     ReduceCtx { now_ms: 0, rand: [0; 4] }
@@ -182,8 +185,8 @@ fn process_intent(s: &mut Session, ctx: &ReduceCtx, it: &UrlIntent) -> Vec<Effec
     fx
 }
 
-/// 无服务器模式：回执意图判定（旧 TS 用 URL ?rtcAns=；Rust 版沿用 rtcAns 参数）。
-/// 此处 rtc 参数存在与否用于区分「邀请 offer 链接」与「主页展示链接」。
+/// 无服务器模式：判据是「带 pwd 却无 ?rtc=（offer）」——这种链接只可能是受邀者回传的回执链接被当页面打开。
+/// 查的是 rtc，不是 rtcAns——rtcAns 由 parse_pasted_answer 解析成 AnswerIntent，不进 UrlIntent。
 fn href_has_receipt(rtc: &Option<String>) -> bool {
     rtc.is_none()
 }
@@ -612,7 +615,6 @@ impl Session {
 
 /// 邀请者受理对局回执（粘贴路径）：校验钥匙 → 完成 answer 应用 → 切到受邀者
 /// channel 进对局。观战回执（spectator=true）转 [`accept_spec_receipt`]。
-/// 返回错误文案（None = 受理成功），由弹窗就地展示。
 pub(crate) fn accept_receipt(s: &mut Session, ctx: &ReduceCtx, r: &AnswerIntent) -> Vec<Effect> {
     if r.spectator {
         // 观战回执自动识别分派（回执类型由链接属性自动判断，用户拍板）。
@@ -645,6 +647,8 @@ pub(crate) fn accept_receipt(s: &mut Session, ctx: &ReduceCtx, r: &AnswerIntent)
     s.pwd = None; // pwd 失效：两人满员
     s.invite_url = None;
     s.incoming = None;
+    // 回执里的 kind/size 不回写本端局面：两端建盘用的是同一链接参数，本端规则在 create_invite
+    // 时已定（上面的 reset_board_for），重设只会覆盖邀请者自己的开局选择。
     let _ = (k, sz);
     fx.push(Effect::Notice(Some("回执已受理，直连建立中…".into()), None));
     fx.push(Effect::Nav("/p2p".into()));

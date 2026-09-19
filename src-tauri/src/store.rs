@@ -4,7 +4,8 @@
 //! - **桌面壳**：`~/.goptop/store.json`（用户指定目录）；
 //! - **移动端（Android/iOS，同为本 Tauri 后端）**：平台给应用的私有数据目录
 //!   （`app_data_dir()`，Android 落在 `/data/data/<pkg>/…`，随应用卸载清除）；
-//! - **Web 端**：浏览器 localStorage（前端门面的回退路径，不经本模块）。
+//! - **Web 端**：浏览器 localStorage（前端门面的回退路径，不经本模块）；
+//! - **鸿蒙壳（ArkWeb，无 Rust 后端）**：ArkTS 注入的 `goptopStore` 代理落应用 `filesDir/store.json`，不经本模块。
 //!
 //! 为什么单文件 JSON：全量键值只有几条（昵称/服务器/STUN/默认规则/头像），
 //! 一个文件即可原子落盘、便于用户备份与排查；头像 data URL 也在其中（限长见

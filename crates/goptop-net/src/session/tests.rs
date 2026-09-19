@@ -86,7 +86,7 @@ fn server_join_mutex() {
     reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: Some("O".into()), answer_plain: None, offer_enc: None, answer_enc: None }, &c);
     let pwd = a.pwd.clone().unwrap();
     reduce(&mut a, Event::Server(ServerEvt::Signal { from: "u-b".into(), kind: "join".into(), payload: serde_json::json!({ "pwd": pwd, "name": "乙" }) }), &c);
-    // 第二个 join：拒绝（正在对局中——A 在 answer 前仍 waiting，但 opponent 已占位）。
+    // 第二个 join：拒绝（A 仍 waiting，靠 opponent 占位拦下；reason = 「对方不在等待对局」）。
     let fx = reduce(&mut a, Event::Server(ServerEvt::Signal { from: "u-d".into(), kind: "join".into(), payload: serde_json::json!({ "pwd": pwd, "name": "丁" }) }), &c);
     assert!(fx.iter().any(|e| matches!(e, Effect::SendServer(v) if v["kind"] == "reject")));
 }

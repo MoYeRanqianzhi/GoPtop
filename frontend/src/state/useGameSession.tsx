@@ -166,7 +166,10 @@ export function useGameSession() {
   const incoming = s?.serverIncoming ?? null;
   const peerConnected = s?.peerConnected ?? false;
 
-  /** 服务器模式的兜底中转可用性：直连未通但有 relay 目标（快照以 opponents/spec推导）。 */
+  /** 服务器模式的兜底中转可用性（TS 侧重推导）：serverState==="ready" 且 phase 为 waiting/playing；
+   *  调用处再与 !peerConnected 组合（183/192/200 行）。与 Rust 的 relayAvailable 不等价——快照里那个
+   *  还含 relay_targets 非空（snapshot.rs:63 = mod.rs:379-381），relay_targets = 对手 + 观战者的服务器
+   *  ID（mod.rs:239）；本 TS 版没读快照的 relayAvailable，也没检查 relay 目标是否为空。 */
   const relayTargets = useMemo(() => {
     if (!serverMode || !s) return false;
     return s.serverState === "ready" && (phase === "waiting" || phase === "playing");
@@ -263,7 +266,9 @@ export function useGameSession() {
         setModalInput("");
         setModalErr(null);
         setModal(null);
-        // 同源观战走 Rust Boot 等价意图：直接导航到 /watch/<id> 由 Boot 处理。
+        // 同源观战：只改地址 + 派发 popstate，实际效果仅是 129 行的路由 intent 切到 /watch（WatchPage 只读渲染）。
+        // Rust 的 Event::Boot 只在 WasmSession 构造时用当时的 href 触发一次（crates/goptop-transport/src/lib.rs:165-166），
+        // wasm 面没有 boot/navigate 导出、UiCommand::Navigate 也无构造点——这里不会把观战意图送进状态机，真正入局需另行发起。
         window.history.pushState(null, "", `/watch/${encodeURIComponent(it.gameId as string)}`);
         window.dispatchEvent(new PopStateEvent("popstate"));
         return;
@@ -328,7 +333,10 @@ export function useGameSession() {
     toggleDead: (c: Coord) => cmd((s2) => s2.toggle_dead(c.x, c.y)),
     confirmScore: () => cmd((s2) => s2.confirm_score()),
     reset: () => {
-      // 本地对战：直接重开（broadcast Reset）；P2P：对方同意制。
+      // 无服务器对局与服务器 P2P 走同一条 request_reset：Rust 侧一律广播 ResetReq 等对方同意
+      // （matchplay.rs:459-467；对端入 confirm 队列、收到 ResetAck{ok:true} 才 apply_reset_local，
+      // matchplay.rs:119-124/497），TS 这里没有「直接重开」。注：本地对战 /local 由 LocalPage
+      // 自己的 RulesEngine 重开（LocalPage.tsx:35），不经本函数。
       if (serverMode && (role === "inviter" || role === "invitee")) {
         cmd((s2) => s2.request_reset());
         return;

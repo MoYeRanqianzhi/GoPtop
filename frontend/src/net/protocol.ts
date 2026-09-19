@@ -1,9 +1,9 @@
 /**
- * net/protocol — 对局线格式类型唯一真源。
+ * net/protocol — TS 侧类型定义（Coord/StoneColor/GameKind/Size 等 UI 共用类型在此统一定义）。
  *
- * 所有链路（同源 BroadcastChannel、WebRTC DataChannel、服务器 relay 兜底中转）
- * 传的都是这里定义的 JSON 结构；BoardSvg 与 game/board 的 StoneColor/Coord 也统一
- * 从这里取，避免结构相同却各自漂移。
+ * 线格式（GameMsg/MsgKind）的真源是 crates/goptop-net/src/protocol.rs：所有链路
+ * （同源 BroadcastChannel、WebRTC DataChannel、服务器 relay 兜底中转）传的 JSON 以那边为准。
+ * 本文件 MsgKind 已滞后（缺 ScoreMark/ScoreConfirmReq/ScoreConfirmAck，见 protocol.rs:86-89），只作阅读参考。
  */
 
 export type StoneColor = "empty" | "black" | "white";
@@ -41,7 +41,7 @@ export type MsgKind =
   | { type: "ResetAck"; ok: boolean }
   | { type: "SwapReq" }
   | { type: "SwapAck"; ok: boolean }
-  // 头像：圆形裁剪后的 dataURL（≤128px jpeg，几 KB），走 P2P 不经服务器
+  // 头像：圆形裁剪后的 dataURL（128px PNG，几 KB）；服务器模式下会经服务器 relay 转发给观战者（matchplay.rs:41-51）
   | { type: "Avatar"; dataUrl: string };
 
 export type GameMsg = {
