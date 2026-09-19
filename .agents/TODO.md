@@ -28,15 +28,19 @@
         `__store.backend()` 为 `tauri`。
         （首轮因模拟器与 gradle 构建同时跑把内存压到临界被回收；改成**先构建后起模拟器**
         串行执行即通过，峰值内存减半。）
-- [ ] **原生平台的传输层仍是 wasm**（本轮查明的最大遗留）。规则与 AI 已经在
-      桌面/Android/鸿蒙三端直连 Rust，但 **P2P 会话（`WasmSession`）三端仍跑
-      `frontend/src/wasm/transport/`**——证据：安卓资源时间线里有
-      `goptop_transport_bg-*.wasm`。`crates/goptop-transport-native` 已存在且无头 5/5，
-      但**没有接进任何宿主**（`src-tauri` 只依赖 core/ai）。
-      注意：**逻辑本身已经是纯 Rust**，差别只在编译目标与 IO 后端——所以这不是
-      「功能没用 Rust 做」，而是「原生端白扛了 wasm 的边界与 WebView 限制」。
-      工作量不小（Tauri 命令面 + 事件回推 + 前端第三个 transport 后端；鸿蒙还要
-      把异步 IO 的状态回推接到 NAPI 的 post/poll 上），且会动到刚验过的 P2P 路径。
+- [x] **原生平台的传输层已不再跑 wasm**（本轮收口）。规则/AI 之后，P2P 会话也在
+      三端直连 Rust：`crates/goptop-transport-native` 接进了 `src-tauri`（桌面/Android）
+      与 `crates/goptop-ohos`（鸿蒙），前端由 `frontend/src/net/session.ts` 分派。
+      - 命令面只有一个口子：给 `UiCommand` 加 serde，`session_cmd(id, cmdJson)`，
+        线上形态即该枚举——**不在宿主里再抄一份分派表**（两处契约迟早分叉）。
+      - 状态回推走拉模式（`session_poll` = 泵一次 + 快照 + 宿主动作队列），与 wasm 侧
+        50ms 泵同构，前端 `start_pump()` 的语义两端一致。
+      - 实测：桌面双实例 **10/10**；**桌面 ↔ 鸿蒙跨宿主 10/10**（两个宿主各写各的
+        `Host` 实现，跑同一份状态机）；两端资源时间线里都没有 transport wasm。
+      - **安卓未实测**：宿主与桌面是同一条 `src-tauri` 代码路径，但安卓特有的
+        `__TAURI_INTERNALS__` 注入时机需要真机/模拟器过一遍。本轮两次尝试
+        `tauri android build` 都因内存压到临界被回收（Gradle + Rust 同时跑很吃内存），
+        按提示不再自行重启——**下次要跑时先关掉其它模拟器、单独跑构建**。
 - 遗留（本轮未动）：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死在 PUCT 改动之后，
   注释还在描述旧算法；删它要连带重建 wasm 产物与三端壳的 dist，单独立一轮更划算。
 
