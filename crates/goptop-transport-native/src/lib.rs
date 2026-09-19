@@ -84,6 +84,33 @@ impl Core {
     }
 }
 
+/// 传输层的调度运行时。
+///
+/// **宿主碰会话之前必须先进来**：传输层到处 `tokio::spawn`（建连接、收消息、
+/// 定时器），而宿主的调用点往往不在任何运行时上下文里——Tauri 的**同步**命令跑在
+/// 主线程上，NAPI 的回调跑在 ArkWeb 的线程上。没有上下文就是
+/// `there is no reactor running, must be called from the context of a Tokio 1.x
+/// runtime` **panic 在主线程上**，整个应用进程随之退出（实测：桌面壳在开局的
+/// 那一刻直接崩掉）。
+///
+/// 用法：`let _g = enter_runtime();` 然后照常调 `NativeSession::new` / `pump` /
+/// `cmd`。守卫离开作用域自动还原线程上下文。
+///
+/// **不要指望宿主框架的运行时**：那是实现细节，会随版本变；自持一个还让传输层的
+/// 生命周期与窗口框架解耦。无头测试用 `#[tokio::test]` 自带的运行时即可，
+/// 嵌套 `enter()` 是安全的（守卫析构时还原上一层）。
+pub fn enter_runtime() -> tokio::runtime::EnterGuard<'static> {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("goptop-net")
+            .build()
+            .expect("无法创建 tokio 运行时：传输层全靠它调度，起不来等于 P2P 不可用")
+    })
+    .enter()
+}
+
 /// 毫秒时间戳（**墙钟**，与 wasm 侧 `Date.now()` 同一时间轴）。
 ///
 /// 注意它**不是单调时钟**：系统时间被回拨（NTP 校时）时会倒退，状态机的超时判定

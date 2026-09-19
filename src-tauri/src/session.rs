@@ -14,13 +14,17 @@
 //! 平台动作（提示条 / 剪贴板 / 导航）在 Rust 侧没有 UI 可动，因此**入队**，
 //! 由 `session_poll` 一并带回，由前端在同一个 JS 上下文里执行——这样
 //! `window.goptopNotice` 这类既有钩子在两端是同一条路径。
+//!
+//! **碰会话之前先进运行时**：见 `goptop_transport_native::enter_runtime`——Tauri 的
+//! 同步命令跑在主线程上，没有 tokio 上下文时传输层的 `tokio::spawn` 会直接 panic
+//! 并把整个窗口进程带走（本项目实测踩过）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use goptop_net::session::UiCommand;
-use goptop_transport_native::{Host, NativeSession, SessionConfig};
+use goptop_transport_native::{Host, NativeSession, SessionConfig, enter_runtime};
 use tauri::State;
 
 /// 一条会话：状态机句柄 + 它的宿主。
@@ -118,10 +122,11 @@ impl Host for TauriHost {
 
 /// 构造会话：`cfg_json` 与 wasm 侧 `WasmSession::new` 同字段（见 `SessionConfig`）。
 ///
-/// **必须 async**：`NativeSession::new` 内部要 `tokio::spawn` 起 presence 订阅与
-/// WS 连接，同步命令不在 tokio 运行时上下文里，会直接 panic。
+/// **同步命令 + 显式 `enter_runtime()`**：构造过程中要 `tokio::spawn` 起 presence
+/// 订阅、WS 连接与 RTC 连接，必须站在运行时上下文里。做成 `async fn` 看似能借
+/// Tauri 的运行时，但那个假设是错的（实测主线程 panic），显式进入才确定。
 #[tauri::command]
-pub async fn session_new(
+pub fn session_new(
     app: tauri::AppHandle,
     sessions: State<'_, Sessions>,
     cfg_json: String,
@@ -129,6 +134,7 @@ pub async fn session_new(
 ) -> Result<Option<u32>, String> {
     let cfg: SessionConfig = serde_json::from_str(&cfg_json).map_err(|e| format!("cfg 解析失败: {e}"))?;
     let host = Arc::new(TauriHost::new(app));
+    let _g = enter_runtime();
     let s = NativeSession::new(cfg, host.clone() as Arc<dyn Host>, &href);
     s.start_pump();
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -158,7 +164,10 @@ pub fn session_poll(sessions: State<'_, Sessions>, id: u32) -> String {
     let Ok(m) = sessions.0.lock() else { return null_poll() };
     let Some(e) = m.get(&id) else { return null_poll() };
     // 泵一次再取快照：IO 回调塞进队列的事件要在这里被消化，
-    // 否则前端要等下一个 50ms 周期才看到变化
+    // 否则前端要等下一个 50ms 周期才看到变化。
+    // `enter()` 不可省：pump 会执行 Effect，其中 CreatePeer / 发消息 / 定时器都会
+    // `tokio::spawn`——本命令是同步命令，跑在主线程上，没有上下文就 panic。
+    let _g = enter_runtime();
     e.session.pump();
     let snap = e.session.snapshot();
     let actions = e.host.take_actions();
@@ -185,6 +194,8 @@ pub fn session_cmd(sessions: State<'_, Sessions>, id: u32, cmd_json: String) -> 
     let Some(e) = m.get(&id) else {
         return serde_json::json!({ "ok": false, "error": "no_session" }).to_string();
     };
+    // 同上：`cmd` 内部会同步泵一次，泵里会 spawn
+    let _g = enter_runtime();
     e.session.cmd(cmd);
     serde_json::json!({ "ok": true }).to_string()
 }

@@ -33,6 +33,8 @@ goptop-core = { path = "../crates/goptop-core" }
 goptop-ai = { path = "../crates/goptop-ai" }
 # HostAction 的 serde 派生（回给前端的宿主动作队列）
 serde = { workspace = true }
+# 传输层的调度运行时（见 src/session.rs 的 runtime()：不能依赖 Tauri 的）
+tokio = { workspace = true }
 # P2P 会话的原生执行器（WebSocket / WebRTC / 同源通道）。
 # 传输层的**逻辑**在 goptop-net，本 crate 是它在本平台的 IO 后端。
 goptop-transport-native = { path = "../crates/goptop-transport-native" }

@@ -7,6 +7,13 @@
 //!    外加「每次命令后同步泵一次」，与 wasm 的行为一致。
 //! 3. **平台动作走 `Host` trait**：wasm 侧调 `window.goptop*` 全局钩子，这边调
 //!    宿主实现——无头测试用 `HeadlessHost` 即可跑通全部逻辑。
+//!
+//! # 宿主必须先进运行时
+//!
+//! 本模块到处 `tokio::spawn`（建连接、收消息、定时器）。宿主的调用点常常不在任何
+//! 运行时上下文里——Tauri 的同步命令在主线程、NAPI 回调在 ArkWeb 线程——没有上下文
+//! 就是 `there is no reactor running` **panic 在主线程上、整个进程退出**。
+//! 碰会话之前先 `let _g = crate::enter_runtime();`，见该函数的说明。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +28,18 @@ use crate::{Core, SharedCore, SessionConfig, bridge, now_ms, rand4};
 pub struct NativeSession {
     core: SharedCore,
     host: Arc<dyn Host>,
+    /// 后台泵的停机标志（[`Drop`] 置位）。
+    ///
+    /// 泵是个 `loop { tick; pump }` 的常驻任务，不显式叫停的话，会话被 drop 之后
+    /// 它仍每 50ms 醒一次、抱着 `Arc<Core>` 与宿主不放——切一次页面漏一个，
+    /// 而且宿主（Tauri 的 `AppHandle`）被常驻引用着，进程也退不干净。
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl NativeSession {
@@ -51,7 +70,7 @@ impl NativeSession {
             ws: None,
         }));
 
-        let me = Self { core, host };
+        let me = Self { core, host, stop: Arc::new(std::sync::atomic::AtomicBool::new(false)) };
         bridge::queue(&me.core, Event::Boot { href: href.to_string() });
         crate::io::bc::start_presence(&me.core);
         if me.core.lock().map(|c| c.session.server_mode).unwrap_or(false) {
@@ -87,10 +106,16 @@ impl NativeSession {
     pub fn start_pump(&self) {
         let core = self.core.clone();
         let host = self.host.clone();
+        let stop = self.stop.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(50));
             loop {
                 tick.tick().await;
+                // 会话已释放就退出（见 `stop` 的说明）。检查放在 pump 之前：
+                // 释放之后再去碰 Core 只会白跑。
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
                 bridge::pump(&core, &host);
             }
         });
