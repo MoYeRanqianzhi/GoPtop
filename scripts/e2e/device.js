@@ -127,13 +127,20 @@ class Endpoint {
 
   /**
    * 写一条设置到**该端真正的存储位置**（shell 端不再是 localStorage 了）：
-   * Tauri 壳走 Rust store 命令（~/.goptop 或应用私有目录），鸿蒙壳走 ArkTS 桥，
-   * 浏览器走 localStorage。设置完必须重载页面才生效（门面只在启动时装载一次）。
+   * Tauri 壳走 Rust store 命令（~/.goptop 或应用私有目录），鸿蒙壳走 ArkTS 桥
+   * （`goptopHost`），浏览器走 localStorage。设置完必须重载页面才生效
+   *（门面只在启动时装载一次）。
+   *
+   * **桥名与方法名必须与 harmony/entry/.../Index.ets 的 javaScriptProxy 逐字一致**：
+   * 写错不会报错，只会静默落到 localStorage——而壳里读的是平台存储，
+   * 于是设置"写了没生效"，排查时会一路怀疑到传输层去（实际踩过）。
    */
   async setSetting(key, value) {
     await this.page.evaluate(async ([k, v]) => {
       const w = window;
-      if (w.goptopStore) { w.goptopStore.set(k, v); return; }
+      // 鸿蒙桥：`goptopHost`（存储与原生宿主**合成一个对象一次注册**——
+      // Web 的 `.javaScriptProxy()` 是单值属性，注册两个只有最后一个生效）。
+      if (w.goptopHost) { w.goptopHost.storeSet(k, v); return; }
       if (w.__TAURI_INTERNALS__) { await w.__TAURI_INTERNALS__.invoke("store_set", { key: k, value: v }); return; }
       localStorage.setItem(k, v);
     }, [key, value]);
@@ -144,8 +151,8 @@ class Endpoint {
   async getSetting(key) {
     return this.page.evaluate(async (k) => {
       const w = window;
-      if (w.goptopStore) {
-        const raw = w.goptopStore.load();
+      if (w.goptopHost) {
+        const raw = w.goptopHost.storeLoad();
         const map = raw && raw.trim() ? JSON.parse(raw) : {};
         return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null;
       }
