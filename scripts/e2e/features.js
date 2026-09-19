@@ -57,13 +57,11 @@ async function open(spec, name) {
   return ep;
 }
 
+/** 壳端点预置：走 ep.setSetting（壳端数据在平台存储，写 localStorage 已无效）。 */
 async function prepShell(ep, name) {
   ep.displayName = `${name}${RUN_TAG}`;
-  await ep.page.evaluate((n) => {
-    localStorage.setItem("goptop:name", n);
-    if (process?.env?.XDEV_SERVER === "none") localStorage.setItem("goptop:server-sel", "none");
-    else localStorage.removeItem("goptop:server-sel");
-  }, ep.displayName).catch(() => {});
+  await ep.setSetting("goptop:name", ep.displayName).catch(() => {});
+  if (process?.env?.XDEV_SERVER === "none") await ep.setSetting("goptop:server-sel", "none").catch(() => {});
   await ep.page.reload({ waitUntil: "domcontentloaded" });
   await ep.ready(40000);
 }

@@ -131,6 +131,30 @@ SyncState/SyncRequest 不去重（重连 seq 归零）。**SyncState 带 `sv` �
   （`cargo run -p goptop-server -- --listen=127.0.0.1:9527`）。断言依赖 UI 文案，改卡片文案先看它。
 - 浏览器实测脚本：go-capture.js（围棋提子/悔棋还原/五连）、ui-audit.js（515px 窄屏巡检）。
 
+## 本地存储（用户拍板 2026-09-19：数据按平台规定位置落盘）
+
+唯一门面 `frontend/src/net/store.ts`（**业务模块禁止再直接碰 localStorage**）。
+启动时 `main.tsx` 先 `await storeInit()` 再渲染——门面把整表装进内存，之后
+`storeGet` 读内存、`storeSet/Remove` 改内存并落盘（同步 API 是刚需：昵称/服务器/
+STUN/规则/头像的读取散布在同步路径上）。
+
+| 后端 | 判定 | 落盘位置 | 通道 |
+|---|---|---|---|
+| `browser` | 兜底（Web 端本体） | 浏览器 localStorage | 直接读写 |
+| `tauri` | `isTauri()` | 桌面 `~/.goptop/store.json`；移动端 `app_data_dir()`（Android 实测 `/data/data/<pkg>/store.json`） | Rust 命令 `store_load/set/remove`（`src-tauri/src/store.rs`） |
+| `harmony` | 存在 `window.goptopStore` | 应用 `filesDir/store.json` | ArkTS `javaScriptProxy` 注入（`harmony/.../pages/Index.ets`） |
+
+- **wasm 侧也要走门面**：`goptop-transport` 的 `storage_get/set` 优先调用宿主钩子
+  `window.goptopStorageGet/Set`（门面安装），没装才回落 localStorage。不接这一步的话
+  昵称（`Effect::SetStorage`）会被 wasm 直接写进 WebView 的 localStorage，
+  平台存储形同虚设——这是本次要修的「谬误」。
+- `goptop:tabUser` 例外：**每标签页一个身份**，固定 sessionStorage（四端一致）。
+- 首次迁移：平台侧还没有任何 `goptop:` 键、而浏览器存储里有（旧版数据）时自动搬过去，只做一次。
+- 落盘失败（权限/桥异常）退回 localStorage 并 console.warn —— 留副本好过丢设置。
+- 键名一律 `goptop:` 前缀；Rust 侧校验键名与值长（头像 data URL 上限 4MB），
+  写入走「临时文件 + rename」原子替换。
+- 读取面：`window.__store.backend()` / `window.__store.dump()`（只读，供 E2E 断言）。
+
 ## 自适应布局（不许破坏）
 
 - `main` 必须 `overflow:hidden`（曾改成 auto 导致整组撑开，commit a4ae1d5 修回）。

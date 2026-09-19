@@ -4,7 +4,11 @@
  * 每个标签页即一个用户：`userId` 存 `sessionStorage`（每页不同），昵称可改。
  * pwd 只在「已开战但无对手（waiting）」时有效；两人进对局后 pwd 即失效，
  * 不存在第三人凭旧 pwd 加入。
+ *
+ * 存储分工：`tabUser` 是**每标签页不同**的会话态，固定存 sessionStorage（四端一致）；
+ * 昵称是用户设置，走 net/store 门面落平台存储（Web 端即 localStorage）。
  */
+import { storeGet, storeSet } from "./store";
 
 /** 本页的用户 id（sessionStorage，每页不同）。 */
 export function myUserId(): string {
@@ -21,17 +25,11 @@ export function myUserId(): string {
 }
 
 export function myName(): string {
-  try {
-    return localStorage.getItem("goptop:name") || "";
-  } catch {
-    return "";
-  }
+  return storeGet("goptop:name") || "";
 }
 
 export function setMyName(n: string) {
-  try {
-    localStorage.setItem("goptop:name", n);
-  } catch { /* ignore */ }
+  storeSet("goptop:name", n);
 }
 
 /** 每局轮换的一次性 pwd（邀请钥匙）。CSPRNG 生成，固定 6 位 base36。

@@ -3,6 +3,7 @@
  * 默认规则/尺寸、我的身份、服务器选择、STUN 线路。
  */
 import { nav } from "../net/links";
+import { storeSet } from "../net/store";
 import type { GameSession } from "../state/useGameSession";
 import { ServerSettings, StunSettings } from "./components";
 import { NoticeLine } from "../components/NoticeLine";
@@ -23,7 +24,7 @@ export function SettingsPage(props: { s: GameSession }) {
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 6 }}>
           <button className="brutal-btn brutal-btn--sm" onClick={() => {
-            try { localStorage.setItem("goptop:defaults", JSON.stringify({ kind, size })); } catch { /* ignore */ }
+            storeSet("goptop:defaults", JSON.stringify({ kind, size }));
             showNotice("已保存当前顶部选择为默认值", 1600);
           }} disabled={phase !== "home"} title={phase !== "home" ? "对局/等待中不可保存" : undefined}>
             保存当前选择为默认

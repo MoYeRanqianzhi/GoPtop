@@ -8,6 +8,8 @@
  * 官方服务器是内置默认项；用户可自行添加更多服务器（如自建部署）。
  */
 
+import { storeGet, storeSet } from "./store";
+
 export type ServerEntry = { id: string; label: string; url: string; builtin: boolean };
 
 /** 内置官方服务器。换地址只改这一处。 */
@@ -24,7 +26,7 @@ const SERVER_SEL_KEY = "goptop:server-sel";
 /** 用户自定义服务器（builtin 项不入此列）。 */
 export function loadServers(): ServerEntry[] {
   try {
-    const raw = localStorage.getItem(SERVERS_KEY);
+    const raw = storeGet(SERVERS_KEY);
     const arr = raw ? (JSON.parse(raw) as ServerEntry[]) : [];
     return Array.isArray(arr) ? arr.filter((s) => s && typeof s.url === "string" && !s.builtin) : [];
   } catch {
@@ -34,14 +36,14 @@ export function loadServers(): ServerEntry[] {
 
 export function saveServers(list: ServerEntry[]) {
   try {
-    localStorage.setItem(SERVERS_KEY, JSON.stringify(list.filter((s) => !s.builtin)));
+    storeSet(SERVERS_KEY, JSON.stringify(list.filter((s) => !s.builtin)));
   } catch { /* ignore */ }
 }
 
 /** 当前选中的服务器（ServerSelection）："none" 或某个服务器 id。默认官方服务器。 */
 export function loadServerSelection(): string {
   try {
-    const raw = localStorage.getItem(SERVER_SEL_KEY);
+    const raw = storeGet(SERVER_SEL_KEY);
     if (raw === SERVER_NONE) return SERVER_NONE;
     if (raw) {
       const all = [...BUILTIN_SERVERS, ...loadServers()];
@@ -53,7 +55,7 @@ export function loadServerSelection(): string {
 
 export function saveServerSelection(sel: string) {
   try {
-    localStorage.setItem(SERVER_SEL_KEY, sel);
+    storeSet(SERVER_SEL_KEY, sel);
   } catch { /* ignore */ }
 }
 

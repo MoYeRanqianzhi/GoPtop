@@ -16,6 +16,7 @@ import type { Phase, Role } from "../pages/components";
 import { parseUrl, shareOrigin } from "../net/links";
 import type { UrlIntent } from "../net/links";
 import { myName } from "../net/identity";
+import { storeGet, storeRemove, storeSet } from "../net/store";
 import { loadServerSelection } from "../net/servers";
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 
@@ -358,15 +359,15 @@ export function useGameSession() {
     acceptSpecReceipt: (r: unknown) => cmd((s2) => s2.accept_spec_receipt(JSON.stringify(r))),
     loadMyAvatar: () => {
       try {
-        return localStorage.getItem("goptop:avatar");
+        return storeGet("goptop:avatar");
       } catch {
         return null;
       }
     },
     saveMyAvatar: (dataUrl: string | null) => {
       try {
-        if (dataUrl) localStorage.setItem("goptop:avatar", dataUrl);
-        else localStorage.removeItem("goptop:avatar");
+        if (dataUrl) storeSet("goptop:avatar", dataUrl);
+        else storeRemove("goptop:avatar");
       } catch { /* ignore */ }
       cmd((s2) => s2.set_avatar(dataUrl));
     },

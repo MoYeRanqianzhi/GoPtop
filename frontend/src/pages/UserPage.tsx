@@ -19,8 +19,8 @@ export function UserPage(props: { s: GameSession }) {
     acceptInvite, serverChallengePeer, createInvite, backHome, copyText,
     reset, handlePlace, saveName, loadMyAvatar, saveMyAvatar,
   } = props.s;
-  // 头像存 localStorage、保存动作不触发 session state：预览必须用本地 state 驱动，
-  // 否则上传/清除后页面毫无反应（审查 #4 P1-2）
+  // 头像落平台存储（net/store 门面）、保存动作不触发 session state：预览必须用本地
+  // state 驱动，否则上传/清除后页面毫无反应（审查 #4 P1-2）
   const [myAvatar, setMyAvatar] = useState(loadMyAvatar);
   return viewedUserId ? (
     <>

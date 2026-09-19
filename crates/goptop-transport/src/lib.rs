@@ -53,11 +53,38 @@ fn rand_u32() -> u32 {
     u32::from_ne_bytes(buf)
 }
 
+/// 取宿主存储钩子 `window.goptopStorage<Get|Set>`（由前端 net/store 门面安装）。
+///
+/// 为什么要有这一层：设置类数据（昵称/服务器/STUN/头像）在**各端落盘位置不同**
+/// ——桌面 `~/.goptop`、移动端应用私有目录、鸿蒙 filesDir、Web 端 localStorage。
+/// wasm 跑在 WebView 里，自己只能碰 localStorage，因此把「写哪里」交给宿主：
+/// 门面装钩子 → 本层调用；没装（纯 Web/老宿主）才回落 localStorage。
+fn storage_hook(name: &str) -> Option<js_sys::Function> {
+    let f = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name)).ok()?;
+    f.is_function().then(|| js_sys::Function::from(f))
+}
+
 pub(crate) fn storage_get(key: &str) -> Option<String> {
+    if let Some(f) = storage_hook("goptopStorageGet") {
+        if let Ok(v) = f.call1(&JsValue::NULL, &JsValue::from_str(key)) {
+            // 门面返回 null 表示「没有这个键」，返回字符串则是命中
+            return v.as_string();
+        }
+        // 钩子抛错（平台存储在初始化前被读等）：回落 localStorage，不留空值
+    }
     window().local_storage().ok().flatten()?.get_item(key).ok().flatten()
 }
 
 pub(crate) fn storage_set(key: &str, value: Option<&str>) {
+    if let Some(f) = storage_hook("goptopStorageSet") {
+        let v = match value {
+            Some(v) => JsValue::from_str(v),
+            None => JsValue::NULL,
+        };
+        if f.call2(&JsValue::NULL, &JsValue::from_str(key), &v).is_ok() {
+            return;
+        }
+    }
     if let Ok(Some(ls)) = window().local_storage() {
         let _ = match value {
             Some(v) => ls.set_item(key, v),

@@ -2,8 +2,10 @@
  * net/stun — STUN 线路（仅 NAT 地址发现，不转发数据）。
  *
  * 免费公共发现服务商池（2026-09 三地实测存活）：部分默认启用、其余默认关闭，
- * 用户可在设置页逐条开关或添加自定义线路，保存在 localStorage。
+ * 用户可在设置页逐条开关或添加自定义线路，保存在平台存储（net/store 门面）。
  */
+
+import { storeGet, storeSet } from "./store";
 
 export type StunLine = { id: string; label: string; urls: string; builtin: boolean; enabled: boolean };
 
@@ -31,7 +33,7 @@ function defaultStunLines(): StunLine[] {
 /** 当前启用的 STUN 线路（含用户自定义）。 */
 export function loadStunLines(): StunLine[] {
   try {
-    const raw = localStorage.getItem(STUN_KEY);
+    const raw = storeGet(STUN_KEY);
     if (!raw) return defaultStunLines();
     const arr = JSON.parse(raw) as StunLine[];
     if (!Array.isArray(arr) || arr.length === 0) return defaultStunLines();
@@ -54,7 +56,7 @@ export function loadStunLines(): StunLine[] {
 
 export function saveStunLines(lines: StunLine[]) {
   try {
-    localStorage.setItem(STUN_KEY, JSON.stringify(lines));
+    storeSet(STUN_KEY, JSON.stringify(lines));
   } catch { /* ignore */ }
 }
 

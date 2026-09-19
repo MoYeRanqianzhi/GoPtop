@@ -1446,6 +1446,7 @@ dependencies = [
 name = "goptop"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

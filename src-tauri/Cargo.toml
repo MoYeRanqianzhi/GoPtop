@@ -20,6 +20,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# store.rs 的存储文件是单文件 JSON（键值表），复用 workspace 统一版本。
+serde_json = { workspace = true }
 
 # Windows Snap Layouts 覆盖层（src-tauri/src/titlebar.rs）：透明子窗口 + HTMAXBUTTON。
 # 只需 Win32 最小面：Foundation/LibraryLoader/WindowsAndMessaging。

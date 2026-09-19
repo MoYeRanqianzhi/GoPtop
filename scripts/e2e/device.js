@@ -124,6 +124,38 @@ class Endpoint {
   /* ---------------- 基础读取 ---------------- */
 
   /** 等 wasm 会话挂载完成（壳/浏览器统一就绪信号）。 */
+  /**
+   * 写一条设置到**该端真正的存储位置**（shell 端不再是 localStorage 了）：
+   * Tauri 壳走 Rust store 命令（~/.goptop 或应用私有目录），鸿蒙壳走 ArkTS 桥，
+   * 浏览器走 localStorage。设置完必须重载页面才生效（门面只在启动时装载一次）。
+   */
+  async setSetting(key, value) {
+    await this.page.evaluate(async ([k, v]) => {
+      const w = window;
+      if (w.goptopStore) { w.goptopStore.set(k, v); return; }
+      if (w.__TAURI_INTERNALS__) { await w.__TAURI_INTERNALS__.invoke("store_set", { key: k, value: v }); return; }
+      localStorage.setItem(k, v);
+    }, [key, value]);
+    return this;
+  }
+
+  /** 读一条设置：优先平台存储（与写同一套判定），返回字符串或 null。 */
+  async getSetting(key) {
+    return this.page.evaluate(async (k) => {
+      const w = window;
+      if (w.goptopStore) {
+        const raw = w.goptopStore.load();
+        const map = raw && raw.trim() ? JSON.parse(raw) : {};
+        return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null;
+      }
+      if (w.__TAURI_INTERNALS__) {
+        const map = await w.__TAURI_INTERNALS__.invoke("store_load");
+        return map && Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null;
+      }
+      return localStorage.getItem(k);
+    }, key);
+  }
+
   async ready(timeout = 30000) {
     await this.page.waitForFunction(() => !!(window.__session && window.__session.snapshot), null, { timeout, polling: 200 });
     // 首帧快照可能仍是空壳，再等 userId 落地。

@@ -42,11 +42,11 @@ export const wasmsession_spec_decode_probe: (a: number, b: number, c: number, d:
 export const wasmsession_start_pump: (a: number) => void;
 export const wasmsession_state_debug: (a: number, b: number) => void;
 export const wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-export const __wasm_bindgen_func_elem_1151: (a: number, b: number, c: number, d: number) => void;
-export const __wasm_bindgen_func_elem_1159: (a: number, b: number, c: number, d: number) => void;
-export const __wasm_bindgen_func_elem_498: (a: number, b: number, c: number) => void;
-export const __wasm_bindgen_func_elem_498_2: (a: number, b: number, c: number) => void;
-export const __wasm_bindgen_func_elem_497: (a: number, b: number) => void;
+export const __wasm_bindgen_func_elem_1154: (a: number, b: number, c: number, d: number) => void;
+export const __wasm_bindgen_func_elem_1162: (a: number, b: number, c: number, d: number) => void;
+export const __wasm_bindgen_func_elem_499: (a: number, b: number, c: number) => void;
+export const __wasm_bindgen_func_elem_499_2: (a: number, b: number, c: number) => void;
+export const __wasm_bindgen_func_elem_498: (a: number, b: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;
 export const __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_export3: (a: number) => void;

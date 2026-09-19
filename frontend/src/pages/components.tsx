@@ -16,6 +16,7 @@ import {
   saveServerSelection, saveServers,
 } from "../net/servers";
 import type { ServerEntry } from "../net/servers";
+import { storeGet } from "../net/store";
 /** 名册用户（与 goptop-net session::PeerInfo 快照字段一致；presence.ts 已迁 Rust）。 */
 export type PeerInfo = { id: string; name: string; status: "idle" | "waiting" | "in-game"; gameId: string | null; ts: number };
 
@@ -229,7 +230,7 @@ export type Phase = "home" | "waiting" | "playing";
 /** 设置页持久化的默认规则/尺寸。 */
 export function loadDefaults(): { kind: GameKind; size: Size } {
   try {
-    const raw = localStorage.getItem("goptop:defaults");
+    const raw = storeGet("goptop:defaults");
     if (raw) {
       const d = JSON.parse(raw) as { kind?: unknown; size?: unknown };
       const kind: GameKind = d.kind === "go" ? "go" : "gomoku";

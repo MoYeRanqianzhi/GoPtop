@@ -49,13 +49,12 @@ async function open(spec, name) {
   throw new Error(`未知端规格: ${spec}`);
 }
 
-/** 壳端点（桌面/安卓/鸿蒙）：固定昵称与服务模式后重载挂载（等价用户先设好配置）。 */
+/** 壳端点（桌面/安卓/鸿蒙）：固定昵称与服务模式后重载挂载（等价用户先设好配置）。
+ *  注意走 ep.setSetting：壳端数据落在平台存储（~/.goptop / 应用私有目录 / 鸿蒙桥），
+ *  写 localStorage 已经无效了。 */
 async function prepShell(ep, name) {
-  await ep.page.evaluate((mode) => {
-    localStorage.setItem("goptop:name", mode.name);
-    if (mode.server === "none") localStorage.setItem("goptop:server-sel", "none");
-    else localStorage.removeItem("goptop:server-sel");
-  }, { name, server: process.env.XDEV_SERVER === "none" ? "none" : "official" });
+  await ep.setSetting("goptop:name", name);
+  if (process.env.XDEV_SERVER === "none") await ep.setSetting("goptop:server-sel", "none");
   await ep.page.reload({ waitUntil: "domcontentloaded" });
   await ep.ready(40000);
 }

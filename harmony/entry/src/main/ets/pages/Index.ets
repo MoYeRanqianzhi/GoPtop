@@ -6,11 +6,88 @@
  * - 用虚拟域名 https://appassets.goptop 承载，onInterceptRequest 把路径映射到
  *   rawfile：带扩展名 → 静态资源；无扩展名 → SPA 路由回退 index.html。
  *   history.pushState 路由（nav()）在刷新/直达时也能命中回退。
- * - domStorageAccess 必须开：identity/头像等存 localStorage，关了每启重生成。
+ * - domStorageAccess 必须开：每标签页的用户 id 走 sessionStorage；平台存储不可用时
+ *   （见下）的前端门面也回退到这里，关了会每启重生成身份。
+ *
+ * 平台存储（用户拍板 2026-09-19：数据按平台规定位置落盘）：鸿蒙不是 Tauri，Web 侧
+ * 没有 Rust 后端，因此由本壳注入 `goptopStore` 代理，把前端 net/store 门面的读写
+ * 落到**应用私有目录 filesDir/store.json**（卸载即清除，无需任何权限）。
+ * 前端探测到该代理即用平台存储，探测不到才回落 localStorage。
  */
 import { webview } from '@kit.ArkWeb';
+import { fileIo as fs } from '@kit.CoreFileKit';
+import { common } from '@kit.AbilityKit';
 
 const SCHEME_HOST = 'https://appassets.goptop/';
+
+/** 存储文件名（与桌面壳 Rust 侧同名，便于排查时对照）。 */
+const STORE_FILE = 'store.json';
+
+/**
+ * 平台存储代理：注入给 Web 页的前端门面（javaScriptProxy）。
+ *
+ * 契约与 src-tauri/src/store.rs 一致：`load()` 返回整表 JSON 字符串，
+ * `set/remove` 就地改一行并整表写回。**同步**方法——前端门面是同步读语义
+ * （设置要在首帧可读），换异步会牵动 React 渲染时序。
+ */
+class GoptopStoreProxy {
+  private path: string = '';
+
+  constructor(dir: string) {
+    this.path = `${dir}/${STORE_FILE}`;
+  }
+
+  /** 整表读；文件不存在/损坏都按空表处理（前端会据此决定是否迁移旧数据）。 */
+  private readAll(): Record<string, string> {
+    const out: Record<string, string> = {};
+    try {
+      const text = fs.readTextSync(this.path);
+      if (text.length === 0) {
+        return out;
+      }
+      const parsed = JSON.parse(text) as Record<string, string>;
+      for (const k of Object.keys(parsed)) {
+        out[k] = parsed[k];
+      }
+    } catch (e) {
+      // 首次启动文件不存在是正常路径；损坏也按空表（前端首帧不至于白屏）
+      return out;
+    }
+    return out;
+  }
+
+  /** 整表写：先截断重写（单文件小表，无需原子替换的复杂度）。 */
+  private writeAll(map: Record<string, string>): void {
+    const file = fs.openSync(this.path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, JSON.stringify(map));
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
+  /** 给前端门面的全量读口（JSON 字符串）。 */
+  load(): string {
+    return JSON.stringify(this.readAll());
+  }
+
+  set(key: string, value: string): void {
+    const map = this.readAll();
+    map[key] = value;
+    this.writeAll(map);
+  }
+
+  remove(key: string): void {
+    const map = this.readAll();
+    const next: Record<string, string> = {};
+    for (const k of Object.keys(map)) {
+      if (k !== key) {
+        next[k] = map[k];
+      }
+    }
+    this.writeAll(next);
+  }
+}
 
 // 远程调试（ArkWeb inspector），必须在任何 Web 实例创建前调用
 webview.WebviewController.setWebDebuggingAccess(true);
@@ -35,11 +112,25 @@ function mimeOf(path: string): string {
 @Component
 struct Index {
   controller: webview.WebviewController = new webview.WebviewController();
+  // filesDir 由应用上下文给出（应用私有目录，卸载即清）。
+  // 用 getContext(this) 而非新的 this.getUIContext().getHostContext()：字段初始化
+  // 发生在 UI 上下文绑定之前，新 API 在这个时机取不到（编译期告警是弃用提示，
+  // API 20 仍可用；等迁到 aboutToAppear 初始化代理时再一并换）。
+  store: GoptopStoreProxy = new GoptopStoreProxy(
+    (getContext(this) as common.UIAbilityContext).filesDir
+  );
 
   build() {
     Column() {
       // 初始 src 用根路径：SPA 路由把 /index.html 解析成用户主页段，/ 才是菜单页
       Web({ src: SCHEME_HOST, controller: this.controller })
+        // 平台存储注入（前端 net/store 门面探测 window.goptopStore）
+        .javaScriptProxy({
+          object: this.store,
+          name: 'goptopStore',
+          methodList: ['load', 'set', 'remove'],
+          controller: this.controller,
+        })
         .domStorageAccess(true)
         .javaScriptAccess(true)
         .fileAccess(true)

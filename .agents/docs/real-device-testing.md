@@ -125,6 +125,23 @@ node diag-watch.js web mob web                       # 观战镜像逐手诊断
 9. **观战镜像有短暂滞后**：高速落子时观战者落后 1–2 手是正常的，几秒内会追平；
    断言必须轮询等待，不能立即读。
 
+## 5.5 平台存储的落盘位置（2026-09-19 起，验证存储改动先看这里）
+
+设置类数据（昵称/头像/服务器/STUN/默认规则）不再放 WebView 的 localStorage：
+
+| 端 | 后端 | 落盘位置 | 怎么看 |
+|---|---|---|---|
+| web | `browser` | 浏览器 localStorage | CDP `localStorage.getItem(...)` |
+| 桌面壳 | `tauri` | `%USERPROFILE%\.goptop\store.json` | 直接读文件 |
+| 安卓 | `tauri` | `/data/data/com.goptop.app/store.json` | `adb shell run-as com.goptop.app cat /data/data/com.goptop.app/store.json` |
+| 鸿蒙 | `harmony` | `/data/app/el2/100/base/com.goptop.shell/haps/entry/files/store.json` | `hdc shell cat <路径>` |
+
+- 端内自查：`window.__store.backend()`（`browser`/`tauri`/`harmony`）与 `window.__store.dump()`。
+- **写设置给壳端**（脚本预置）用 `ep.setSetting(key, value)`，别再写 localStorage——
+  `device.js`/`match.js`/`features.js` 已统一（`prepShell` 走它）。
+- 验证套路（四端通用）：UI 改昵称 → 读文件确认 → `localStorage.clear()` → 杀进程重启
+  → 昵称仍在（证明平台文件是权威源，不是靠浏览器存储兜着）。
+
 ## 6. 布局红线（改 UI 前必读）
 
 - **棋盘尺寸是正反馈环**：`--stack-max`（整组宽度锚点）由 `board-wrap` 的剩余高度反推，
