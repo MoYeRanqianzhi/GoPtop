@@ -37,10 +37,11 @@
         50ms 泵同构，前端 `start_pump()` 的语义两端一致。
       - 实测：桌面双实例 **10/10**；**桌面 ↔ 鸿蒙跨宿主 10/10**（两个宿主各写各的
         `Host` 实现，跑同一份状态机）；两端资源时间线里都没有 transport wasm。
-      - **安卓未实测**：宿主与桌面是同一条 `src-tauri` 代码路径，但安卓特有的
-        `__TAURI_INTERNALS__` 注入时机需要真机/模拟器过一遍。本轮两次尝试
-        `tauri android build` 都因内存压到临界被回收（Gradle + Rust 同时跑很吃内存），
-        按提示不再自行重启——**下次要跑时先关掉其它模拟器、单独跑构建**。
+      - **安卓**（AVD `goptop_test`，x86_64）：`ai.js android` 9/9；资源时间线复核
+        **`goptop_transport` 与 `goptop_core` 皆为空**（上一轮 transport 一直在），
+        即 P2P 会话与规则在安卓都走原生 Rust；`__store.backend()` 为 `tauri`。
+        构建经验：`tauri android build` 与模拟器**不能同时跑**（两次都因此被系统
+        在内存临界时回收），**先前台单独跑构建、再起模拟器**即可通过。
 - 遗留（本轮未动）：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死在 PUCT 改动之后，
   注释还在描述旧算法；删它要连带重建 wasm 产物与三端壳的 dist，单独立一轮更划算。
 
