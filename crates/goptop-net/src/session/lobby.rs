@@ -520,12 +520,28 @@ pub(crate) fn on_peer_state(s: &mut Session, tag: &str, opened: bool, gone: bool
         if opened {
             p.opened = true;
             s.conn_lost = false;
-            // 等待中的受邀者：跨设备时 presence 不可达，直连一通直接进对局。
-            let should_enter = s.role == Role::Invitee && s.phase == Phase::Waiting && p.player;
-            let _ = should_enter;
+            // 等待中的人一收到「玩家连接已 open」就进对局，**两个角色都算**：
+            // 跨设备时 presence 不可达，直连是唯一的「对手已就位」信号。
+            // - 受邀者：answer 被受理后 transport 才会 open。
+            // - 邀请者：仅回执这条路会走到这里（`accept_receipt` 有意把进对局留给本事件，
+            //   见那里的说明）。服务器/同源两条路由 `server_on_answer` /
+            //   `accept_challenge_with` 在 answer 到达时就把 phase 置成 Playing 了，
+            //   本事件到达时 should_enter 为假，不会重复进局。
+            //   曾只判受邀者：邀请者受理回执后连接已通（`peerConnected` 为真）却永远停在
+            //   `waiting`，棋盘 `can_place` 不通过——两端一进局一卡等待，且不报任何错。
+            let should_enter = s.phase == Phase::Waiting && p.player;
             let mut extra: Vec<Effect> = Vec::new();
             if should_enter {
-                extra.extend(enter_playing_as_invitee(s));
+                if s.role == Role::Invitee {
+                    extra.extend(enter_playing_as_invitee(s));
+                } else {
+                    // 邀请者：局面在 `accept_receipt` 里已经铺好（game_id / channel /
+                    // watch_url / hello-delay 定时器），此处只补状态与提示，不能复用
+                    // `enter_playing_as_invitee`——它会改 pwd、重设 watch_url，还会报
+                    // 「你执白」（邀请者执黑）。
+                    s.phase = Phase::Playing;
+                    extra.push(Effect::Notice(Some("直连已建立，对局开始".into()), None));
+                }
             }
             s.peer_connected = true;
             fx.push(Effect::Emit);

@@ -622,6 +622,19 @@ fn cross_device_receipt_carries_the_key_and_is_accepted() {
         "回执受理应带上本局 pwd；实际 effects={:?}",
         fx.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
     );
+    // 受理只喂 answer，不进局——进局留给「玩家连接 open」。这一步曾只判受邀者，
+    // 邀请者于是永远停在 waiting 而 peerConnected 已为真（浏览器实测：A 卡等待、
+    // 棋盘不可落子，B 已在对局里，全程无报错）。
+    assert_eq!(a.phase, Phase::Waiting, "受理当场不该进局，等直连 open");
+    let fx2 = reduce(&mut a, Event::PeerState { tag: "main".into(), opened: true, closed: false, failed: false }, &c);
+    assert_eq!(a.phase, Phase::Playing, "玩家连接 open 后邀请者必须进对局");
+    assert!(a.peer_connected, "连接已开，peerConnected 应为真");
+    assert!(
+        fx2.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("对局开始"))),
+        "应给用户一句「对局开始」；实际 effects={:?}",
+        fx2.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
+    );
+    assert!(!fx2.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("执白"))), "邀请者执黑，不得套用受邀者的「你执白」提示");
 }
 
 /// 观战者申请发言：向自己的 host 发 spec-chat-req 信令。
