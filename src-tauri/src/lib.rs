@@ -62,6 +62,7 @@ pub fn run() {
             session::session_cmd,
             session::session_state_json,
             session::session_state_debug,
+            session::session_ice_debug,
             session::session_parse_link,
             session::session_parse_answer
         ])

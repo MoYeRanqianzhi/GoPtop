@@ -112,6 +112,22 @@ impl NativeSession {
         parse_answer_json(text)
     }
 
+    /// 连接诊断（E2E 用，与 wasm 的 `ice_debug` **同用途但不同深度**）。
+    ///
+    /// wasm 侧能同步读到 `RTCPeerConnection.iceConnectionState` 与候选列表；webrtc-rs
+    /// 的对应 API 是 async，而本方法要与 wasm 保持同步签名（前端的诊断钩子是同步读）。
+    /// 因此这里只报**能从账本直接读到的**：连接 tag 与是否已关闭。想要完整 ICE 状态
+    /// 得等 webrtc-rs 侧把状态变化回写进句柄——那是另一件事，不假装有。
+    pub fn ice_debug(&self) -> String {
+        let Ok(c) = self.core.lock() else { return "[]".into() };
+        let list: Vec<serde_json::Value> = c
+            .peers
+            .iter()
+            .map(|(tag, p)| serde_json::json!({ "tag": tag, "closed": p.is_closed() }))
+            .collect();
+        serde_json::Value::Array(list).to_string()
+    }
+
     /// 观战/服务器内部状态（E2E 诊断用，与 wasm 的 `state_debug` 同契约）。
     pub fn state_debug(&self) -> String {
         let Ok(c) = self.core.lock() else { return "{}".into() };

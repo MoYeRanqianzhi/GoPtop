@@ -3,13 +3,17 @@
  *
  * 一切协议/信令/状态机逻辑都在 goptop-net（Rust，经 goptop-transport 的 wasm
  * 产物运行）：本文件只负责——
- * - 挂载 WasmSession（50ms 事件泵 + goptopOnChange/goptopNotice/goptopCopy 钩子）；
+ * - 挂载会话（Web 走 wasm、桌面/Android/鸿蒙走原生 Rust，见 net/session.ts 的分派；
+ *   50ms 事件泵 + goptopOnChange/goptopNotice/goptopCopy 钩子两端共用）；
  * - 把快照 JSON 解构为历史 hook 返回形状（App/pages 组件零改动）；
  * - 纯 UI 状态（弹窗/悬停/路由 intent/复制反馈）留在 TS。
  * 逻辑迁移基线与增强项见 crates/goptop-net/src/session/mod.rs 头注释。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import initTransport, { WasmSession } from "../wasm/transport/goptop_transport.js";
+import { createSession } from "../net/session";
+// 门面的会话句柄类型。**改名导入**：本文件下方另有一个导出的 `GameSession`
+// （= `useGameSession` 的返回类型，历史命名），两者不是一回事。
+import type { GameSession as SessionHandle } from "../net/session";
 import { emptyBoard } from "../game/board";
 import { loadDefaults } from "../pages/components";
 import type { Phase, Role } from "../pages/components";
@@ -53,7 +57,7 @@ function parseSnap(raw: string) {
 export function useGameSession() {
   const defs = useMemo(loadDefaults, []);
   /* ---------- wasm 会话挂载 ---------- */
-  const [session, setSession] = useState<WasmSession | null>(null);
+  const [session, setSession] = useState<SessionHandle | null>(null);
   const [snap, setSnap] = useState<Snap | null>(null);
   const serverMode = loadServerSelection() !== "none";
   const [intent, setIntent] = useState<UrlIntent>(() => parseUrl());
@@ -61,9 +65,10 @@ export function useGameSession() {
   useEffect(() => {
     let disposed = false;
     void (async () => {
-      await initTransport();
-      if (disposed) return;
-      const s = new WasmSession(
+      // 分派与建会话都在门面里（Web → wasm；桌面/Android/鸿蒙 → 原生 Rust）。
+      // **href 由这里传**：wasm 侧是构造时自己读 `window.location`，
+      // 原生侧没有 window，必须显式给——两端都走 `Event::Boot` 那一条。
+      const s = await createSession(
         JSON.stringify({
           name: myName(),
           serverMode,
@@ -71,7 +76,9 @@ export function useGameSession() {
           kind: defs.kind,
           size: defs.size,
         }),
+        window.location.href,
       );
+      if (disposed) return;
       (window as unknown as Record<string, unknown>).goptopOnChange = () => setSnap(parseSnap(s.snapshot()));
       (window as unknown as Record<string, unknown>).goptopNotice = (arg: string) => {
         try {
@@ -133,7 +140,7 @@ export function useGameSession() {
 
   /* ---------- 便捷命令封装 ---------- */
   const cmd = useCallback(
-    (f: (s: WasmSession) => void) => {
+    (f: (s: SessionHandle) => void) => {
       if (session) f(session);
     },
     [session],
@@ -235,7 +242,7 @@ export function useGameSession() {
     const m = modal;
     if (!m || !session) return;
     if (m === "paste-invite") {
-      const parsed = JSON.parse(session.parse_link(modalInput)) as { ok: boolean; intent?: { mode: string; userId?: string; pwd?: string | null; kind?: GameKind; size?: Size; rtc?: string | null; spec?: boolean } };
+      const parsed = JSON.parse(await session.parse_link(modalInput)) as { ok: boolean; intent?: { mode: string; userId?: string; pwd?: string | null; kind?: GameKind; size?: Size; rtc?: string | null; spec?: boolean } };
       if (!parsed.ok || !parsed.intent) {
         setModalErr("无法识别该链接：请完整粘贴邀请链接或主页链接");
         return;
@@ -267,7 +274,7 @@ export function useGameSession() {
         setModalErr(null);
         setModal(null);
         // 同源观战：只改地址 + 派发 popstate，实际效果仅是 129 行的路由 intent 切到 /watch（WatchPage 只读渲染）。
-        // Rust 的 Event::Boot 只在 WasmSession 构造时用当时的 href 触发一次（crates/goptop-transport/src/lib.rs:165-166），
+        // Rust 的 Event::Boot 只在会话构造时用当时的 href 触发一次（crates/goptop-transport/src/lib.rs:165-166），
         // wasm 面没有 boot/navigate 导出、UiCommand::Navigate 也无构造点——这里不会把观战意图送进状态机，真正入局需另行发起。
         window.history.pushState(null, "", `/watch/${encodeURIComponent(it.gameId as string)}`);
         window.dispatchEvent(new PopStateEvent("popstate"));
@@ -277,7 +284,7 @@ export function useGameSession() {
       return;
     }
     if (m === "paste-answer") {
-      const parsed = JSON.parse(session.parse_answer(modalInput)) as { ok: boolean; answer?: unknown };
+      const parsed = JSON.parse(await session.parse_answer(modalInput)) as { ok: boolean; answer?: unknown };
       if (!parsed.ok || !parsed.answer) {
         setModalErr("无法识别该回执：请完整粘贴受邀者发来的回执链接（含 rtcAns）");
         return;
@@ -383,12 +390,12 @@ export function useGameSession() {
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled, linkLamp,
     mode, viewedUserId, viewedPeer, isSelfPage,
     /** AI 分析输入：当前局面由 Rust 引擎序列化。
-     *  P2P/观战页没有本地规则引擎，局面归 WasmSession 所有；围棋的劫点与提子数
+     *  P2P/观战页没有本地规则引擎，局面归会话所有；围棋的劫点与提子数
      *  只在引擎内部，从 TS 侧的状态还原不出来。
      *  返回 Promise 是为了与 game/rules.ts 的门面统一（原生端局面经 IPC 取回）。 */
     stateJson: async () => {
       try {
-        return session ? (JSON.parse(session.state_json()) as unknown) : null;
+        return session ? (JSON.parse(await session.state_json()) as unknown) : null;
       } catch {
         return null;
       }

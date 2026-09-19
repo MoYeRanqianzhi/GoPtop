@@ -211,6 +211,19 @@ pub fn session_state_debug(sessions: State<'_, Sessions>, id: u32) -> String {
         .unwrap_or_else(|| "{}".into())
 }
 
+/// 连接诊断（E2E 用）。**与 wasm 侧深度不同**：wasm 能同步读 ICE 状态与候选列表，
+/// webrtc-rs 的对应 API 是 async，而本方法的调用方（诊断钩子）是同步读，
+/// 所以只报账本里直接有的（连接 tag、是否已关闭）——见 `NativeSession::ice_debug`。
+#[tauri::command]
+pub fn session_ice_debug(sessions: State<'_, Sessions>, id: u32) -> String {
+    sessions
+        .0
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&id).map(|e| e.session.ice_debug()))
+        .unwrap_or_else(|| "[]".into())
+}
+
 /// 解析粘贴的链接 / 回执（纯函数，不需要会话实例）。
 #[tauri::command]
 pub fn session_parse_link(text: String) -> String {

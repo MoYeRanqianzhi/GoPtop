@@ -50,6 +50,11 @@ pub struct RtcPeer {
 }
 
 impl RtcPeer {
+    /// 本连接是否已被本端关闭（诊断用；对端关闭与否由 `PeerState` 事件反映）。
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
