@@ -66,10 +66,20 @@ hdc shell aa start -a EntryAbility -b com.goptop.shell
 hdc fport tcp:9444 localabstract:webview_devtools_remote_<pid>            # socket 名带 pid，每次重启都变
 ```
 
+- **原生宿主**（2026-09-20 起鸿蒙不再走 wasm）：规则与 AI 由 NAPI 直连 Rust。
+  改了 `crates/goptop-core` / `goptop-ai` / `goptop-ohos` 之后，HAP 构建前必须先跑
+  `bash scripts/build-ohos.sh`（产物落到 `target/aarch64-unknown-linux-ohos/release/`），
+  再把它拷进 `harmony/entry/src/main/cpp/libs/arm64-v8a/libgoptop_ohos.so`
+  ——**这一步没有自动化**，漏拷则壳里跑的是上一版 Rust 逻辑（不报错，只是行为旧）。
 - HAP 构建：先把 `frontend/dist` 同步到 `harmony/entry/src/main/resources/rawfile/app/`
   （删旧目录再整体拷，去掉 `_redirects`），再
   `cd harmony && DEVECO_SDK_HOME="D:\\Huawei\\DevEco Studio\\sdk" node "/d/Huawei/DevEco Studio/tools/hvigor/bin/hvigorw.js" assembleHap --mode module -p product=default -p buildMode=debug --no-daemon`。
   hvigor 用 DevEco 自带的 node（`tools/node`，v18）需要时加进 PATH。
+  产物：`harmony/entry/build/default/outputs/default/entry-default-unsigned.hap`。
+- 原生模块的桥在 `Index.ets` 的 `goptopNative`（javaScriptProxy）。端内自查：
+  `window.goptopNative.call('game_board_size','{"id":1}')` 之类可直接在 DevTools 控制台试。
+- NAPI 签名核对：`cpp/types/libgoptop/index.d.ts` 必须与 `.so` 的导出面一致，
+  缺了它 hvigor 会告警「module for 'libgoptop.so' is not verified」。
 - 换进程后旧的 fport 规则会残留（socket 名已失效但端口仍被占）：先
   `hdc fport ls` 找出旧的逐条 `hdc fport rm tcp:9444 localabstract:<旧socket>`。
 - ArkWeb **支持** connectOverCDP（与安卓相反），所以鸿蒙走 `cdp:` 规格。

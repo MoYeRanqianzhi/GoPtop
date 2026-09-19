@@ -23,9 +23,43 @@
 |---|---|
 | Web | 编 wasm（**唯一**需要 wasm 的端） |
 | 桌面 / Android | **直接 `use`**（Tauri 的 Rust 宿主就是 native，零桥接） |
-| 鸿蒙 | cargo-ohos + NAPI（待做；目前仍走 ArkWeb + wasm） |
+| 鸿蒙 | **NAPI 原生模块**（2026-09-20 落地，见下） |
 
 **判据**：如果一个平台能跑原生代码，它就不该跑 wasm。
+
+## 鸿蒙落地（2026-09-20）
+
+UI 仍是 ArkWeb 壳（与桌面用 WebView2 渲染 UI 同构），但**业务逻辑不再走 wasm**：
+
+- `crates/goptop-ohos`：Rust 侧**只出 C ABI**（`goptop_call`/`goptop_free`），
+  多局实例表与 src-tauri/rules.rs 同构。
+- `harmony/entry/src/main/cpp/napi_init.cpp`：**NAPI 用 C++ 写**（头文件来自 DevEco
+  SDK）。在 Rust 里手写 NAPI 的 FFI 声明等于凭记忆复刻一份 ABI——`napi_module` 字段
+  顺序、`napi_status` 取值、调用约定错一个字节，表现都是设备上「加载即崩」或「静默
+  不注册」，没有本地复现手段。这样分层后 Rust 侧还能在宿主机上单测（8/8）。
+- 前端第三个后端（`game/rules.ts` 的 `HarmonyBackend`、`ai/client.ts` 的
+  `analyzeHarmony`），探测 `window.goptopNative`，探测不到回落 wasm（老壳仍能跑）。
+- AI **拆成 post/poll**：`ai_analyze` 同步阻塞 0.3~3 秒，而 javaScriptProxy 的方法在
+  UI 线程执行且**不支持返回 Promise**（ArkTS 的 Promise 不会被 marshalling）。计算走
+  NAPI 的 async work 线程池，JS 侧轮询票号——全是同步 NAPI 能力，不依赖任何
+  「某版本才有的 marshalling 行为」。
+
+### 工具链的坑（`scripts/build-ohos.sh`）
+
+OHOS NDK 装在 `D:\Huawei\DevEco Studio\…`，路径带空格，而 **RUSTFLAGS 是按空白切分**的：
+`-C link-arg=--sysroot=…/DevEco Studio/…` 被切成两段，clang 收不到 sysroot，于是退回
+环境里的 mingw `ld.exe`（GNU BFD，PE 目标），报
+
+```
+lld: error: unknown argument: -z
+```
+
+**错的是链接器被换掉了，不是它不认 `-z`**——顺着报错去查 lld 版本会一直查不出所以然。
+脚本先在 `target/` 下建一个无空格的 junction，所有路径都从它走。
+
+同类的第二个坑：传给 clang/rustc 的路径必须是 Windows 形态（`G:/…`）。传
+`/g/ClaudeProjects/…`（Git Bash 的 `pwd`）会被当成「当前盘根下的 g\ClaudeProjects\…」，
+报的却是「找不到 crti.o / -lc」——看着像 sysroot 缺文件，其实是路径根本没进去。
 
 ## 代价（为什么这不是"洁癖"）
 

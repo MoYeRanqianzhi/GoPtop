@@ -3,6 +3,21 @@
 > 记忆规范见 CLAUDE.md 与 .agents/MEMORY.md。每个待办动手前先读对应记忆文件。
 > 审查报告：review/（开放）；review/archive/（2026-09-07 闭环归档）。
 
+## 2026-09-20 大轮（用户指令「全部做完 → 大规模代码审查和修复 → 换无头前端验证一切功能皆 Rust」）
+
+- [x] 架构口径订正落地：**wasm 只是 Web 端的编译目标**。桌面/Android 经 Tauri
+      command 直连 Rust；**鸿蒙经 NAPI 原生模块直连 Rust**（本轮补上最后一个）。
+- [x] 无头验证：界面完全移除，仅靠 `HeadlessHost` 驱动全部功能（5/5，commit 6158454）。
+- [x] 大规模代码审查 + 修复：无服务器直连链路三处根因（钥匙判定/回执带钥/槽位 tag）、
+      原生传输 6 处（relay 兜底、订阅竞态、连接重建、编解码钥匙、ws 重连泄漏、
+      LeaveChannel 语义）、前端原生后端 3 处（新局未落地取局面、实例生命周期、
+      thinking 收回）、**邀请者受理回执后卡等待进不了对局**。
+- [x] 换一个前端验证：`frontend/` 的 vitest 49、`cargo test` 全绿、无头 5/5。
+- [x] 浏览器面基线：`run.js` 58/58、`go-capture.js` 7/7、`ai.js` 9/9、`stress.js` 8/8
+      （120 手长跑，堆稳定在 10MB）、新增 `noserver-pair.js` 9/9（无服务器跨设备直连，
+      此前**无任何自动化覆盖**，只能人肉双机）。
+- [ ] 全平台实机：桌面壳 / 安卓 / 鸿蒙（鸿蒙需先跑 `scripts/build-ohos.sh` 并拷 .so）。
+
 ## 架构合规路线（2026-09-13 用户重申总要求：Rust 承接一切功能，TS 只做 UI）
 
 - [x] **第一阶段：规则下沉 wasm**（commit 95f25f2）：core 经 WasmGame 绑定在 Web/Tauri 执行

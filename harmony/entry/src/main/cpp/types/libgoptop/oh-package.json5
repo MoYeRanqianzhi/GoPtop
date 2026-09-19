@@ -1,0 +1,7 @@
+{
+  // 原生模块的类型声明包（hvigor 依此核对 `libgoptop.so` 的导出面）
+  "name": "libgoptop.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "GoPtop HarmonyOS native host — rules engine and AI over NAPI"
+}

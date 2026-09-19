@@ -6,7 +6,9 @@
     "externalNativeOptions": {
       "path": "./src/main/cpp/CMakeLists.txt",
       "arguments": "",
-      "cppFlags": "",
+      // 源码是 UTF-8（注释按项目规范是中文）。Windows 上 clang 会按系统代码页读源文件，
+      // 不钉死编码时中文注释进了诊断信息就是乱码，排查时反而看不清是哪一行
+      "cppFlags": "-finput-charset=UTF-8",
       // 只出 arm64：模拟器与真机都是 aarch64，多出一份 armeabi-v7a 只会让 HAP 翻倍
       "abiFilters": [
         "arm64-v8a"

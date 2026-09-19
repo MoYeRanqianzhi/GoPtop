@@ -50,7 +50,10 @@ std::string Arg(napi_env env, napi_value v) {
     return {};
   }
   std::string s(len, '\0');
-  if (napi_get_value_string_utf8(env, v, s.data(), len + 1, &len) != napi_ok) {
+  // 用 &s[0] 而不是 s.data()：`std::string::data()` 的非 const 重载是 C++17 才有的，
+  // 这套工具链按 C++14 编（NDK 的 CMake 工具链没设 CMAKE_CXX_STANDARD），
+  // 在那个标准下 data() 只返回 const char*，NAPI 收的是 char*，直接编译不过
+  if (napi_get_value_string_utf8(env, v, &s[0], len + 1, &len) != napi_ok) {
     return {};
   }
   return s;
@@ -85,7 +88,9 @@ napi_value Call(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) {
-    return Str(env, R"({"error":"goptop.call 需要 (cmd, argsJson)"})");
+    // 自定义定界符 `json`：默认的 `)"` 会撞上正文里的 `argsJson)"}`，把原始字符串
+    // 提前收尾，报的是「expected ')'」——看着像括号不配，其实在字符串里
+    return Str(env, R"json({"error":"goptop.call 需要 (cmd, argsJson)"})json");
   }
   // 少传 argsJson 时按空对象处理：Rust 侧对缺失参数一律走各自的默认值/no_game
   std::string args = argc >= 2 ? Arg(env, argv[1]) : "{}";
