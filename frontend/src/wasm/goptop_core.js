@@ -120,6 +120,33 @@ export class WasmGame {
         }
     }
     /**
+     * 当前局面的完整序列化（`goptop-ai` 的分析输入）。
+     *
+     * AI 要的不只是棋盘：围棋的劫点、提子数、计分态都进搜索，而这些只有
+     * `GameState` 持有。让规则引擎自己吐局面，AI 拿到的就与规则真源逐字一致——
+     * 前端手工拼 JSON 不可行（`BoardVariant` 的形态是 `{"B15":{"cells":[[...]]}}`，
+     * 嵌套且随尺寸变形，拼错只会表现为 AI 下出怪棋，不会报错）。
+     *
+     * 序列化失败返回 `"null"`：`GameState` 只由可序列化字段组成，正常路径不会走到。
+     * @returns {string}
+     */
+    state_json() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmgame_state_json(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export3(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * 落子（唯一规则入口）：合法则更新内部棋盘并返回权威棋盘/提子/胜负/劫点/计分态；
      * 非法（占据/越界/自杀/劫/计分态/终局）返回 ok:false，内部状态不变。
      * 越界/占据/劫/终局判定都在 GameState::try_play 内。

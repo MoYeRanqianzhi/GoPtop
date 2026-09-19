@@ -74,6 +74,14 @@ export class WasmSession {
      * 【调试探针】观战/服务器内部状态（E2E 诊断用）。
      */
     state_debug(): string;
+    /**
+     * 当前对局局面的完整序列化（`goptop-ai` 的分析输入）。
+     *
+     * 与 `goptop-core` 的 `WasmGame::state_json` 同契约：一律由 Rust 序列化，
+     * 前端不手工拼。P2P/观战页拿不到本地规则引擎——局面归 `Session.engine` 所有，
+     * 而围棋的劫点、提子数只存在于引擎内部，从 TS 侧的状态还原不出来。
+     */
+    state_json(): string;
     toggle_dead(x: number, y: number): void;
 }
 
@@ -121,12 +129,13 @@ export interface InitOutput {
     readonly wasmsession_spec_decode_probe: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmsession_start_pump: (a: number) => void;
     readonly wasmsession_state_debug: (a: number, b: number) => void;
+    readonly wasmsession_state_json: (a: number, b: number) => void;
     readonly wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1154: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1162: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_499: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_499_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_498: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_1183: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1191: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_527: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_527_2: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_526: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

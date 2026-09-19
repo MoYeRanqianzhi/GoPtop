@@ -1,0 +1,33 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const analyze_json: (a: number, b: number, c: number) => void;
+export const warmup: () => void;
+export const noru_accumulator_clone: (a: number, b: number) => number;
+export const noru_accumulator_copy_from: (a: number, b: number) => number;
+export const noru_accumulator_forward: (a: number, b: number, c: number) => number;
+export const noru_accumulator_free: (a: number) => void;
+export const noru_accumulator_new: (a: number, b: number) => number;
+export const noru_accumulator_refresh: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+export const noru_accumulator_swap: (a: number) => number;
+export const noru_accumulator_update: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
+export const noru_accumulator_update_undo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
+export const noru_free_bytes: (a: number, b: number) => void;
+export const noru_last_error: () => number;
+export const noru_trainer_adam_step: (a: number, b: number, c: number) => number;
+export const noru_trainer_backward_bce: (a: number, b: number) => number;
+export const noru_trainer_backward_raw_mse: (a: number, b: number) => number;
+export const noru_trainer_forward: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+export const noru_trainer_free: (a: number) => void;
+export const noru_trainer_load_fp32: (a: number, b: number, c: number) => number;
+export const noru_trainer_new: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number) => number;
+export const noru_trainer_quantize: (a: number, b: number) => number;
+export const noru_trainer_save_fp32: (a: number, b: number, c: number) => number;
+export const noru_trainer_zero_grad: (a: number) => number;
+export const noru_weights_free: (a: number) => void;
+export const noru_weights_load: (a: number, b: number, c: number) => number;
+export const noru_weights_save: (a: number, b: number, c: number) => number;
+export const __wbindgen_add_to_stack_pointer: (a: number) => number;
+export const __wbindgen_export: (a: number, b: number) => number;
+export const __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_export3: (a: number, b: number, c: number) => void;

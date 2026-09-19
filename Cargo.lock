@@ -48,6 +48,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1056,6 +1062,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "figrid-board"
+version = "0.8.8"
+dependencies = [
+ "noru",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1432,6 +1447,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "go_game_board"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6acb010ed045382a47347edd41fe3cd93123ff6872f689dec559fa9f5df96c2"
+dependencies = [
+ "arrayvec",
+ "go_game_types",
+ "lazy_static",
+]
+
+[[package]]
+name = "go_game_types"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df1e9aa2de0545c27504eaf514b4493c7b24c0accfa7b51e2e182d6efd250bc8"
+
+[[package]]
 name = "gobject-sys"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1451,6 +1483,22 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "windows",
+]
+
+[[package]]
+name = "goptop-ai"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "figrid-board",
+ "flate2",
+ "go_game_board",
+ "goptop-core",
+ "js-sys",
+ "noru",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]
@@ -2272,6 +2320,12 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "noru"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f960f24742e5ec378952a7afe711bf6a98bf3ddccd9e7e9b16cc0f6cc11bf6f"
 
 [[package]]
 name = "nu-ansi-term"
@@ -4592,6 +4646,16 @@ name = "web-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c435338968042f4f59a557f690a253676d47ce13ceb55d70100e7facf6620a30"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

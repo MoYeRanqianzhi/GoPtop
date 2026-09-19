@@ -177,6 +177,16 @@ impl WasmSession {
         self.core.borrow().session.snapshot()
     }
 
+    /// 当前对局局面的完整序列化（`goptop-ai` 的分析输入）。
+    ///
+    /// 与 `goptop-core` 的 `WasmGame::state_json` 同契约：一律由 Rust 序列化，
+    /// 前端不手工拼。P2P/观战页拿不到本地规则引擎——局面归 `Session.engine` 所有，
+    /// 而围棋的劫点、提子数只存在于引擎内部，从 TS 侧的状态还原不出来。
+    pub fn state_json(&self) -> String {
+        let core = self.core.borrow();
+        serde_json::to_string(&core.session.engine).unwrap_or_else(|_| "null".into())
+    }
+
     /// ICE 调试（E2E/诊断）：各连接的 tag/ICE 状态/本地与远端候选摘要。
     pub fn ice_debug(&self) -> String {
         let core = self.core.borrow();

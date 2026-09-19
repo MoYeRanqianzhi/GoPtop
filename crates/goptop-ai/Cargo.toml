@@ -1,0 +1,42 @@
+[package]
+# goptop-ai — 本地离线 AI：五子棋 α-β/NNUE 引擎 + 围棋 MCTS + 实时胜率。
+# 与 goptop-core 分离：AI 只在人机对战与胜率显示时需要，体积（含 1.7MB 权重）
+# 不该压在每次都要加载的规则引擎上；独立 wasm 也让它能独占 Web Worker。
+name = "goptop-ai"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop AI — offline Gomoku/Go engines and win-rate estimation"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[lib]
+name = "goptop_ai"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 复用规则层的 Stone/Coord/GameKind/GameState，保证 AI 与规则真源的类型不分叉
+goptop-core = { path = "../goptop-core" }
+# 五子棋引擎：Gomocup 参赛引擎，经 [patch.crates-io] 指向仓内 vendor 副本
+# （vendor 的唯一改动是把 std::time 换成 web-time，原因见 vendor 目录说明）
+figrid-board = { version = "0.8.8" }
+# 必须是直接依赖：figrid 的 Searcher::search 签名收 &NnueWeights，
+# 权重得由我们自己加载与持有
+noru = "2.2"
+# 围棋 playout：libEGo 算法的 Rust 移植。默认 feature 含 perf-event（依赖
+# libc::clockid_t），wasm32 上编不过，必须关掉
+go_game_board = { version = "0.1.1", default-features = false }
+# 解压内嵌的 gzip 权重；默认后端 miniz_oxide 是纯 Rust，wasm 可用
+flate2 = "1"
+# 围棋 MCTS 的时间控制必须用它而非 std::time::Instant：wasm32-unknown-unknown
+# 上 std 没有时钟，Instant::now() 会 panic 并被编译成 unreachable 陷阱
+# （figrid 正是踩了这个坑才需要 vendor 补丁）。web_time 在 wasm 走 performance.now()，
+# 在原生上就是 std 的再导出。
+web-time = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+
+[features]
+# wasm 特性仅在为前端构建 WASM 时启用，避免为原生测试引入 wasm-bindgen
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]

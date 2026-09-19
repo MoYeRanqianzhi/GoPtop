@@ -1,0 +1,77 @@
+//! A library for the Five-in-a-Row (Gomoku) game.
+//!
+//! Starting from 0.4.0 the primary engine is NNUE-based (powered by the
+//! [`noru`](https://crates.io/crates/noru) core). The pre-0.4 symbolic
+//! evaluator, rule/rec/tree stack, and generic `Eval<SZ>` trait live under
+//! the [`legacy`] module in 0.8.x versions.
+
+pub mod board;
+pub mod book;
+pub(crate) mod candidate_local_ensemble;
+pub(crate) mod candidate_ranker;
+#[cfg(feature = "codebook-eval")]
+pub mod codebook_eval;
+pub(crate) mod codebook_sidecar;
+pub mod coord;
+pub mod d4_hash;
+pub mod eval;
+#[cfg(feature = "codebook-eval")]
+pub mod factored_codebook;
+pub mod features;
+pub mod heuristic;
+pub mod pattern_dense;
+pub mod pattern_table;
+pub(crate) mod relation_fusion_gate;
+pub(crate) mod relation_lite;
+#[doc(hidden)]
+pub mod rq423_root_accept;
+pub mod search;
+pub mod threat_field;
+pub mod transposition;
+pub mod tss;
+pub mod vct;
+#[cfg(feature = "codebook-eval")]
+pub(crate) mod white_root_order;
+
+pub use board::{
+    BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, RuleSet, Stone, to_idx, to_rc,
+};
+pub use coord::{Coord, Coord15, Coord20, CoordState, Rotation};
+pub use eval::{IncrementalEval, evaluate};
+pub use features::GOMOKU_NNUE_CONFIG;
+pub use heuristic::{DIR, LineInfo, scan_line};
+pub use search::{
+    MovePickerStats, SearchProfileSnapshot, SearchResult, SearchShapeStats, Searcher,
+};
+pub use threat_field::IncrementalThreatField;
+pub use tss::{
+    DependencyCandidateArms, DependencyQuietCandidate, Q1CandidateAttempt, Q1DefenseAttempt,
+    Q1DefenseOutcome, Q1TssConfig, Q1TssResult, Q1TssStopReason, QuietThreatCandidate,
+    QuietThreatConfig, ResponseRelevanceAudit, audit_quiet_response_relevance,
+    classify_move_with_directions, directional_aggregation_mismatches,
+    generate_dependency_quiet_candidates, generate_quiet_threat_candidates, search_q1_tss_root,
+};
+pub use vct::{
+    VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,
+    search_vct_with_stats,
+};
+#[cfg(feature = "cb-p1-audit")]
+pub use vct::dfpn::{
+    BoundedDfpnConfig, BoundedDfpnSession, DfpnCertificateReplay, DfpnCheckpoint, DfpnError,
+    DfpnStatus, DfpnWidthBin,
+};
+
+/// Possible errors returned from this crate.
+#[derive(Clone, Debug, PartialEq)]
+#[repr(u8)]
+pub enum Error {
+    ParseError,
+    InvalidCoord,
+    CoordNotEmpty,
+    RecIsEmpty,
+    RecIsFull,
+    RecIsFinished,
+    ItemNotExist,
+    TransformFailed,
+    CursorAtEnd,
+}
