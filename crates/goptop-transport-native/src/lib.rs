@@ -107,7 +107,9 @@ pub fn rand4() -> [u32; 4] {
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
         h.write_u64(now_ms());
         h.write_u64(SEQ.fetch_add(1, Ordering::Relaxed));
-        *slot = h.finish() as u32;
+        // `| 1` 保证非零：下游 `gen_game_id`/`gen_user_id` 直接把 u32 编进 ID，
+        // 取到 0 会产出 `g-000000000000` 这种全零 ID（实测踩到）。
+        *slot = (h.finish() as u32) | 1;
     }
     out
 }
