@@ -37,7 +37,8 @@
         50ms 泵同构，前端 `start_pump()` 的语义两端一致。
       - 实测：桌面双实例 **10/10**；**桌面 ↔ 鸿蒙跨宿主 10/10**（两个宿主各写各的
         `Host` 实现，跑同一份状态机）；两端资源时间线里都没有 transport wasm。
-      - **安卓**（AVD `goptop_test`，x86_64）：`ai.js android` 9/9；资源时间线复核
+      - **安卓**（AVD `goptop_test`，x86_64）：`ai.js android` 9/9、
+        `stress.js android 120` 8/8（120 手，堆 18→18MB）；资源时间线复核
         **`goptop_transport` 与 `goptop_core` 皆为空**（上一轮 transport 一直在），
         即 P2P 会话与规则在安卓都走原生 Rust；`__store.backend()` 为 `tauri`。
         构建经验：`tauri android build` 与模拟器**不能同时跑**（两次都因此被系统
