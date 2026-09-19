@@ -1,9 +1,12 @@
 # 原生端传输层接线（把 `WasmSession` 从三端换掉）
 
-> 状态：**进行中**。已完成：`UiCommand` 的 serde 契约、Tauri 会话宿主
-> （`src-tauri/src/session.rs`）、前端会话门面（`frontend/src/net/session.ts`）、
-> 桌面双实例对局脚本（`scripts/e2e/shell-pair.js`）。
-> 待办：桌面双实例实测、鸿蒙 NAPI 命令面、安卓复测。
+> 状态：**接近完成**。已完成并实测：
+> - `UiCommand` 的 serde 契约（`crates/goptop-net`）+ 往返测试钉死线上形态；
+> - 桌面/Android 宿主（`src-tauri/src/session.rs`）+ 前端门面（`frontend/src/net/session.ts`）；
+>   桌面双实例真打一局 **10/10**（`scripts/e2e/shell-pair.js`，且 `bc recv` 为 0，
+>   证明同步确实走原生 DataChannel）；
+> - 鸿蒙宿主（`crates/goptop-ohos/src/session.rs`），宿主机测试 5/5。
+> 待办：鸿蒙模拟器上的端到端（含与桌面壳跨宿主对局）、安卓复测。
 > 背景见 `.agents/TODO.md` 的遗留条目与
 > `memory/2026-09-19-wasm-is-web-only-native-platforms-link-rust.md`。
 
