@@ -15,6 +15,11 @@ use goptop_net::session::UiCommand;
 use goptop_transport_native::{HeadlessHost, Host, NativeSession, SessionConfig};
 use serde_json::Value;
 
+/// 进程内广播 hub 是**全局**的（真实场景一个进程只有一个 app 实例），
+/// 所以并行跑的用例会互相收到对方的消息。用一把全局锁把用例串起来——
+/// 这是测试隔离的需要，不是产品缺陷。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 无 STUN 的宿主：本地候选即刻收集完，省掉 gathering 的 8s 超时兜底。
 fn host() -> Arc<HeadlessHost> {
     let h = Arc::new(HeadlessHost::default());
@@ -120,6 +125,7 @@ async fn paired() -> (NativeSession, NativeSession, Arc<HeadlessHost>, Arc<Headl
 /// 双人对局全流程：邀请 → 配对 → 落子同步 → 五连终局。
 #[tokio::test]
 async fn 双人对局全流程() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (a, b, ha, hb) = paired().await;
 
     let sa = snap(&a);
@@ -163,6 +169,7 @@ async fn 双人对局全流程() {
 /// 这里验的是**经 transport 同步**这一层）。
 #[tokio::test]
 async fn 围棋落子同步() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let ha = host();
     let hb = host();
     let mut ca = cfg("甲");
@@ -209,6 +216,7 @@ async fn 围棋落子同步() {
 /// 聊天与协商（悔棋/重开）经同源通道送达对端。
 #[tokio::test]
 async fn 聊天与协商() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (a, b, _ha, _hb) = paired().await;
 
     a.cmd(UiCommand::SendChat("你好".into()));
@@ -236,6 +244,7 @@ async fn 聊天与协商() {
 /// 设置类键值经宿主存储落盘（无界面下就是 `HeadlessHost` 的内存表）。
 #[tokio::test]
 async fn 设置落盘走宿主存储() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let ha = host();
     let a = NativeSession::new(cfg("甲"), ha.clone(), "http://localhost/settings");
     a.cmd(UiCommand::SetName("新名字".into()));
@@ -260,6 +269,7 @@ async fn 设置落盘走宿主存储() {
 /// 链接解析与回执解析（粘贴弹窗背后的逻辑）也全在 Rust。
 #[tokio::test]
 async fn 链接解析在_Rust() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let ha = host();
     let a = NativeSession::new(cfg("甲"), ha, "http://localhost/");
 

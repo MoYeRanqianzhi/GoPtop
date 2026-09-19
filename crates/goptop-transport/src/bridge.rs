@@ -159,7 +159,7 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
                 core.peers.push((to, entry.1));
             }
         }
-        Effect::AcceptAnswer { tag, answer, encrypted } => {
+        Effect::AcceptAnswer { tag, answer, encrypted, pwd: _pwd } => {
             let (sdp, typ, _) = decode_sdp(&answer, encrypted, core);
             if let (Some(sdp), Some(typ)) = (sdp, typ) {
                 if let Some((_, peer)) = core.borrow().peers.iter().find(|(t, _)| *t == tag) {
