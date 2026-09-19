@@ -133,6 +133,18 @@ pub mod presence {
             eprintln!("[bc recv me={me}] {}", text.chars().take(160).collect::<String>());
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return };
+
+        // **先分对局消息**：广播通道送两类东西——presence（带 `t`）与对局 GameMsg
+        //（带 `kind`/`sender`/`seq`）。只认 `t` 的话，GameMsg 会被整条丢掉，
+        // 表现为「对手的连接是通的、广播也发出去了，但这边的棋盘不动」
+        //（实测：`on_net` 从未被调用，因为消息在 presence 分类器里就被忽略了）。
+        if v["kind"].is_object() && v["sender"].is_string() {
+            if let Ok(msg) = serde_json::from_value::<goptop_net::protocol::GameMsg>(v) {
+                bridge::queue(core, Event::Net(msg));
+            }
+            return;
+        }
+
         let t = v["t"].as_str().unwrap_or("");
         match t {
             "announce" => {

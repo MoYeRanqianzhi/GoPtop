@@ -34,7 +34,11 @@ impl Session {
             MsgKind::ScoreConfirmAck { .. } => "ScoreConfirmAck",
             MsgKind::Avatar { .. } => "Avatar",
         };
-        if !self.dedup.admit(&msg.sender, msg.seq, is_dedupable(kind_type)) {
+        let admitted = self.dedup.admit(&msg.sender, msg.seq, is_dedupable(kind_type));
+        if std::env::var("GOPTOP_TRACE_NET").is_ok() {
+            eprintln!("[net] kind={kind_type} sender={} seq={} my_peer={} admitted={admitted}", msg.sender, msg.seq, self.peer_id);
+        }
+        if !admitted {
             return fx;
         }
         // 观战者镜像转发：对手的数据面消息（落子/协商/聊天）经我补发给我名下的观战者

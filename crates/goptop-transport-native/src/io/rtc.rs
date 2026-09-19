@@ -77,6 +77,9 @@ struct Handler {
 impl PeerConnectionEventHandler for Handler {
     /// 连接状态 → PeerState（与 wasm 侧同一套 open/closed/failed 判定）。
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc {}] conn={state:?}", self.tag);
+        }
         let (opened, closed, failed) = match state {
             RTCPeerConnectionState::Connected => (true, false, false),
             RTCPeerConnectionState::Failed => (false, true, true),
@@ -332,8 +335,21 @@ pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool
     }
     tokio::spawn(async move {
         let Some(pc) = wait_peer(&core, &tag, "accept_answer").await else { return };
-        if let Ok(desc) = RTCSessionDescription::answer(sdp) {
-            let _ = pc.set_remote_description(desc).await;
+        match RTCSessionDescription::answer(sdp) {
+            Ok(desc) => {
+                if let Err(e) = pc.set_remote_description(desc).await {
+                    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                        eprintln!("[rtc {tag}] accept_answer: set_remote 失败: {e}");
+                    }
+                } else if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                    eprintln!("[rtc {tag}] accept_answer: set_remote 完成，等 ICE");
+                }
+            }
+            Err(e) => {
+                if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                    eprintln!("[rtc {tag}] accept_answer: answer 解析失败: {e}");
+                }
+            }
         }
     });
 }

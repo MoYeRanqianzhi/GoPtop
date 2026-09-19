@@ -149,7 +149,7 @@ async fn 双人对局全流程() {
 
     let sa = snap(&a);
     let sb = snap(&b);
-    println!("[落子后] A.moveCount={:?} B.moveCount={:?} A.peerConnected={} B.peerConnected={}", sa["moveCount"], sb["moveCount"], sa["peerConnected"], sb["peerConnected"]);
+    println!("[落子后] A.mc={:?} B.mc={:?} A.phase={} B.phase={} A.role={} B.role={} B.uid={} A.uid={}", sa["moveCount"], sb["moveCount"], sa["phase"], sb["phase"], sa["role"], sb["role"], sb["userId"], sa["userId"]);
     assert_eq!(sa["moveCount"].as_u64(), Some(9), "手数应为 9");
     assert_ne!(sa["winner"], Value::Null, "五连后应有胜者");
     // 胜负必须两端一致（观战者判错方向是历史 bug）
@@ -172,20 +172,22 @@ async fn 围棋落子同步() {
     cb.kind = "go".into();
     cb.size = 9;
     let a = NativeSession::new(ca, ha.clone(), "http://localhost/p2p");
-    let b = NativeSession::new(cb, hb.clone(), "http://localhost/p2p");
 
     a.cmd(UiCommand::CreateInvite);
-    pump_until(&a, &b, || snap(&a)["specUrl"].as_str().is_some_and(|u| u.contains("specrtc=")), 40).await;
+    pump_until(&a, &a, || snap(&a)["inviteUrl"].as_str().is_some_and(|u| u.contains("rtc=")), 40).await;
     let sa = snap(&a);
-    b.cmd(UiCommand::AcceptInvite {
-        inviter_id: s(&sa, "userId"),
-        pwd: Some(s(&sa, "pwd")),
-        kind: "go".into(),
-        size: 9,
-        rtc: None,
-        spec: false,
-    });
-    pump_until(&a, &b, || s(&snap(&a), "phase") == "playing" && s(&snap(&b), "phase") == "playing", 30).await;
+    // 走 Boot 路径（打开邀请链接）——与双人对局一致，也是真实用户路径
+    let link = s(&sa, "inviteUrl");
+    let b = NativeSession::new(cb, hb.clone(), &link);
+    let ok = pump_until(
+        &a,
+        &b,
+        || s(&snap(&a), "phase") == "playing" && s(&snap(&b), "phase") == "playing",
+        40,
+    )
+    .await;
+    assert!(ok, "围棋局未进入对局态");
+    pump_until(&a, &b, || snap(&a)["peerConnected"] == Value::Bool(true) && snap(&b)["peerConnected"] == Value::Bool(true), 40).await;
 
     let sa = snap(&a);
     let sb = snap(&b);

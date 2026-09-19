@@ -413,6 +413,20 @@ fn accept_challenge_with(s: &mut Session, ctx: &ReduceCtx, from: &str, kind: &st
     s.phase = Phase::Playing;
     s.my_color = "black".into();
     s.peer_connected = false;
+    // **受理后必须重新登记 main 槽位**：上面 `close_all_rtc()` 把 rtc_peers 清空了，
+    // 而这条连接**是活的**（answer 已经喂进去、ICE 正在跑）。`on_peer_state` 只在
+    // rtc_peers 里找得到对应 tag 时才置 `peer_connected = true`——账本被自己清掉后，
+    // 连接再通也更新不了状态，表现为双方都已 `conn=Connected` 而 `peerConnected`
+    // 恒为 false、落子被 can_place 拒绝。
+    s.rtc_peers.push(PeerSlot {
+        tag: s.inviter_main.clone().unwrap_or_else(|| "main".into()),
+        player: true,
+        spectator: false,
+        opened: false,
+        offer_ready: true,
+        offer_plain: None,
+        awaiting_peer: None,
+    });
     fx.extend(s.reset_board_for(kind, size));
     s.pwd = None; // pwd 失效：两人满员
     s.invite_url = None;
