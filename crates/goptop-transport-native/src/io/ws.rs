@@ -36,13 +36,41 @@ impl ServerSocket {
 }
 
 /// 连接服务器：建 IO 任务并把句柄挂进 Core。
-pub fn connect(core: &SharedCore, url: String) {
+pub fn connect(core: &SharedCore, url: Option<String>) {
+    let Some(url) = url else { return };
     let (tx, rx) = mpsc::unbounded_channel::<String>();
     if let Ok(mut c) = core.lock() {
         c.ws = Some(ServerSocket { tx });
     }
     let core = core.clone();
     tokio::spawn(async move { run(core, url, rx).await });
+}
+
+/// 服务器地址：按设置选（键名与 wasm 侧 `io::selected_server_url` 一致）。
+///
+/// 与 wasm 版的差异只在读存储的入口——那边走 `crate::storage_get`（宿主钩子 →
+/// localStorage 兜底），这边走 `Host::storage_get`（桌面 `~/.goptop` 等）。
+pub fn selected_server_url(host: &dyn crate::host::Host) -> Option<String> {
+    const BUILTIN: &str = r#"[{"id":"official","label":"官方服务器","url":"wss://goptopserver.meowoo.org/ws","builtin":true}]"#;
+    let sel = host.storage_get("goptop:server-sel").unwrap_or_else(|| "official".into());
+    if sel == "none" {
+        return None;
+    }
+    let mut all = BUILTIN.to_string();
+    if let Some(custom) = host.storage_get("goptop:servers") {
+        if custom.len() > 2 {
+            all = format!(
+                "[{},{}]",
+                BUILTIN.trim_start_matches('[').trim_end_matches(']'),
+                custom.trim_start_matches('[').trim_end_matches(']')
+            );
+        }
+    }
+    let list: serde_json::Value = serde_json::from_str(&all).unwrap_or(serde_json::Value::Null);
+    list.as_array()
+        .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some(sel.as_str())))
+        .and_then(|s| s["url"].as_str())
+        .map(str::to_string)
 }
 
 async fn run(core: SharedCore, url: String, mut rx: mpsc::UnboundedReceiver<String>) {

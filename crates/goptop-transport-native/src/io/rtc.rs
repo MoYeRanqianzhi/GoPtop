@@ -44,6 +44,9 @@ pub struct RtcPeer {
     closed: std::sync::atomic::AtomicBool,
     /// ICE gathering 完成信号（offer/answer 都要等它）。
     gather: Arc<tokio::sync::Notify>,
+    /// 完成标志。**不能只靠 Notify**：`notify_waiters()` 只唤醒已注册的等待者、
+    /// 不存许可，若 gathering 在 wait 之前就完成，通知会丢、只能等 8s 超时。
+    gather_done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RtcPeer {
@@ -67,6 +70,7 @@ struct Handler {
     /// ICE gathering 完成的信号。wasm 侧靠轮询 `iceGatheringState`，这边有事件回调，
     /// 用它比轮询干净（`wait_gathering` 仍留 8s 超时兜底）。
     gather: Arc<tokio::sync::Notify>,
+    gather_done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait]
@@ -89,7 +93,12 @@ impl PeerConnectionEventHandler for Handler {
 
     /// ICE 候选收集完成 → 唤醒等待者（全量 gathering 模型的关键信号）。
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc {}] gathering state = {state:?}", self.tag);
+        }
         if state == RTCIceGatheringState::Complete {
+            // 先置标志再通知：等待方先查标志，晚到的等待者不会错过
+            self.gather_done.store(true, std::sync::atomic::Ordering::SeqCst);
             self.gather.notify_waiters();
         }
     }
@@ -137,11 +146,17 @@ pub fn create(core: &SharedCore, tag: String, inviter: bool, _spectator: bool) {
                     c.peers.push((tag2.clone(), peer));
                 }
                 if inviter && make_offer(&core2, &tag2, pc).await.is_err() {
+                    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                        eprintln!("[rtc {}] make_offer 失败", tag2);
+                    }
                     bridge::queue(&core2, Event::PeerState { tag: tag2.clone(), opened: false, closed: true, failed: true });
                 }
                 let _ = dc_slot;
             }
-            Err(_) => {
+            Err(e) => {
+                if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                    eprintln!("[rtc {}] build 失败: {e}", tag2);
+                }
                 bridge::queue(&core2, Event::PeerState { tag: tag2, opened: false, closed: true, failed: true });
             }
         }
@@ -149,19 +164,26 @@ pub fn create(core: &SharedCore, tag: String, inviter: bool, _spectator: bool) {
 }
 
 async fn build(core: &SharedCore, tag: &str) -> Result<RtcPeer, String> {
+    let trace = std::env::var("GOPTOP_TRACE_RTC").is_ok();
     let stun = core.lock().map_err(|_| "lock".to_string())?.session.stun_urls.clone();
+    if trace {
+        eprintln!("[rtc {tag}] stun={stun:?}");
+    }
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer { urls: stun, ..Default::default() }])
         .build();
 
     let gather = Arc::new(tokio::sync::Notify::new());
+    let gather_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handler = Arc::new(Handler {
         core: core.clone(),
         tag: tag.to_string(),
         gather: gather.clone(),
+        gather_done: gather_done.clone(),
     });
 
+    if trace { eprintln!("[rtc {tag}] builder 就绪，开始 build"); }
     let pc = Arc::new(
         PeerConnectionBuilder::new()
             .with_configuration(config)
@@ -180,10 +202,12 @@ async fn build(core: &SharedCore, tag: &str) -> Result<RtcPeer, String> {
         negotiated: Some(0),
         ..Default::default()
     };
+    if trace { eprintln!("[rtc {tag}] pc 建成，建 DC"); }
     let dc = pc
         .create_data_channel("goptop", Some(init))
         .await
         .map_err(|e| e.to_string())?;
+    if trace { eprintln!("[rtc {tag}] DC 建成"); }
     poll_channel(core.clone(), tag.to_string(), dc.clone());
 
     Ok(RtcPeer {
@@ -191,24 +215,31 @@ async fn build(core: &SharedCore, tag: &str) -> Result<RtcPeer, String> {
         dc: Arc::new(tokio::sync::Mutex::new(Some(dc))),
         closed: std::sync::atomic::AtomicBool::new(false),
         gather,
+        gather_done,
     })
 }
 
 /// 主动侧：createOffer → setLocal → 等 gathering → 回 RtcReady。
 async fn make_offer(core: &SharedCore, tag: &str, pc: Arc<dyn PeerConnection>) -> Result<(), String> {
+    let trace = std::env::var("GOPTOP_TRACE_RTC").is_ok();
+    if trace { eprintln!("[rtc {tag}] make_offer: create_offer"); }
     let offer = pc.create_offer(None).await.map_err(|e| e.to_string())?;
+    if trace { eprintln!("[rtc {tag}] make_offer: set_local_description"); }
     pc.set_local_description(offer).await.map_err(|e| e.to_string())?;
-    if let Some(g) = peer_gather(core, tag) {
-        wait_gathering(&g).await;
+    if trace { eprintln!("[rtc {tag}] make_offer: 等 gathering"); }
+    if let Some((g, d)) = peer_gather(core, tag) {
+        wait_gathering(&g, &d).await;
     }
+    if trace { eprintln!("[rtc {tag}] make_offer: gathering 结束"); }
     let desc = pc.local_description().await.ok_or("no local description")?;
+    let (plain, enc) = encode_payload(core, &desc.sdp, "offer", "player");
     bridge::queue(
         core,
         Event::RtcReady {
             tag: tag.to_string(),
-            offer_plain: Some(desc.sdp.clone()),
+            offer_plain: plain,
             answer_plain: None,
-            offer_enc: None,
+            offer_enc: enc,
             answer_enc: None,
         },
     );
@@ -217,32 +248,49 @@ async fn make_offer(core: &SharedCore, tag: &str, pc: Arc<dyn PeerConnection>) -
 
 /// 被动侧：喂远端 offer → createAnswer → setLocal → 等 gathering → 回 RtcReady。
 pub fn feed_offer(core: &SharedCore, tag: &str, offer: &str, _encrypted: bool) {
+    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+        eprintln!("[rtc {tag}] feed_offer 收到 offer（{} 字节）", offer.len());
+    }
     let core = core.clone();
     let tag = tag.to_string();
     let offer = offer.to_string();
     tokio::spawn(async move {
-        let Some(pc) = peer_pc(&core, &tag) else { return };
+        let Some(pc) = wait_peer(&core, &tag, "feed_offer").await else { return };
         let gather = peer_gather(&core, &tag);
+        // 无服务器模式的 offer 是 G1 加密载荷，先解码出 {s,t,r}
+        let (sdp, typ) = match decode_payload(&core, &offer, _encrypted) {
+            Some(v) => v,
+            None => return,
+        };
         let r = async {
-            let desc = RTCSessionDescription::offer(offer).map_err(|e| e.to_string())?;
+            let desc = match typ.as_str() {
+                "answer" => RTCSessionDescription::answer(sdp).map_err(|e| e.to_string())?,
+                _ => RTCSessionDescription::offer(sdp).map_err(|e| e.to_string())?,
+            };
             pc.set_remote_description(desc).await.map_err(|e| e.to_string())?;
             let answer = pc.create_answer(None).await.map_err(|e| e.to_string())?;
             pc.set_local_description(answer).await.map_err(|e| e.to_string())?;
-            if let Some(g) = &gather {
-                wait_gathering(g).await;
+            if let Some((g, d)) = &gather {
+                wait_gathering(g, d).await;
             }
             pc.local_description().await.ok_or_else(|| "no local description".to_string())
         }
         .await;
+        if let Err(e) = &r {
+            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                eprintln!("[rtc {tag}] feed_offer 失败: {e}");
+            }
+        }
         if let Ok(desc) = r {
+            let (plain, enc) = encode_payload(&core, &desc.sdp, "answer", "player");
             bridge::queue(
                 &core,
                 Event::RtcReady {
                     tag: tag.clone(),
                     offer_plain: None,
-                    answer_plain: Some(desc.sdp.clone()),
+                    answer_plain: plain,
                     offer_enc: None,
-                    answer_enc: None,
+                    answer_enc: enc,
                 },
             );
         }
@@ -250,14 +298,36 @@ pub fn feed_offer(core: &SharedCore, tag: &str, offer: &str, _encrypted: bool) {
 }
 
 /// 应用远端 answer（幂等位由状态机管理；重复应用静默）。
-pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, _encrypted: bool) {
-    let Some(pc) = peer_pc(core, tag) else { return };
+pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool) {
+    let core = core.clone();
+    let tag = tag.to_string();
     let answer = answer.to_string();
     tokio::spawn(async move {
-        if let Ok(desc) = RTCSessionDescription::answer(answer) {
+        let Some(pc) = wait_peer(&core, &tag, "accept_answer").await else { return };
+        let Some((sdp, _typ)) = decode_payload(&core, &answer, encrypted) else { return };
+        if let Ok(desc) = RTCSessionDescription::answer(sdp) {
             let _ = pc.set_remote_description(desc).await;
         }
     });
+}
+
+/// 等某个 tag 的 peer 登记完成（最多 10 秒）。
+///
+/// **必须有这个等待**：`Effect::CreatePeer` 在 native 侧是异步的（要 await
+/// `PeerConnectionBuilder::build`），而 `FeedOffer`/`AcceptAnswer` 紧随其后同步到达——
+/// 不等就会「找不到 peer」，表现为配对永远停在等待态。wasm 侧 `RtcPeer::new` 是
+/// 同步的，所以那边没有这个竞态，两边行为在这一点上**有意不同**。
+async fn wait_peer(core: &SharedCore, tag: &str, who: &str) -> Option<Arc<dyn PeerConnection>> {
+    for _ in 0..200 {
+        if let Some(pc) = peer_pc(core, tag) {
+            return Some(pc);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+        eprintln!("[rtc {tag}] {who}: 等 peer 超时");
+    }
+    None
 }
 
 /// 把一条对局消息发给该 peer 的 DC（open 才发）。与 wasm 侧 `send` 对应。
@@ -297,13 +367,58 @@ fn peer_pc(core: &SharedCore, tag: &str) -> Option<Arc<dyn PeerConnection>> {
     c.peers.iter().find(|(t, _)| t == tag).map(|(_, p)| p.pc.clone())
 }
 
-fn peer_gather(core: &SharedCore, tag: &str) -> Option<Arc<tokio::sync::Notify>> {
+fn peer_gather(
+    core: &SharedCore,
+    tag: &str,
+) -> Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)> {
     let c = core.lock().ok()?;
-    c.peers.iter().find(|(t, _)| t == tag).map(|(_, p)| p.gather.clone())
+    c.peers
+        .iter()
+        .find(|(t, _)| t == tag)
+        .map(|(_, p)| (p.gather.clone(), p.gather_done.clone()))
 }
 
 /// 等 ICE gathering 完成。wasm 侧是 100ms 轮询 + 8s 上限；这边有事件回调，
 /// 直接等通知，超时仍留 8s 兜底（对齐 wasm 侧的量级）。
-async fn wait_gathering(gather: &Arc<tokio::sync::Notify>) {
+async fn wait_gathering(gather: &Arc<tokio::sync::Notify>, done: &Arc<std::sync::atomic::AtomicBool>) {
+    if done.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(8), gather.notified()).await;
+}
+
+/// 把 SDP 包成载荷：`{"s":sdp,"t":type,"r":role}`，无服务器模式再用当前局 pwd 加密。
+///
+/// **与 wasm 侧 bridge 的约定逐字一致**——两端互操作全靠这个 JSON 形状与 G1 编码。
+/// 少了编码这一步，无服务器模式下 `offer_enc` 会是 None，状态机据此判定
+/// 「直连邀请生成失败：已生成同源链接（跨设备不可用）」，配对永远停在等待态。
+fn encode_payload(
+    core: &SharedCore,
+    sdp: &str,
+    typ: &str,
+    role: &str,
+) -> (Option<String>, Option<String>) {
+    let (server_mode, pwd) = match core.lock() {
+        Ok(c) => (c.session.server_mode, c.session.pwd.clone()),
+        Err(_) => (false, None),
+    };
+    let payload = serde_json::json!({ "s": sdp, "t": typ, "r": role }).to_string();
+    let enc = if server_mode {
+        None
+    } else {
+        pwd.as_deref().and_then(|p| goptop_net::codec::encode(&payload, p).ok())
+    };
+    (Some(payload), enc)
+}
+
+/// 还原载荷：加密的先解 G1，再取 (sdp, type)。
+fn decode_payload(core: &SharedCore, raw: &str, encrypted: bool) -> Option<(String, String)> {
+    let text = if encrypted {
+        let pwd = core.lock().ok()?.session.pwd.clone()?;
+        goptop_net::codec::decode(raw, &pwd).ok()?
+    } else {
+        raw.to_string()
+    };
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some((v["s"].as_str()?.to_string(), v["t"].as_str().unwrap_or("offer").to_string()))
 }

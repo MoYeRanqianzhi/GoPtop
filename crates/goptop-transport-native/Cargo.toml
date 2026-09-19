@@ -8,8 +8,13 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1.92"
 futures-util = "0.3.34"
+goptop-core = { version = "0.1.0-alpha.0", path = "../goptop-core", default-features = false }
 goptop-net = { version = "0.1.0-alpha.0", path = "../goptop-net" }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = "0.30.0"
 webrtc = "0.20.5"
+
+[dev-dependencies]
+async-trait = "0.1.92"

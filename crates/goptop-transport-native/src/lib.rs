@@ -28,6 +28,21 @@ use goptop_net::session::{Event, ReduceCtx, Session};
 pub mod bridge;
 pub mod host;
 pub mod io;
+pub mod session;
+
+pub use host::{HeadlessHost, Host};
+pub use session::NativeSession;
+
+/// 会话配置（与 wasm 版 `WasmSession::new` 的 cfg_json 同字段）。
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfig {
+    pub name: String,
+    pub server_mode: bool,
+    pub share_origin: String,
+    pub kind: String,
+    pub size: u16,
+}
 
 /// 核心：状态机 + 待处理事件队列 + IO 句柄。
 ///
@@ -76,16 +91,23 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 4 个随机 u32（状态机的 ctx.rand）。xorshift64 够用——状态机要的是
-/// 「每次不同」，不是密码学强度。
+/// 4 个随机 u32（状态机的 ctx.rand）。
+///
+/// **必须有真熵，不能只用时间**：先前只拿 `now_ms()` 做 xorshift 种子，同一毫秒内
+/// 建的两个会话会得到完全相同的序列——实测表现为两个会话拿到**同一个 userId**，
+/// 于是 P2P 挑战被发给自己、配对彻底失败。`RandomState` 由标准库注入进程级熵
+/// （每实例种子不同），再混入时间和自增计数，足以让任意两次调用都不同。
 pub fn rand4() -> [u32; 4] {
-    let mut x = now_ms() ^ 0x9e37_79b9_7f4a_7c15;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut out = [0u32; 4];
     for slot in &mut out {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        *slot = (x >> 32) as u32;
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(now_ms());
+        h.write_u64(SEQ.fetch_add(1, Ordering::Relaxed));
+        *slot = h.finish() as u32;
     }
     out
 }

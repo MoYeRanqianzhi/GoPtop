@@ -41,7 +41,7 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
                 });
             }
 
-            Effect::ServerConnect(url) => io::ws::connect(core, url),
+            Effect::ServerConnect(url) => io::ws::connect(core, Some(url)),
             Effect::SendServer(v) => {
                 if let Ok(c) = core.lock() {
                     if let Some(ws) = &c.ws {
@@ -73,6 +73,9 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
             Effect::CreatePeer { tag, inviter, spectator } => {
                 io::rtc::create(core, tag, inviter, spectator);
             }
+            // 说明：offer/answer 的「包 JSON + pwd 加密」在 io::rtc 生成 SDP 之后由
+            // 本层补齐（见 io::rtc 里回喂 RtcReady 前的 encode_payload），与 wasm 侧
+            // bridge 的分工一致——rtc 层只管 SDP，编码不归它管。
             Effect::FeedOffer { tag, offer, encrypted } => {
                 io::rtc::feed_offer(core, &tag, &offer, encrypted);
             }

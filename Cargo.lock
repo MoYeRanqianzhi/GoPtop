@@ -2038,7 +2038,9 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "goptop-core",
  "goptop-net",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.30.0",
