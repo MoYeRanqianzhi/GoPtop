@@ -292,6 +292,12 @@ pub(crate) fn accept_invite(s: &mut Session, ctx: &ReduceCtx, inviter_id: &str, 
             fx.push(Effect::Nav("/p2p".into()));
             s.rtc_peers.push(PeerSlot { tag: "main".into(), player: true, spectator: false, opened: false, offer_ready: false, offer_plain: None, awaiting_peer: None });
             s.my_host = Some(inviter_id.to_string());
+            // **必须留住 pwd**：无服务器模式的 offer 是 G1 加密载荷，transport 解码时
+            // 要拿当前局的 pwd（解码侧读 `session.pwd`，观战链才回退 spec_pwd）。
+            // 上面那行 `s.pwd = None` 是为「受邀者不再是邀请者」而清的状态，但这里
+            // 紧接着就要用它解 offer——不留住的话解出来是 None，连接永远建不起来
+            //（表现为受邀者停在「等待对手」、peerConnected 恒 false）。
+            s.pwd = pwd.clone();
             // **必须先建 peer 再喂 offer**：`FeedOffer` 只是把远端 SDP 喂给一个**已存在**
             // 的连接（transport 侧按 tag 查表，查不到就无事可做）。原实现只发 FeedOffer，
             // 于是「无服务器 + 链接带 rtc」的一键直连从未真正建立起连接——受邀者停在
