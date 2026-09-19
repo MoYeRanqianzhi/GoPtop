@@ -292,6 +292,12 @@ pub(crate) fn accept_invite(s: &mut Session, ctx: &ReduceCtx, inviter_id: &str, 
             fx.push(Effect::Nav("/p2p".into()));
             s.rtc_peers.push(PeerSlot { tag: "main".into(), player: true, spectator: false, opened: false, offer_ready: false, offer_plain: None, awaiting_peer: None });
             s.my_host = Some(inviter_id.to_string());
+            // **必须先建 peer 再喂 offer**：`FeedOffer` 只是把远端 SDP 喂给一个**已存在**
+            // 的连接（transport 侧按 tag 查表，查不到就无事可做）。原实现只发 FeedOffer，
+            // 于是「无服务器 + 链接带 rtc」的一键直连从未真正建立起连接——受邀者停在
+            // 「等待对手」、peerConnected 恒为 false。粘贴路径与 Boot 路径都走这里
+            //（process_intent 最终也调本函数），注释里说的「Boot 路径没暴露」只对服务器模式成立。
+            fx.push(Effect::CreatePeer { tag: "main".into(), inviter: false, spectator: false });
             fx.push(Effect::FeedOffer { tag: "main".into(), offer, encrypted: true });
             fx.push(Effect::Emit);
         }
