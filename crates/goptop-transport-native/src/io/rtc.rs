@@ -317,20 +317,21 @@ pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool
     let core = core.clone();
     let tag = tag.to_string();
     let answer = answer.to_string();
+    // **解码必须同步做完，不能挪进 spawn**：解密要读 `session.pwd`，而调用方
+    //（`accept_challenge_with`）在发出本 Effect 之后紧接着就把 `s.pwd` 清成 None
+    //（「两人满员，钥匙失效」）。spawn 出去再解就成了异步读，拿到的是已清空的状态
+    // ——实测 A 侧 `pwd=None spec_pwd=Some(6)` 解码失败，而 B 侧同一份载荷能解开。
+    let Some((sdp, _typ)) = decode_payload(&core, &answer, encrypted) else {
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc {tag}] accept_answer: 解码失败");
+        }
+        return;
+    };
     if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
-        eprintln!("[rtc {tag}] accept_answer 收到（{} 字节，encrypted={encrypted}）", answer.len());
+        eprintln!("[rtc {tag}] accept_answer: 解码出 {} 字节（同步完成）", sdp.len());
     }
     tokio::spawn(async move {
         let Some(pc) = wait_peer(&core, &tag, "accept_answer").await else { return };
-        let Some((sdp, _typ)) = decode_payload(&core, &answer, encrypted) else {
-            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
-                eprintln!("[rtc {tag}] accept_answer: 解码失败");
-            }
-            return;
-        };
-        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
-            eprintln!("[rtc {tag}] accept_answer: 解码出 {} 字节", sdp.len());
-        }
         if let Ok(desc) = RTCSessionDescription::answer(sdp) {
             let _ = pc.set_remote_description(desc).await;
         }
@@ -429,19 +430,38 @@ fn encode_payload(
         Err(_) => (false, None),
     };
     let payload = serde_json::json!({ "s": sdp, "t": typ, "r": role }).to_string();
+    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+        eprintln!("[rtc] encode_payload typ={typ} server_mode={server_mode} pwd={:?}", pwd.as_deref().map(|p| p.len()));
+    }
     let enc = if server_mode {
         None
     } else {
         pwd.as_deref().and_then(|p| goptop_net::codec::encode(&payload, p).ok())
     };
+    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+        eprintln!("[rtc] encode_payload -> enc={:?}", enc.as_ref().map(|e| e.len()));
+    }
     (Some(payload), enc)
 }
 
 /// 还原载荷：加密的先解 G1，再取 (sdp, type)。
 fn decode_payload(core: &SharedCore, raw: &str, encrypted: bool) -> Option<(String, String)> {
     let text = if encrypted {
-        let pwd = core.lock().ok()?.session.pwd.clone()?;
-        goptop_net::codec::decode(raw, &pwd).ok()?
+        let (pwd, spwd) = {
+            let c = core.lock().ok()?;
+            (c.session.pwd.clone(), c.session.spec_pwd.clone())
+        };
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc] decode_payload: pwd={:?} spec_pwd={:?}", pwd.as_deref().map(|p| p.len()), spwd.as_deref().map(|p| p.len()));
+        }
+        let t = pwd
+            .or(spwd)
+            .unwrap_or_default();
+        let r = goptop_net::codec::decode(raw, &t).ok();
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc] decode_payload: 解码{}", if r.is_some() { "成功" } else { "失败" });
+        }
+        r?
     } else {
         raw.to_string()
     };
