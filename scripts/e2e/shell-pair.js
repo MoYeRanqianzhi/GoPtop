@@ -9,11 +9,27 @@
  * 因此这条路必然走「邀请链接 → 回执 → 直连（DataChannel）」的全链，
  * 顺带把回执那条此前无自动化覆盖的通路也压上。
  *
+ * **判定同步真的走了直连**：两个壳都是无服务器模式（没有 WS、没有 relay），
+ * 进程内广播又跨不了进程——所以 B 收到 A 的落子只可能是 DataChannel 送的。
+ * 复核手段：给两个壳加 `GOPTOP_TRACE_BC=1`，两份日志里 `bc recv` 应当**一次都没有**。
+ *
  * 用法：node shell-pair.js [portA] [portB]      默认 9222 / 9223
  * 前置：
  *   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" ./target/release/goptop.exe
- *   WEBVIEW2_USER_DATA_FOLDER="<dir>" WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" ./target/release/goptop.exe
- *   （第二个实例必须换 user data folder，否则共用一个 WebView2 进程、两个页面挤在同一个 CDP 端点里）
+ *   WEBVIEW2_USER_DATA_FOLDER="<dir>\wv" USERPROFILE="<dir>"  *     LOCALAPPDATA="<dir>\AppData\Local" APPDATA="<dir>\AppData\Roaming"  *     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" ./target/release/goptop.exe
+ *
+ *   第二个实例要换**一整套 profile 环境**，各治一种病：
+ *   - `WEBVIEW2_USER_DATA_FOLDER`：不换则共用一个 WebView2 进程，两个页面挤在同一个
+ *     CDP 端点里，分不清谁是谁；
+ *   - `USERPROFILE` + `LOCALAPPDATA` + `APPDATA`：**三个都要**。只换 `USERPROFILE`
+ *     时 WebView2 起不来（它的 loader/缓存还要 LOCALAPPDATA，缺了窗口建不出来、
+ *     调试端口也不开），表现是第二个壳静默不启动、日志空白。
+ *     不换则两个壳共用 `%USERPROFILE%\.goptop\store.json`
+ *     （`store.rs` 的桌面落盘位置就是 `~/.goptop`）——**同一个身份、同一份设置**，
+ *     后起的那个会把先起的覆盖掉。症状是 B 打开 A 的邀请链接时命中状态机里的
+ *     「这是你自己的主页链接」守卫（`user_id == s.user_id`）直接返回，表现为
+ *     「B 停在主页、什么都不发生」，看着像传输层没接上。
+ *     真机跨设备不会遇到，这是同机双实例才有的测试环境问题。
  */
 const { Endpoint } = require("./device.js");
 
@@ -26,10 +42,20 @@ function check(name, ok, extra) {
   else { fail++; console.log(`FAIL ${name}${extra ? " | " + extra : ""}`); }
 }
 
-/** 铺设置 → 整页重载（让 storeInit 重新读平台存储，否则门面里还是旧的内存副本）。 */
-async function prep(ep, name) {
+/**
+ * 铺设置 → 整页重载（让 storeInit 重新读平台存储，否则门面里还是旧的内存副本）。
+ *
+ * **`goptop:userId` 必须逐壳指定**：两个壳进程共用同一份 `~/.goptop/store.json`
+ * ——`WEBVIEW2_USER_DATA_FOLDER` 只隔离 WebView2 自己的数据，隔离不了 Tauri 的
+ * 应用数据目录。不指定的话两个壳读到同一个身份，B 打开 A 的邀请链接会命中状态机里
+ * 的「这是你自己的主页链接」直接返回（`user_id == s.user_id` 那条守卫），
+ * 表现是 B 停在主页、什么都不发生——**看着像传输层没接上，其实是同一个人的两个窗口**。
+ * 真机跨设备不会遇到，这是同机双实例才有的测试环境问题。
+ */
+async function prep(ep, name, uid) {
   await ep.setSetting("goptop:server-sel", "none");
   await ep.setSetting("goptop:name", name);
+  await ep.setSetting("goptop:userId", uid);
   const origin = new URL(ep.page.url()).origin;
   await ep.page.goto(origin + "/p2p", { waitUntil: "domcontentloaded" });
   await ep.ready(30000);
@@ -42,8 +68,8 @@ const snap = async (ep) => JSON.parse(await ep.page.evaluate(() => window.__sess
   const A = await Endpoint.cdp("壳甲", `http://127.0.0.1:${PORT_A}`);
   const B = await Endpoint.cdp("壳乙", `http://127.0.0.1:${PORT_B}`);
 
-  const originA = await prep(A, "壳甲");
-  const originB = await prep(B, "壳乙");
+  const originA = await prep(A, "壳甲", "u-shell-aaa-0001");
+  const originB = await prep(B, "壳乙", "u-shell-bbb-0002");
   check("两个壳都是原生会话（__session 已就绪）", true, `${originA} / ${originB}`);
 
   // 1) A 开局，等带 rtc 的邀请链接
