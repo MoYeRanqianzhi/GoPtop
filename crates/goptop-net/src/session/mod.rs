@@ -549,7 +549,12 @@ pub enum Effect {
     /// transport 侧句柄键同步。
     RenamePeer { from: String, to: String },
     /// 邀请方向：把远端 answer 喂给已有连接（明文/加密同上）。
-    AcceptAnswer { tag: String, answer: String, encrypted: bool },
+    ///
+    /// `pwd`：解密该 answer 要用的钥匙。**必须随 Effect 携带，不能读 session.pwd**——
+    /// 发出本 Effect 的 `accept_challenge_with` 紧接着就会 `close_all_rtc()` 把 pwd 清成
+    /// None（「两人满员，钥匙失效」），而 Effect 是 reduce 返回后才执行的，到时读到的
+    /// 已经是清空后的值（实测 A 侧 `pwd=None` 解不开、B 侧同一份载荷解得开）。
+    AcceptAnswer { tag: String, answer: String, encrypted: bool, pwd: Option<String> },
     /// 关闭全部 RTC 连接。
     ClosePeers,
     /// 对局数据 channel 加入（同源 BC）。

@@ -71,16 +71,25 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
             }
 
             Effect::CreatePeer { tag, inviter, spectator } => {
+                if std::env::var("GOPTOP_TRACE_EFFECTS").is_ok() {
+                    eprintln!("[eff] CreatePeer tag={tag} inviter={inviter} spectator={spectator}");
+                }
                 io::rtc::create(core, tag, inviter, spectator);
             }
             // 说明：offer/answer 的「包 JSON + pwd 加密」在 io::rtc 生成 SDP 之后由
             // 本层补齐（见 io::rtc 里回喂 RtcReady 前的 encode_payload），与 wasm 侧
             // bridge 的分工一致——rtc 层只管 SDP，编码不归它管。
             Effect::FeedOffer { tag, offer, encrypted } => {
+                if std::env::var("GOPTOP_TRACE_EFFECTS").is_ok() {
+                    eprintln!("[eff] FeedOffer tag={tag} len={} encrypted={encrypted}", offer.len());
+                }
                 io::rtc::feed_offer(core, &tag, &offer, encrypted);
             }
-            Effect::AcceptAnswer { tag, answer, encrypted } => {
-                io::rtc::accept_answer(core, &tag, &answer, encrypted);
+            Effect::AcceptAnswer { tag, answer, encrypted, pwd } => {
+                if std::env::var("GOPTOP_TRACE_EFFECTS").is_ok() {
+                    eprintln!("[eff] AcceptAnswer tag={tag} len={} encrypted={encrypted}", answer.len());
+                }
+                io::rtc::accept_answer(core, &tag, &answer, encrypted, pwd);
             }
             Effect::RenamePeer { from, to } => {
                 if let Ok(mut c) = core.lock() {
@@ -90,6 +99,9 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
                 }
             }
             Effect::ClosePeers => {
+                if std::env::var("GOPTOP_TRACE_EFFECTS").is_ok() {
+                    eprintln!("[eff] ClosePeers");
+                }
                 let peers = core.lock().ok().map(|mut c| std::mem::take(&mut c.peers));
                 if let Some(peers) = peers {
                     for (_, p) in peers {

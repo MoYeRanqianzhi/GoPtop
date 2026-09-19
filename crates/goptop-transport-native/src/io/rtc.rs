@@ -313,7 +313,7 @@ pub fn feed_offer(core: &SharedCore, tag: &str, offer: &str, _encrypted: bool) {
 }
 
 /// 应用远端 answer（幂等位由状态机管理；重复应用静默）。
-pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool) {
+pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool, pwd: Option<String>) {
     let core = core.clone();
     let tag = tag.to_string();
     let answer = answer.to_string();
@@ -321,7 +321,7 @@ pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool
     //（`accept_challenge_with`）在发出本 Effect 之后紧接着就把 `s.pwd` 清成 None
     //（「两人满员，钥匙失效」）。spawn 出去再解就成了异步读，拿到的是已清空的状态
     // ——实测 A 侧 `pwd=None spec_pwd=Some(6)` 解码失败，而 B 侧同一份载荷能解开。
-    let Some((sdp, _typ)) = decode_payload(&core, &answer, encrypted) else {
+    let Some((sdp, _typ)) = decode_payload_with(&core, &answer, encrypted, pwd.as_deref()) else {
         if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
             eprintln!("[rtc {tag}] accept_answer: 解码失败");
         }
@@ -446,6 +446,11 @@ fn encode_payload(
 
 /// 还原载荷：加密的先解 G1，再取 (sdp, type)。
 fn decode_payload(core: &SharedCore, raw: &str, encrypted: bool) -> Option<(String, String)> {
+    decode_payload_with(core, raw, encrypted, None)
+}
+
+/// 同上，但可显式指定钥匙（`AcceptAnswer` 随 Effect 携带的那把）。
+fn decode_payload_with(core: &SharedCore, raw: &str, encrypted: bool, key: Option<&str>) -> Option<(String, String)> {
     let text = if encrypted {
         let (pwd, spwd) = {
             let c = core.lock().ok()?;
@@ -454,9 +459,7 @@ fn decode_payload(core: &SharedCore, raw: &str, encrypted: bool) -> Option<(Stri
         if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
             eprintln!("[rtc] decode_payload: pwd={:?} spec_pwd={:?}", pwd.as_deref().map(|p| p.len()), spwd.as_deref().map(|p| p.len()));
         }
-        let t = pwd
-            .or(spwd)
-            .unwrap_or_default();
+        let t = key.map(str::to_string).or(pwd).or(spwd).unwrap_or_default();
         let r = goptop_net::codec::decode(raw, &t).ok();
         if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
             eprintln!("[rtc] decode_payload: 解码{}", if r.is_some() { "成功" } else { "失败" });

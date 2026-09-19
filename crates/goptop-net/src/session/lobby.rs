@@ -403,7 +403,8 @@ fn accept_challenge_with(s: &mut Session, ctx: &ReduceCtx, from: &str, kind: &st
     // 同源路径 answer 经 BC 送达，不阻塞进局；万一失败仅显示直连错误，棋局仍可下。
     if let Some(ans) = invitee_ans {
         if let Some(tag) = s.inviter_main.clone() {
-            fx.push(Effect::AcceptAnswer { tag, answer: ans, encrypted: true });
+            // 钥匙随 Effect 一起带上：本函数下面就会清 s.pwd（两人满员）
+            fx.push(Effect::AcceptAnswer { tag, answer: ans, encrypted: true, pwd: s.pwd.clone() });
         }
     }
     s.close_all_rtc();
@@ -655,7 +656,7 @@ pub(crate) fn accept_receipt(s: &mut Session, ctx: &ReduceCtx, r: &AnswerIntent)
         return vec![Effect::Notice(Some("本局邀请的直连信令未就绪（可能生成失败），无法受理回执；请取消等待后重新开战".into()), None)];
     };
     // answer 交给 transport 应用；应用结果经 PeerState open（直连建立）或失败提示呈现。
-    let mut fx = vec![Effect::AcceptAnswer { tag, answer: r.rtc_ans.clone(), encrypted: true }];
+    let mut fx = vec![Effect::AcceptAnswer { tag, answer: r.rtc_ans.clone(), encrypted: true, pwd: s.pwd.clone().or_else(|| s.spec_pwd.clone()) }];
     // await 间隙用户可能已取消等待：进入对局状态放 PeerState open 统一处理
     //（对齐 TS：直连建立才切 playing，坏回执保持 waiting 可重试）。
     let k = r.kind.clone().unwrap_or_else(|| s.kind.clone());
@@ -727,7 +728,7 @@ pub(crate) fn accept_spec_receipt(s: &mut Session, ctx: &ReduceCtx, ans: &Answer
     let mut fx = vec![
         Effect::RenamePeer { from: "spec-pending".into(), to: live.clone() },
         // 观众回执的 rtcAns 是明文 answer JSON（与邀请回执同形，单密钥设计）。
-        Effect::AcceptAnswer { tag: live, answer: ans.rtc_ans.clone(), encrypted: false },
+        Effect::AcceptAnswer { tag: live, answer: ans.rtc_ans.clone(), encrypted: false, pwd: None },
     ];
     // 受理即预生成下一份观战 offer（链接自动换新）。
     fx.push(Effect::CreatePeer { tag: "spec-pending".into(), inviter: true, spectator: true });

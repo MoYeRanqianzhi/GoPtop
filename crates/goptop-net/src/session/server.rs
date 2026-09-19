@@ -314,7 +314,7 @@ impl Session {
         }
         let answer = jstr(pl, "answer", "");
         let was_waiting = self.phase == Phase::Waiting && self.role == Role::Inviter;
-        let mut fx = vec![Effect::AcceptAnswer { tag: from.to_string(), answer, encrypted: false }];
+        let mut fx = vec![Effect::AcceptAnswer { tag: from.to_string(), answer, encrypted: false, pwd: None }];
         if was_waiting {
             // 主连接受理完成：进对局、pwd 失效（两人满员）。
             self.phase = Phase::Playing;
