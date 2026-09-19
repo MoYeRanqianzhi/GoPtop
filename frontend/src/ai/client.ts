@@ -1,11 +1,15 @@
 /**
- * ai/client —— AI 分析 Worker 的主线程门面。
+ * ai/client —— AI 分析的门面（**双后端**）。
  *
- * 为什么必须走 Worker：wasm 是单线程的，一次 1 秒的搜索会把主线程整个冻住——
- * 棋盘不动、按钮点不动、连"AI 思考中"的动画都停了（实测五子棋 1000ms 预算在
- * wasm 里就是 1000ms 的同步占用，中间没有任何可让步的点）。引擎侧不做分片，
- * 隔离只能靠线程。
+ * - **Web 端**：引擎跑在 Web Worker 里（`worker.ts`）。wasm 是单线程的，一次
+ *   1 秒搜索中间没有任何可让步的点，不隔离就会把主线程整个冻住。
+ * - **Tauri 系（桌面 / Android）**：引擎是原生 Rust，经 `invoke("ai_analyze")`
+ *   调用，Rust 侧把它派到 blocking 线程池——原生的隔离靠线程池，不需要 Worker，
+ *   也不受 wasm 的单线程限制（原生编译还能吃上 noru 的 NEON/AVX2，wasm 只有标量）。
+ *
+ * 两个后端的对外行为完全一致：Promise 化、失败可捕获。
  */
+import { isTauri } from "../net/links";
 import type { AnalyzeRequest, AnalyzeResult, WorkerRequest, WorkerResponse } from "./types";
 
 type Pending = {
@@ -17,6 +21,7 @@ export class AiClient {
   private worker: Worker | null = null;
   private nextId = 1;
   private pending = new Map<number, Pending>();
+  private readonly native = isTauri();
 
   /** 懒建 Worker：只有真要分析时才付 wasm 加载与 1.7MB 权重解压的代价。 */
   private ensureWorker(): Worker {
@@ -56,13 +61,23 @@ export class AiClient {
     });
   }
 
-  analyze(req: AnalyzeRequest): Promise<AnalyzeResult> {
+  async analyze(req: AnalyzeRequest): Promise<AnalyzeResult> {
+    if (this.native) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const raw = await invoke<string>("ai_analyze", { reqJson: JSON.stringify(req) });
+      return JSON.parse(raw) as AnalyzeResult;
+    }
     return this.send({ kind: "analyze", req });
   }
 
   /** 预热权重（解压约 56ms）。不调也不出错，只是第一步棋会慢一点。 */
-  warmup(): Promise<void> {
-    return this.send({ kind: "warmup" }).then(() => undefined);
+  async warmup(): Promise<void> {
+    if (this.native) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("ai_warmup");
+      return;
+    }
+    await this.send({ kind: "warmup" });
   }
 
   dispose() {

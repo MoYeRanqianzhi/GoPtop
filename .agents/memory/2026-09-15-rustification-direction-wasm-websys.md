@@ -1,5 +1,12 @@
 # 2026-09-15 · 传输层 Rust 化方向拍板（wasm + web-sys）
 
+> ⚠️ **2026-09-19 订正**：本条**把结论用错了地方**。「四端全在 WebView」只说明
+> **Web 端必须编 wasm**，不说明**所有端都该跑 wasm**——桌面与 Android 有完整的
+> Rust native 宿主，业务逻辑却绕道 WebView 执行。现行口径见
+> [[2026-09-19-wasm-is-web-only-native-platforms-link-rust]]：
+> **核心逻辑是 Rust crate，wasm 只是 Web 端的编译目标**。
+> 下文的**推理仍有效**（Web 端确实只能 wasm，且分层划分是对的），**结论已订正**。
+
 ## 决策（用户指令：「完整进行 Rust 化，以上全部需要完成」）
 
 - **方向：wasm-bindgen + web-sys**，否决「Tauri 原生桥接」。

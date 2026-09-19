@@ -68,31 +68,44 @@ frontend/src/
 
 ## AI 分析（人机对战 + 实时胜率，2026-09-19）
 
-**分层**：`crates/goptop-ai` 是纯计算层（不碰 IO），编为**独立 wasm**——与规则引擎分开，
-因为它含 1.7MB 内嵌 NNUE 权重，且只在需要分析时才加载。
+**分层**：`crates/goptop-ai` 是纯计算层（不碰 IO）。**各端用各自最自然的方式接入**：
 
-- **入口**：`goptop-ai/src/lib.rs` 的 `analyze(&AnalyzeRequest) -> AnalyzeResult`；
-  wasm 边界是 `analyze_json(req_json)`（JSON 进 JSON 出，与 core 的 wasm 同款约定）。
-  `AnalyzeRequest.state` 是**完整 `GameState` 的 JSON**，由 Rust 侧序列化——
-  本地页用 `WasmGame.state_json()`，P2P/观战用 `WasmSession.state_json()`。
-  **前端不许手工拼**：围棋的劫点/提子数只在引擎里，拼错不报错，只表现为 AI 下怪棋。
+| 端 | 规则引擎 / AI 引擎 | 为什么 |
+|---|---|---|
+| Web | wasm（`goptop_ai_bg.wasm`，2.6MB 含权重） | 浏览器跑不了原生代码，wasm 是唯一选择 |
+| 桌面 / Android | **原生 Rust**（`src-tauri` 直接链接 crate，经 Tauri command） | 宿主本来就是 native，绕道 wasm 只会丢 SIMD 又多一层边界 |
+| 鸿蒙 | 暂仍走 ArkWeb + wasm | 上 cargo-ohos + NAPI 是待办 |
+
+> **口径**：wasm 只是 **Web 端的编译目标**，不是全平台的实现方式。详见
+> `.agents/memory/2026-09-19-wasm-is-web-only-native-platforms-link-rust.md`。
+
+- **契约层**：`goptop-core/src/json_api.rs` 是**平台无关**的 JSON 契约单一真源，
+  wasm 的 `WasmGame` 与 Tauri 的 `game_*` command 都只是它的薄封装。**契约若分叉成
+  两份，行为会静默不同**——不报错，只是同一份前端代码在两个宿主上表现不一致。
+- **入口**：`goptop-ai/src/lib.rs` 的 `analyze(&AnalyzeRequest) -> AnalyzeResult`。
+  入参的 `state` 是**完整 `GameState` 的 JSON**，由 Rust 侧序列化（本地页
+  `state_json()` command、P2P/观战 `WasmSession.state_json()`）。**前端不许手工拼**：
+  围棋的劫点/提子数只在引擎里，拼错不报错，只表现为 AI 下怪棋。
 - **引擎**：五子棋走 `gomoku.rs`（figrid-board 的 α-β + NNUE；补丁原因见
-  `crates/goptop-ai/vendor/README.md`）；围棋走 `go.rs`（自建 MCTS + RAVE，playout 由
-  go_game_board 提供）。
-- **主线程隔离**：`frontend/src/ai/worker.ts` 是引擎唯一的宿主，`client.ts` 是主线程门面
-  （Promise 化 + 全局单例）。**必须走 Worker**：wasm 单线程，一次 1 秒搜索会把主线程整个冻住，
-  中间没有可让步的点。
-- **胜率**：`useWinRate` 每手触发一次（`moveCount` 变化即触发；旧请求用 cancelled 标记丢弃，
-  否则悔棋后会看到上一手的胜率盖在当前局面上）。五子棋用 `odds::score_to_win_rate`
-  （logistic，尺度与标定表见 odds.rs 文件头）；围棋直接用 MCTS 根胜率。
-  本地双人/观战没有「我方」，统一按黑方视角，标签也照实写「黑/白」而不是「我/对手」。
-- **UI**：`components/WinRateBar.tsx`（红蓝单挑线）+ `WinRateChart.tsx`（走势图），挂在
-  `BoardPanel` 底部卡：宽屏是「规则」＋「对局/胜率」两张，窄屏（容器 ≤520px）是 `.bp-swap`
-  三态切换。**宽屏与窄屏的 tab 是两个独立 state**——共用一个会让「窄屏切到规则 → 窗口变宽」
-  后第二张卡也显示规则，与固定的规则卡重复。
-- **降级**：引擎加载失败或 wasm panic 时 `useWinRate` 走 error 分支（隐藏胜率），AiPage 显示
-  「AI 引擎不可用」并保留悔棋/重开——绝不让界面卡在「思考中」。
-- 改 goptop-ai 后：`bash scripts/build-ai-wasm.sh` 并提交 frontend/src/wasm-ai/ 产物。
+  `crates/goptop-ai/vendor/README.md`）；围棋走 `go.rs`（自建 MCTS + RAVE，
+  根节点用 gamma 先验做 PUCT）。
+- **不卡界面**各有各的机制：Web 端靠 **Web Worker**（wasm 单线程，一次 1 秒搜索
+  中间没有可让步的点）；原生端靠 **`spawn_blocking` 线程池**（同步 command 会
+  占住 Tauri 主线程把窗口卡死）。
+- **胜率**：`useWinRate` 每手触发一次（`moveCount` 变化即触发；旧请求用 cancelled
+  标记丢弃，否则悔棋后会看到上一手的胜率盖在当前局面上）。五子棋用
+  `odds::score_to_win_rate`（logistic，尺度与标定表见 odds.rs 文件头）；
+  围棋直接用 MCTS 根胜率。本地双人/观战没有「我方」，统一按黑方视角，标签也照实
+  写「黑/白」而不是「我/对手」。
+- **UI**：`components/WinRateBar.tsx`（红蓝单挑线）+ `WinRateChart.tsx`（滑动窗口
+  走势图，初始态留空），挂在 `BoardPanel` 底部卡：宽屏是「规则」＋「对局/胜率」两张，
+  窄屏（容器 ≤520px）是 `.bp-swap` 三态切换。**宽屏与窄屏的 tab 是两个独立 state**
+  ——共用一个会让「窄屏切到规则 → 窗口变宽」后第二张卡也显示规则，与固定的规则卡重复。
+  **三张卡必须等高**（否则切换会改棋盘可用高度，实测跳 50px）。
+- **降级**：引擎加载失败或 panic 时 `useWinRate` 走 error 分支（隐藏胜率），AiPage
+  显示「AI 引擎不可用」并保留悔棋/重开——绝不让界面卡在「思考中」。
+- 改 goptop-ai 后：Web 端要 `bash scripts/build-ai-wasm.sh` 并提交
+  `frontend/src/wasm-ai/` 产物；原生端直接重新构建壳即可（同一份 crate 源码）。
 
 ## 状态与 ref 双轨
 

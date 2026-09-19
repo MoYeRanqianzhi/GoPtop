@@ -1,13 +1,23 @@
-//! GoPtop Tauri backend — 窗口与命令的粘合层。
+//! GoPtop Tauri backend — 窗口与命令的粘合层，外加**核心逻辑的原生宿主**。
 //!
-//! - `commands` 暴露给前端的 `invoke` 接口（当前只有 `greet` 模板探针）。
-//! - `p2p` 为预留空模块：早期 iroh 路线已弃，现行 P2P 在 crates/goptop-net + crates/goptop-transport
-//!   （wasm），前端 TS 只做 UI 绑定。
-//! - `store` 平台本地存储：桌面 `~/.goptop/store.json`，移动端平台私有数据目录
+//! - `rules`：规则引擎。桌面与 Android 直接跑 native Rust，契约逻辑与 Web 端的
+//!   wasm 绑定共用 `goptop_core::json_api` 同一份实现。
+//! - `ai`：AI 引擎（五子棋 NNUE + 围棋 MCTS）。同样原生执行——noru 在 wasm 上
+//!   只有标量路径，原生能吃 NEON/AVX2。
+//! - `store`：平台本地存储。桌面 `~/.goptop/store.json`，移动端平台私有数据目录
 //!   （Web 端不走这里，前端门面直接用 localStorage）。
+//! - `titlebar`：Windows Snap Layouts 透明覆盖层。
+//! - `p2p` 为预留空模块：早期 iroh 路线已弃。
+//!
+//! **架构口径（2026-09-19 修正）**：`wasm 只是 Web 端的编译目标`——浏览器跑不了
+//! 原生代码，所以 Web 必须编 wasm。但桌面/Android 有完整的 Rust native 宿主
+//! （`goptop.exe` / `libgoptop_lib.so`），没有理由绕道 WebView 去跑 wasm：
+//! 那既丢 SIMD，又多一层无谓的边界。原生平台一律直接链接 crate。
 
+mod ai;
 mod commands;
 mod p2p;
+mod rules;
 mod store;
 mod titlebar;
 
@@ -16,6 +26,7 @@ mod titlebar;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(rules::Games::default())
         .setup(|app| {
             titlebar::init(app.handle().clone());
             Ok(())
@@ -25,7 +36,21 @@ pub fn run() {
             titlebar::snap_overlay_set_rect,
             store::store_load,
             store::store_set,
-            store::store_remove
+            store::store_remove,
+            // —— 规则引擎（原生） ——
+            rules::game_new,
+            rules::game_drop,
+            rules::game_state_json,
+            rules::game_place,
+            rules::game_pass,
+            rules::game_undo,
+            rules::game_reset,
+            rules::game_score,
+            rules::game_adopt,
+            rules::game_board_size,
+            // —— AI 引擎（原生） ——
+            ai::ai_analyze,
+            ai::ai_warmup
         ])
         .run(tauri::generate_context!())
         .expect("error while running GoPtop tauri application");

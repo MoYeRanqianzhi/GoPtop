@@ -6,14 +6,15 @@
  * 提子、胜负判定一律由 Rust 规则真源裁决。这样 AI 与真人走的是同一条路径，
  * 不存在"AI 能下出真人下不了的棋"这类分叉。
  *
- * 搜索在 Web Worker 里跑（见 ai/client），主线程只等一个 Promise，界面全程可交互。
+ * 引擎位置按端而定（见 game/rules.ts 与 ai/client.ts）：Web 端走 wasm + Worker，
+ * 桌面/Android 走原生 Rust + invoke；两条路的"不卡界面"由不同机制保证。
  */
 import { useEffect, useRef, useState } from "react";
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 import { emptyBoard } from "../game/board";
 import { RulesEngine } from "../game/rules";
-import { Settings } from "lucide-react";
 import { sharedAiClient, useWinRate } from "../ai/useWinRate";
+import { Settings } from "lucide-react";
 import { BoardPanel } from "./components";
 
 /** 难度档位 → 每步思考预算（毫秒）。实测五子棋 1000ms 到 depth 7；围棋 1000ms 约 3 万 playout。 */
@@ -50,9 +51,15 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
   const humanColor = other(aiColor);
   const budgetMs = LEVELS.find((l) => l.key === levelKey)?.budgetMs ?? 1000;
 
+  // 预热引擎：Web 端是 Worker 启动时自己预热，原生端要显式叫一次
+  // （解压 + 反序列化 1.7MB NNUE 权重，约 56ms），否则第一步棋白等这一下。
+  useEffect(() => {
+    void sharedAiClient().warmup().catch(() => { /* 预热失败不影响功能，第一步棋慢点而已 */ });
+  }, []);
+
   // 顶部切换规则/尺寸时重建引擎并重置（与本地页同款）
   useEffect(() => {
-    rulesRef.current.newGame(kind, size);
+    void rulesRef.current.newGame(kind, size);
     setBoard(emptyBoard(size));
     setToMove("black");
     setWinner(null);
@@ -64,7 +71,7 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
 
   /** 重置到"轮到人类"的初始局面。 */
   function resetBoard(nextAi: StoneColor = aiColor) {
-    rulesRef.current.reset();
+    void rulesRef.current.reset();
     setBoard(emptyBoard(size));
     // 人类执黑时黑先；AI 执黑时黑先但那一步该 AI 走，effect 会自动接手
     setToMove("black");
@@ -76,11 +83,11 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
     setAiColor(nextAi);
   }
 
-  function place(c: Coord) {
+  async function place(c: Coord) {
     if (winner || thinking) return;
     if (toMove !== humanColor) return; // 轮到 AI 时人类点不动棋盘
     if (board[c.y][c.x] !== "empty") return;
-    const res = rulesRef.current.place(c.x, c.y);
+    const res = await rulesRef.current.place(c.x, c.y);
     if (!res?.ok) return;
     setBoard(res.board);
     setLastMove(c);
@@ -90,13 +97,13 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
   }
 
   /** 撤销一个回合：撤到重新轮到人类为止（否则 AI 会立刻把同一手补回来，悔棋等于没悔）。 */
-  function undo() {
+  async function undo() {
     if (thinking) return;
-    let res = rulesRef.current.undo();
+    let res = await rulesRef.current.undo();
     if (!res?.ok) return;
     let h = history.slice(0, -1);
     if (res.toMove === aiColor && h.length > 0) {
-      const res2 = rulesRef.current.undo();
+      const res2 = await rulesRef.current.undo();
       if (res2?.ok) {
         res = res2;
         h = h.slice(0, -1);
@@ -113,13 +120,21 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
   // AI 走子：轮到 AI 且未终局时触发一次搜索
   useEffect(() => {
     if (winner || toMove !== aiColor) return;
-    const state = rulesRef.current.stateJson();
-    if (!state) return;
     let cancelled = false;
     setThinking(true);
-    sharedAiClient()
-      .analyze({ state, myColor: aiColorName(aiColor), budgetMs, wantMove: true })
-      .then((r) => {
+    void (async () => {
+      try {
+        const state = await rulesRef.current.stateJson();
+        if (cancelled || !state) {
+          if (!cancelled) setThinking(false);
+          return;
+        }
+        const r = await sharedAiClient().analyze({
+          state,
+          myColor: aiColorName(aiColor),
+          budgetMs,
+          wantMove: true,
+        });
         if (cancelled) return;
         if (!r.bestMove) {
           // 无着可下（引擎认为终局）——不静默卡住，交给用户重开
@@ -127,7 +142,8 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
           return;
         }
         const [x, y] = r.bestMove;
-        const res = rulesRef.current.place(x, y);
+        const res = await rulesRef.current.place(x, y);
+        if (cancelled) return;
         if (!res?.ok) {
           // 引擎侧已有合法性兜底，走到这里说明兜底也失效了——必须留痕，
           // 否则表现为"AI 不动了"，看日志才知道原因
@@ -140,15 +156,14 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
         if (res.winner) setWinner(res.winner);
         else setToMove(res.toMove);
         setAiError(null);
-      })
-      .catch((e: unknown) => {
+      } catch (e: unknown) {
         if (cancelled) return;
         console.error("[ai] 分析失败", e);
         setAiError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setThinking(false);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -206,7 +221,7 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
       />
 
       {/* 设置面板：复用聊天弹窗的遮罩与卡片样式（fixed 定位，不占 play-stack 布局）。
-          难点/先后手改完即生效；换边与重开会重置棋盘，所以顺手收起面板。 */}
+          难度/先后手改完即生效；换边与重开会重置棋盘，所以顺手收起面板。 */}
       {panelOpen && (
         <div className="chat-modal-bg" onClick={() => setPanelOpen(false)}>
           <div
@@ -254,7 +269,7 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
                 className="brutal-btn brutal-btn--sm"
                 style={{ flex: 1 }}
                 disabled={history.length === 0 || !!winner || thinking}
-                onClick={() => { undo(); setPanelOpen(false); }}
+                onClick={() => { void undo(); setPanelOpen(false); }}
                 title={history.length === 0 ? "还没有可悔的棋" : "退回一个回合（你的一手 + AI 的一手）"}
               >
                 悔棋

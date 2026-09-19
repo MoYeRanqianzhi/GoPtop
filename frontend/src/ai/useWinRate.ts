@@ -42,9 +42,11 @@ export type WinRateState = {
 export function useWinRate(opts: {
   /**
    * 取当前局面的 JSON（由规则引擎的 state_json() 给出）。
+   * **返回 Promise**：原生后端（Tauri/Android）的局面要经 IPC 取回，
+   * Web 端的 wasm 调用虽然同步，但门面统一成 async 才能只写一份代码。
    * 只在 moveCount 变化时调用，不需要保证引用稳定。
    */
-  getState: () => unknown | null;
+  getState: () => Promise<unknown | null>;
   myColor: AiColor;
   /** 手数：变化即触发一次分析；归零则清空走势（重开）。 */
   moveCount: number;
@@ -74,15 +76,24 @@ export function useWinRate(opts: {
       return;
     }
     if (!opts.enabled) return;
-    const state = getStateRef.current();
-    if (!state) return;
 
     let cancelled = false;
     const move = opts.moveCount;
     setThinking(true);
-    sharedAiClient()
-      .analyze({ state, myColor: opts.myColor, budgetMs: opts.budgetMs, wantMove: false })
-      .then((r) => {
+    // 取局面是异步的（原生后端走 IPC），所以整条链放进 IIFE，取消标记贯穿始终
+    void (async () => {
+      try {
+        const state = await getStateRef.current();
+        if (cancelled || !state) {
+          if (!cancelled) setThinking(false);
+          return;
+        }
+        const r = await sharedAiClient().analyze({
+          state,
+          myColor: opts.myColor,
+          budgetMs: opts.budgetMs,
+          wantMove: false,
+        });
         if (cancelled) return;
         setWinRate(r.winRate);
         // 按手数归位：同手数重算（悔棋后重下）覆盖旧值，避免曲线出现重复点
@@ -93,14 +104,13 @@ export function useWinRate(opts: {
           return next;
         });
         setError(null);
-      })
-      .catch((e: unknown) => {
+      } catch (e: unknown) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setThinking(false);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };

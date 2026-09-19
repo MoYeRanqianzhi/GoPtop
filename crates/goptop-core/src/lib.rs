@@ -8,19 +8,25 @@
 //! - `protocol` — 早期参考实现，**已被 `crates/goptop-net/src/protocol.rs` 取代**
 //!   （GameMsg/MsgKind 线格式的唯一真源在那里，字段名对齐历史 TS 线格式；
 //!   本模块除本文件的 re-export 外无消费者）。
-//! - `wasm`   — 仅在 `feature = "wasm"` 时编译，为前端暴露 `WasmGame` 绑定。
-//!   **已接线（2026-09-13 起）**：Web 与 Tauri WebView 的所有落子/悔棋判定都
-//!   经 `frontend/src/game/rules.ts` 走本模块；改规则后重跑 scripts/build-wasm.sh
+//! - `wasm`   — 仅在 `feature = "wasm"` 时编译，为**浏览器**暴露 `WasmGame` 绑定。
+//!   **已接线（2026-09-13 起）**：Web 端的落子/悔棋判定经
+//!   `frontend/src/game/rules.ts` 走本模块；改规则后重跑 scripts/build-wasm.sh
 //!   并提交 frontend/src/wasm/ 产物。
+//! - `json_api` — **平台无关**的 JSON 契约层，两个宿主共用：Web 端的 `wasm.rs`
+//!   与桌面/Android 端的 `src-tauri` Tauri command 都只是它的薄封装。契约必须
+//!   逐字一致，否则同一份前端代码会在两个宿主上静默分叉。
 //!
 //! 设计约束：
 //! - 本 crate 不依赖任何平台/网络/前端库，可在原生、Tauri、WASM 三端复用。
 //! - 五子棋与围棋的棋盘/棋子在数据层完全一致，差异仅在规则层。
+//! - **wasm 只是 Web 端的编译目标**（浏览器跑不了原生代码），不是全平台的
+//!   实现方式。原生平台（桌面/Android/鸿蒙）应直接链接本 crate。
 
 pub mod board;
 pub mod game;
 pub mod go;
 pub mod gomoku;
+pub mod json_api;
 pub mod protocol;
 
 #[cfg(feature = "wasm")]

@@ -384,8 +384,9 @@ export function useGameSession() {
     mode, viewedUserId, viewedPeer, isSelfPage,
     /** AI 分析输入：当前局面由 Rust 引擎序列化。
      *  P2P/观战页没有本地规则引擎，局面归 WasmSession 所有；围棋的劫点与提子数
-     *  只在引擎内部，从 TS 侧的状态还原不出来。 */
-    stateJson: () => {
+     *  只在引擎内部，从 TS 侧的状态还原不出来。
+     *  返回 Promise 是为了与 game/rules.ts 的门面统一（原生端局面经 IPC 取回）。 */
+    stateJson: async () => {
       try {
         return session ? (JSON.parse(session.state_json()) as unknown) : null;
       } catch {

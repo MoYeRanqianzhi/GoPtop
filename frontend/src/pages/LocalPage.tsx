@@ -27,7 +27,7 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
 
   // 顶部切换规则/尺寸时重建 Rust 引擎并重置棋盘
   useEffect(() => {
-    rulesRef.current.newGame(kind, size);
+    void rulesRef.current.newGame(kind, size);
     setBoard(emptyBoard(size));
     setToMove("black");
     setWinner(null);
@@ -37,7 +37,7 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
   }, [kind, size]);
 
   function resetBoard() {
-    rulesRef.current.reset();
+    void rulesRef.current.reset();
     setBoard(emptyBoard(size));
     setToMove("black");
     setWinner(null);
@@ -46,11 +46,11 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
     setHover(null);
   }
 
-  function place(c: Coord) {
+  async function place(c: Coord) {
     if (winner) return;
     if (board[c.y][c.x] !== "empty") return;
-    // 规则判定与棋盘更新都在 Rust（wasm）：权威棋盘直接上屏（围棋提子生效）
-    const res = rulesRef.current.place(c.x, c.y);
+    // 规则判定与棋盘更新都在 Rust（wasm 或原生，见 game/rules.ts）：权威棋盘直接上屏
+    const res = await rulesRef.current.place(c.x, c.y);
     if (!res?.ok) return;
     setBoard(res.board);
     setLastMove(c);
@@ -59,10 +59,10 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
     else setToMove(res.toMove);
   }
 
-  function undo() {
+  async function undo() {
     if (history.length === 0 || winner) return;
     // Rust 侧弹出手并重放（围棋提子一并还原）
-    const res = rulesRef.current.undo();
+    const res = await rulesRef.current.undo();
     if (!res?.ok) return;
     setBoard(res.board);
     setHistory((h) => h.slice(0, -1));
