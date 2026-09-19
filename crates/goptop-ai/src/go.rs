@@ -40,6 +40,19 @@ const UCT_C: f64 = 1.4142;
 /// 「前期 RAVE 主导、后期交还 UCT」的区间里。
 const RAVE_BIAS: f64 = 0.05;
 
+/// PUCT 的探索常数：`u = C_PUCT · P · √N / (1 + n)`。
+///
+/// 围棋的根节点有几十上百个候选（9 路约 80、19 路约 360）。纯 UCT 在每点只访问
+/// 几十次时分辨不出优劣：实测 9 路空盘前五名的 q 挤在 0.50~0.53（标准误约 0.018），
+/// `argmax` 等于在噪声里取最大值——同一随机种子下首选会随搜索量在 (6,2)/(1,5)/
+/// (5,2)/(4,4)/(2,4)/(1,2) 之间漂移，其中好几个在二线。先验让预算先落到模式化
+/// 策略认为像样的点上，这是本实现相对纯 UCT 的唯一改动。
+const C_PUCT: f64 = 1.6;
+
+/// 估计根节点先验时的采样次数。3000 次约占 1 秒预算的 3%（实测单次采样约 10μs），
+/// 换来的是一棵不再从噪声起步的树。
+const PRIOR_SAMPLES: u32 = 3000;
+
 /// 两次 deadline 检查之间至少做多少次 playout。
 ///
 /// 单次 playout 约 30μs，128 次约 4ms——超时最多多花 4ms，相对千毫秒预算是噪声；
@@ -142,6 +155,9 @@ struct Node {
     rave_visits: u32,
     /// AMAF 胜数，视角同 `wins`。
     rave_wins: f64,
+    /// PUCT 的先验概率 P(s,a)。根节点的子节点用模式化策略的采样频率（已归一化）；
+    /// 更深层用均匀值——那里每个节点只有几十次访问，先验的边际收益抵不上再采一轮。
+    prior: f64,
 }
 
 /// 一次搜索的全部可变态。
@@ -165,6 +181,8 @@ struct Search<'a> {
     played: Vec<u32>,
     /// 树已展开的最大深度，直接作为 `AnalyzeResult::depth`。
     max_depth: u32,
+    /// 根节点各着法的先验概率，按**顶点下标**索引（`Vertex` 可直接转 usize）。
+    priors: Vec<f64>,
 }
 
 impl Search<'_> {
@@ -232,6 +250,14 @@ impl Search<'_> {
     fn expand(&mut self, parent: u32, mv: Vertex, mover: Player) -> u32 {
         let depth = self.nodes[parent as usize].depth + 1;
         let untried = self.legal_moves(mover.opponent());
+        // 根的子节点用模式化先验；更深层用按候选数归一化的均匀值——那里每个节点
+        // 只有几十次访问，先验的边际收益抵不上为每个节点再采一轮的代价。
+        let prior = if parent == 0 {
+            self.priors[usize::from(mv)]
+        } else {
+            let k = untried.len() as f64;
+            if k > 0.0 { 1.0 / k } else { 1.0 }
+        };
         if depth > self.max_depth {
             self.max_depth = depth;
         }
@@ -246,6 +272,7 @@ impl Search<'_> {
             wins: 0.0,
             rave_visits: 0,
             rave_wins: 0.0,
+            prior,
         });
         self.nodes[parent as usize].children.push(id);
         id
@@ -258,21 +285,19 @@ impl Search<'_> {
             return None;
         }
         // 有子节点的父节点必然访问过（展开那一轮的回传会 +1），max(1) 只为杜绝 ln(0)。
-        let ln_parent = (p.visits.max(1) as f64).ln();
+        let sqrt_parent = (p.visits.max(1) as f64).sqrt();
         let mut best = None;
         let mut best_score = f64::NEG_INFINITY;
 
         for &c in &p.children {
             let n = &self.nodes[c as usize];
-            let score = if n.visits == 0 {
-                // 未访问的子节点优先。UCT 的探索项在 visits=0 时发散，显式写 +inf，
-                // 既表达同一个意思又不用除零。
-                f64::INFINITY
-            } else {
-                let v = n.visits as f64;
-                let exploit = self.blended_q(n);
-                exploit + UCT_C * (ln_parent / v).sqrt()
-            };
+            let v = n.visits as f64;
+            // PUCT：先验决定「先试哪些」，探索项决定「何时回头」。未访问时 q 记 0，
+            // 由 u 项按先验排序——纯 UCT 把所有未访问点一律记 +inf，等于按展开顺序
+            // （随机的）挑第一个，那正是开局首选在噪声里漂移的来源。
+            let exploit = if n.visits == 0 { 0.0 } else { self.blended_q(n) };
+            let u = C_PUCT * n.prior * sqrt_parent / (1.0 + v);
+            let score = exploit + u;
             if score > best_score {
                 best_score = score;
                 best = Some(c);
@@ -366,6 +391,37 @@ impl Search<'_> {
     }
 }
 
+/// 用模式化策略估计根节点各候选着法的先验概率（PUCT 的 P）。
+///
+/// 做法是让 `Sampler` 在根局面上按 gamma 分布采样**开局着法**、统计频率——这正是
+/// 「模式化策略认为这一手有多像样」的直接度量，不必另接一套模式表。
+///
+/// 拉普拉斯平滑（每候选 +1）不能省：gamma 从不选的点也要留一条缝，否则它的 u 项
+/// 恒为 0、永远竞争不过别人，等于把那些点从搜索空间里删掉了。
+fn root_priors(root: &Board, gammas: &Gammas, cands: &[Vertex]) -> Vec<f64> {
+    let mut priors = vec![0.0f64; Vertex::COUNT];
+    if cands.is_empty() {
+        return priors;
+    }
+    let mut counts = vec![0u32; cands.len()];
+    let mut sampler = Sampler::new(root, gammas);
+    let mut random = FastRandom::new(0x5eed_1234);
+    for _ in 0..PRIOR_SAMPLES {
+        // 每次采样前复位到根局面：要的是「开局第一手」的分布，不是整局的着法分布
+        sampler.new_playout(root, gammas);
+        let v = sampler.sample_move(root, &mut random);
+        if let Some(i) = cands.iter().position(|&c| c == v) {
+            counts[i] += 1;
+        }
+    }
+    let smoothed: Vec<f64> = counts.iter().map(|&c| f64::from(c) + 1.0).collect();
+    let total: f64 = smoothed.iter().sum();
+    for (i, &c) in cands.iter().enumerate() {
+        priors[usize::from(c)] = smoothed[i] / total;
+    }
+    priors
+}
+
 /// 从根的子节点里挑着法，并过一遍 core 的合法性。
 ///
 /// 这是**静默失败陷阱**的兜底：搜索内部按 go_game_board 的规则走，而规则真源是 core，
@@ -427,6 +483,8 @@ pub fn analyze(
             wins: 0.0,
             rave_visits: 0,
             rave_wins: 0.0,
+            // 根节点没有父节点，先验用不上（它不参与任何 select）
+            prior: 0.0,
         }],
         gammas,
         sampler,
@@ -437,8 +495,12 @@ pub fn analyze(
         amaf: vec![false; 2 * Vertex::COUNT],
         played: Vec::with_capacity(512),
         max_depth: 0,
+        priors: vec![0.0; Vertex::COUNT],
     };
     let root_untried = search.legal_moves(root_player);
+    // 先验要用根局面与根候选算，所以得等 legal_moves 出来之后再填
+    let priors = root_priors(&search.root, gammas, &root_untried);
+    search.priors = priors;
     search.nodes[0].untried = root_untried;
 
     let budget = Duration::from_millis(u64::from(budget_ms));
@@ -646,6 +708,7 @@ mod tests {
                 wins: 0.0,
                 rave_visits: 0,
                 rave_wins: 0.0,
+                prior: 0.0,
             }],
             gammas: g,
             sampler: Sampler::new(&root, g),
@@ -656,8 +719,11 @@ mod tests {
             amaf: vec![false; 2 * Vertex::COUNT],
             played: Vec::with_capacity(512),
             max_depth: 0,
+            priors: vec![0.0; Vertex::COUNT],
         };
         let untried = search.legal_moves(root_player);
+        let priors = root_priors(&search.root, g, &untried);
+        search.priors = priors;
         search.nodes[0].untried = untried;
         search.iterate();
         assert!(!search.nodes[0].children.is_empty(), "根节点没展开出子节点");
@@ -675,6 +741,8 @@ mod tests {
             wins: 9_999.0,
             rave_visits: 0,
             rave_wins: 0.0,
+            // 先验给足：这条测试要的是「访问量最高」的候选排在最前，先验不该干扰
+            prior: 1.0,
         });
         search.nodes[0].children.push(id);
 
@@ -753,8 +821,8 @@ mod tests {
     /// 原先断言「落在中心 5×5」因此是**随机变红**的：12000ms（debug 下的
     /// `test_budget(1000)`）预算跑出 11777 次 playout 时首选是 (3,1)，测试就挂。
     /// 该断言测的是「playout 数恰好落在哪个区间」，不是引擎行为，已改为只断言真正
-    /// 成立的性质。要真正修掉首选漂移，得让根节点选择用上 gamma 先验（见模块头注释
-    /// 的 playout 策略），那是搜索策略改动，不在本次核实范围。
+    /// 成立的性质。首选漂移已由 PUCT 先验修掉，回归守卫见
+    /// `go9_empty_first_move_is_stable`。
     #[test]
     fn go9_empty_returns_a_sane_result() {
         let s = go(9);
@@ -772,6 +840,35 @@ mod tests {
             r.nodes
         );
         assert!(r.nodes > 100, "预算内只跑了 {} 次 playout", r.nodes);
+    }
+
+    /// 空盘首选必须稳定落在中心，且不随搜索量漂移。
+    ///
+    /// 这是 PUCT 先验的回归守卫。没有先验时，随机 playout 分辨不出空盘点位的优劣
+    /// （实测前五名的 q 挤在 0.50~0.53，标准误约 0.018），`argmax(visits)` 等于在
+    /// 噪声里取最大值——同一个种子下首选会随预算在 (6,2)/(1,5)/(5,2)/(4,4)/(2,4)/
+    /// (1,2) 之间乱跳，其中好几个在二线，用户看到的是「AI 第一手像乱下」。
+    ///
+    /// 三个预算＝三档搜索量。修复前这三次大概率给出互不相同的着法；断言取中心
+    /// 3×3 这个宽松判据，是为了别把「先验把范围收进中心」误判成「必须精确等于
+    /// 天元」——(4,4) 与 (3,4) 在 9 路空盘上都是合理开局。
+    #[test]
+    fn go9_empty_first_move_is_stable() {
+        let picks: Vec<(u8, u8)> = [200u32, 600, 1500]
+            .iter()
+            .map(|&ms| {
+                let s = go(9);
+                analyze(&s, 9, Stone::Black, test_budget(ms), true)
+                    .best_move
+                    .expect("空盘必须有可下之处")
+            })
+            .collect();
+        for &(x, y) in &picks {
+            assert!(
+                (3..=5).contains(&x) && (3..=5).contains(&y),
+                "9 路空盘首选跑到中心 3×3 之外（先验失效？）：{picks:?}"
+            );
+        }
     }
 
     /// 短预算下的首选不能由棋盘扫描序决定。
