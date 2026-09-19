@@ -21,8 +21,12 @@
       - **桌面壳**（Tauri，原生 Rust）：`ai.js cdp:9222` 9/9、`stress.js cdp:9222 120` 8/8。
       - **鸿蒙**（NAPI 原生 Rust）：`ohos-native-probe.js` 11/11、`ai.js cdp:9444` 9/9、
         `stress.js cdp:9444 120` 8/8（120 手，堆 11→11MB）。
-      - **安卓**：未做（宿主是同为 Tauri 的原生 Rust，逻辑面与桌面壳同一条代码路径；
-        本轮没跑模拟器/真机）。
+      - **安卓**：**未完成**。宿主是同为 Tauri 的原生 Rust，逻辑面与桌面壳走同一条
+        代码路径（桌面壳已验），但安卓特有的「`__TAURI_INTERNALS__` 不在 document-start
+        注入」会影响 `pickBackend()` 的判定时机，**必须真机/模拟器验一次**。
+        本轮尝试过：AVD `goptop_test` 能起来，但 `tauri android build` 与模拟器同时跑
+        把系统内存压到临界，Claude Code 回收了后台任务（构建未完成、APK 仍是 9-19 的旧包）。
+        重试前先关掉其它模拟器、并给足内存。
 - 遗留（本轮未动）：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死在 PUCT 改动之后，
   注释还在描述旧算法；删它要连带重建 wasm 产物与三端壳的 dist，单独立一轮更划算。
 
