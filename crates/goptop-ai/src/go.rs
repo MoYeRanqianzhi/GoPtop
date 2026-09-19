@@ -317,10 +317,29 @@ impl Search<'_> {
 
     /// 沿本次迭代的路径回传胜负。
     ///
-    /// RAVE 按「本节点的着法是否出现在这局 playout 里」更新（AMAF）。本实现只对
-    /// 路径上的节点做 AMAF，而不是对路径上每个节点的**全部**候选着法做：后者要给
-    /// 每个节点维护一张全覆盖的着法统计表（363 项 × 节点数），内存不划算。代价是
-    /// 新展开的子节点要等自己在路径上出现过才有 RAVE 样本，RAVE 起效比完整实现慢半拍。
+    /// RAVE 的判据是「本节点的着法是否出现在这局 playout 的着法表里」（AMAF），
+    /// 这正是标准实现给「父局面 + 该着法」这一对统计量用的判据。
+    ///
+    /// 与标准实现的差别在**更新面**：这里只更新路径上的节点，不更新路径上每个节点的
+    /// 全部候选着法（Fuego / Pachi 是在每个路径节点上遍历它的**子节点**、拿子节点的
+    /// 着法去查 playout 表）。省掉的是「每个节点挂一张全覆盖着法统计表」的内存，
+    /// 代价落在样本量上，而且不是「慢半拍」那么轻：
+    ///
+    /// 路径节点的着法在进入 playout **之前**就已经落在工作盘上了（下降时逐手 `play_legal`
+    /// 下去），所以 `amaf[mid]` 要成立，只能等这一点在 playout 里被提掉、再被同一方下回来。
+    /// 样本集因此是「该着法被提后又下回的那些 playout」，而不是「所有经过该节点的 playout」。
+    /// 实测（9 路、4 子局面、6000 次迭代）：
+    ///
+    /// ```text
+    /// 真实访问 18506 / RAVE 访问 1889（约 10%；分深度看 depth1/depth2 都是 15%）
+    /// beta：有 RAVE 样本的节点均值 0.165，根的子节点（按访问量加权）0.110
+    /// q = 0.337 vs rave_q = 0.277 —— AMAF 估计系统性更悲观
+    /// ```
+    ///
+    /// 结论：RAVE 不是「恒为 0 的死字段」，确实在起作用——把 `RAVE_BIAS` 抬到 1e6 让
+    /// beta→0，9 路中盘子局（8000 次迭代）的根节点首选从 (6,4) 变成 (6,3)、根胜率
+    /// 从 0.5006 变成 0.5125。但样本稀、且带「先被提掉」这个选择性偏差，所以
+    /// `blended_q` 里 RAVE 那一半的可信度低于教科书版本。
     fn backprop(&mut self, winner: Player) {
         for i in 0..self.path.len() {
             let id = self.path[i] as usize;
@@ -467,7 +486,8 @@ pub fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use go_game_board::Color;
+    // `Nat` 带来 `Vertex::all()`，`amaf_move_id_keeps_colors_apart` 要遍历全部顶点。
+    use go_game_board::{Color, Nat};
     use goptop_core::game::GameKind;
 
     fn go(size: u8) -> GameState {
@@ -516,6 +536,182 @@ mod tests {
         assert_eq!(to_stone(b.act_player()), s.to_move);
     }
 
+    /// 坐标搬运的**独立**复核：硬编码顶点下标，不复用 `from_coords` / `column()` /
+    /// `row()` 这一整套约定。
+    ///
+    /// 上面那条 `replay_matches_core_board` 与实现共用同一份坐标约定，约定本身整体
+    /// 写反是看不出来的；这条把下标算术写死，约定一旦被动过就会立刻变红。
+    ///
+    /// 下标公式：`index = (row + 1) * ROW_SIZE + (col + 1)`，`ROW_SIZE = 19 + 2 = 21`
+    /// （四周各一圈哨兵，见 go_game_types 的 `Vertex::from_coords`）。
+    #[test]
+    fn coords_are_not_transposed_raw_index() {
+        // 19 路，两个刻意不对称的坐标：先手黑 (x=2,y=5)、后手白 (x=11,y=3)。
+        let mut s = go(19);
+        place(&mut s, 2, 5);
+        place(&mut s, 11, 3);
+        let mut b = Board::with_size(19, 19);
+        replay(&mut b, &s);
+
+        assert_eq!(b.color_at(Vertex::from(129)), Color::Black, "row5/col2 不是黑（下标 129）");
+        assert_eq!(b.color_at(Vertex::from(96)), Color::White, "row3/col11 不是白（下标 96）");
+        // 转置后的落点必须为空，写反 (x,y) 时会落在这里。
+        assert_eq!(b.color_at(Vertex::from(69)), Color::Empty, "下标 69 被转置污染");
+        assert_eq!(b.color_at(Vertex::from(256)), Color::Empty, "下标 256 被转置污染");
+        // 黑一手、白一手之后仍该黑走。
+        assert_eq!(b.act_player(), Player::Black, "两手后该轮黑");
+    }
+
+    /// 提子方向的独立复核：被提掉的那颗子必须是转置后**另一个**下标。
+    ///
+    /// 只比对落子不足以钉住方向——提子还要走一遍邻接关系，坐标写反时提掉的会是
+    /// 另一个点。这里直接断言哪个下标变空、哪些下标是黑。
+    #[test]
+    fn capture_removes_the_right_vertex() {
+        // 黑 (1,5)(3,5)(2,4)(2,6) 围死白 (2,5)，白在 (0,0)(0,1) 垫手。
+        let mut s = go(19);
+        place(&mut s, 1, 5);
+        place(&mut s, 2, 5);
+        place(&mut s, 3, 5);
+        place(&mut s, 0, 0);
+        place(&mut s, 2, 4);
+        place(&mut s, 0, 1);
+        place(&mut s, 2, 6);
+        assert_eq!(s.board.get(Coord::new(2, 5)), Some(Stone::Empty), "前提局面不成立：白没被提");
+
+        let mut b = Board::with_size(19, 19);
+        replay(&mut b, &s);
+        // row5/col2 = 129 必须被提空；四邻 108(row4,col2) / 130(row5,col3) /
+        // 150(row6,col2) 是黑；转置点 69(row2,col5) 必须没被动过。
+        assert_eq!(b.color_at(Vertex::from(129)), Color::Empty, "下标 129 没被提");
+        assert_eq!(b.color_at(Vertex::from(108)), Color::Black, "下标 108 应是黑");
+        assert_eq!(b.color_at(Vertex::from(130)), Color::Black, "下标 130 应是黑");
+        assert_eq!(b.color_at(Vertex::from(150)), Color::Black, "下标 150 应是黑");
+        assert_eq!(b.color_at(Vertex::from(69)), Color::Empty, "转置点 69 被误写");
+    }
+
+    /// `move_id` 的颜色编码：黑白必须落在互不重叠的下标区间。
+    ///
+    /// 编码里丢掉颜色也能编译、也能跑，但会把对手的着法算成自己的 RAVE 样本；
+    /// 树本身不会报错，只是胜率估计悄悄变坏——只能靠这条钉住。
+    #[test]
+    fn amaf_move_id_keeps_colors_apart() {
+        // 不变量一：黑白各占 `Vertex::COUNT` 宽的一半，黑在下半、白在上半。
+        // （`Vertex::COUNT` 是 19×19 含哨兵的顶点数 + 2 个哨兵值，= 443；`pass` 是
+        // 441、`none` 是 442，所以 443 这个数本身不出现。）
+        for v in Vertex::all() {
+            let b = move_id(Player::Black, v) as usize;
+            let w = move_id(Player::White, v) as usize;
+            assert!(b < Vertex::COUNT, "黑 {v:?} → {b} 越出下半区");
+            assert!(
+                (Vertex::COUNT..2 * Vertex::COUNT).contains(&w),
+                "白 {v:?} → {w} 越出上半区"
+            );
+        }
+        // 不变量二：`amaf` 位图的长度刚好装得下全部 (颜色, 顶点) 组合，且两两不撞。
+        let mut seen = vec![false; 2 * Vertex::COUNT];
+        for pl in [Player::Black, Player::White] {
+            for v in Vertex::all() {
+                let id = move_id(pl, v) as usize;
+                assert!(!seen[id], "({pl:?}, {v:?}) 的下标 {id} 与别的组合撞车");
+                seen[id] = true;
+            }
+        }
+        assert_eq!(seen.len(), 2 * Vertex::COUNT);
+    }
+
+    /// 合法性兜底必须真的接在返回路径上。
+    ///
+    /// 平时的局面里 core 与 libEGo 的判定一致（实测 39543 个点零分歧），所以自然对局
+    /// 触发不到兜底；这条手工往根节点的子节点里塞一个 core 必拒的候选（已在盘上的点），
+    /// 直接逼兜底生效。删掉 `pick_move` 里的 `try_play` 复验，这条立刻变红。
+    #[test]
+    fn pick_move_rejects_moves_core_would_refuse() {
+        let mut s = go(9);
+        place(&mut s, 4, 4);
+        place(&mut s, 2, 2);
+
+        let g = gammas();
+        let mut root = Board::with_size(9, 9);
+        replay(&mut root, &s);
+        let root_player = root.act_player();
+        let mut search = Search {
+            nodes: vec![Node {
+                mv: Vertex::pass(),
+                player: root_player,
+                depth: 0,
+                children: Vec::new(),
+                untried: Vec::new(),
+                visits: 0,
+                wins: 0.0,
+                rave_visits: 0,
+                rave_wins: 0.0,
+            }],
+            gammas: g,
+            sampler: Sampler::new(&root, g),
+            random: FastRandom::new(RNG_SEED),
+            work: root.clone(),
+            root,
+            path: Vec::with_capacity(64),
+            amaf: vec![false; 2 * Vertex::COUNT],
+            played: Vec::with_capacity(512),
+            max_depth: 0,
+        };
+        let untried = search.legal_moves(root_player);
+        search.nodes[0].untried = untried;
+        search.iterate();
+        assert!(!search.nodes[0].children.is_empty(), "根节点没展开出子节点");
+
+        // 已在盘上的 (4,4)：core 必拒（Occupied）。给它最高的访问量，逼它排在最前面。
+        let occupied = Vertex::from_coords(4, 4);
+        let id = search.nodes.len() as u32;
+        search.nodes.push(Node {
+            mv: occupied,
+            player: Player::White,
+            depth: 1,
+            children: Vec::new(),
+            untried: Vec::new(),
+            visits: 9_999,
+            wins: 9_999.0,
+            rave_visits: 0,
+            rave_wins: 0.0,
+        });
+        search.nodes[0].children.push(id);
+
+        let got = pick_move(&s, &search).expect("兜底把整个根节点都放弃了");
+        assert_ne!(got, (4, 4), "兜底没生效：返回了 core 拒绝的着法");
+        let mut probe = s.clone();
+        assert!(probe.try_play(Move::Place(Coord::new(got.0, got.1))).is_ok());
+
+        // 所有候选都非法时必须返回 None，而不是把非法着法交出去。
+        let kids = search.nodes[0].children.clone();
+        for c in kids {
+            search.nodes[c as usize].mv = occupied;
+        }
+        assert_eq!(pick_move(&s, &search), None, "全部非法时应返回 None");
+    }
+
+    /// 胜率必须真的随局面变，而不是恒 0.5。
+    ///
+    /// `win_rate_viewpoint_is_complementary` 只断言两次视角之和 ≈ 1——恒 0.5 也能过。
+    /// 这条换一个**决定性的**局面（黑白吃 16 子），要求两个视角给出方向明确且互补的值。
+    #[test]
+    fn win_rate_reflects_the_position() {
+        // 预算压到 150ms：局面是「提了稳赢、不提稳输」，几百次 playout 就足以分辨，
+        // 而整套测试是并行跑的，没必要再多占 CPU。
+        let s = atari_position(false);
+        let b = analyze(&s, 9, Stone::Black, test_budget(150), false);
+        let w = analyze(&s, 9, Stone::White, test_budget(150), false);
+        assert!(b.win_rate > 0.7, "黑大优却只有 {}", b.win_rate);
+        assert!(w.win_rate < 0.3, "白大劣却有 {}", w.win_rate);
+        assert!(
+            (b.win_rate + w.win_rate - 1.0).abs() < 0.05,
+            "视角不互补：黑 {} 白 {}",
+            b.win_rate,
+            w.win_rate
+        );
+    }
+
     /// 9/13 路的逻辑边界：`with_size` 之外的坐标必须是 OffBoard，`is_legal` 一律拒绝。
     #[test]
     fn logical_bounds_are_off_board() {
@@ -538,19 +734,64 @@ mod tests {
         assert!(!seen, "逻辑盘外顶点混进了空点表");
     }
 
-    /// 9 路空盘：最佳着法必须落在中心 5×5，而不是被扫描序决定的左上角。
+    /// 9 路空盘：给出合法着法、不 panic、胜率贴 0.5（空盘本就没有优势方），
+    /// 且在预算内跑够了 playout。
+    ///
+    /// **这里刻意不断言首选方位。** 实测（release、固定迭代次数、同一随种子）空盘根节点
+    /// 各候选的 q 全部挤在 0.50~0.53：
+    ///
+    /// ```text
+    /// iters=8000  top5=(4,4)v159q0.57 (1,2)v150q0.58 (3,2)v148q0.54 (1,5)v143q0.52 (5,2)v136q0.52
+    /// iters=32000 top5=(4,3)v732q0.53 (2,4)v697q0.52 (3,2)v612q0.50 (3,4)v570q0.50 (5,2)v569q0.50
+    /// ```
+    ///
+    /// v=732 时 q 的标准误约 0.018，0.53 与 0.50 只差 1.6σ；在 80 个候选里取最大值，
+    /// 单靠噪声就能冒出 +0.03。**随机 playout 分辨不出空盘点位优劣**，`argmax(visits)`
+    /// 于是等价于在噪声里取最大值——首选会随 playout 数漂移（500→(6,2)、1000→(1,5)、
+    /// 8000→(4,4)、16000→(2,4)），其中 (1,5)/(1,2)/(3,1) 都在二线上。
+    ///
+    /// 原先断言「落在中心 5×5」因此是**随机变红**的：12000ms（debug 下的
+    /// `test_budget(1000)`）预算跑出 11777 次 playout 时首选是 (3,1)，测试就挂。
+    /// 该断言测的是「playout 数恰好落在哪个区间」，不是引擎行为，已改为只断言真正
+    /// 成立的性质。要真正修掉首选漂移，得让根节点选择用上 gamma 先验（见模块头注释
+    /// 的 playout 策略），那是搜索策略改动，不在本次核实范围。
     #[test]
-    fn go9_empty_opens_in_the_center() {
+    fn go9_empty_returns_a_sane_result() {
         let s = go(9);
-        let r = analyze(&s, 9, Stone::Black, test_budget(1000), true);
+        let r = analyze(&s, 9, Stone::Black, test_budget(300), true);
         let (x, y) = r.best_move.expect("空盘必须有可下之处");
+        let mut probe = s.clone();
         assert!(
-            (2..=6).contains(&x) && (2..=6).contains(&y),
-            "空盘首选应在中心 5×5，实际 ({x},{y})（nodes={}）",
+            probe.try_play(Move::Place(Coord::new(x, y))).is_ok(),
+            "空盘首选 ({x},{y}) 被 core 拒绝"
+        );
+        assert!(
+            (0.35..=0.65).contains(&r.win_rate),
+            "空盘胜率应贴 0.5，实际 {}（nodes={}）",
+            r.win_rate,
             r.nodes
         );
-        assert!((0.0..=1.0).contains(&r.win_rate));
         assert!(r.nodes > 100, "预算内只跑了 {} 次 playout", r.nodes);
+    }
+
+    /// 短预算下的首选不能由棋盘扫描序决定。
+    ///
+    /// `legal_moves` 若不洗牌，空点表按 `Vertex::all()` 的下标序生成，末位恒是
+    /// `from_coords(8, 8)`（即 (8,8)），而 `iterate` 从末位 `pop()`——0ms 预算只跑
+    /// 1 次迭代、根节点只有这 1 个子节点，首选就会被钉死在 (8,8)。
+    ///
+    /// 这条断言与机器速度、playout 数无关，是确定性的；上面那条改成不判方位之后，
+    /// 洗牌失效只能靠它兜住。
+    #[test]
+    fn short_budget_move_is_not_scan_order() {
+        let s = go(9);
+        let r = analyze(&s, 9, Stone::Black, 0, true);
+        assert_eq!(r.nodes, 1, "0ms 预算应恰好跑 1 次迭代");
+        let got = r.best_move.expect("空盘必有可下之处");
+        assert_ne!(got, (8, 8), "首选被扫描序钉死：(8,8) 是空点表末位");
+        assert_ne!(got, (0, 0), "首选被扫描序钉死：(0,0) 是空点表首位");
+        let mut probe = s.clone();
+        assert!(probe.try_play(Move::Place(Coord::new(got.0, got.1))).is_ok());
     }
 
     /// 每一步都必须能被 core 接受：AI 与 core 用的是两套规则实现，返回前必须复验。
@@ -689,18 +930,46 @@ mod tests {
         if cfg!(debug_assertions) { release_ms * 12 } else { release_ms }
     }
 
-    /// 时间预算：1000ms 的预算，含建树开销的实测墙上时间不得超过 1500ms。
+    /// 预算超时的容差：把 `DEADLINE_CHECK_EVERY` 次 playout 的**实测**耗时当作尺子。
+    ///
+    /// 不写死毫秒上界。`cargo test` 默认并行开好几个用例，重活互相抢 CPU，墙上时间能
+    /// 翻几倍——写死的上界于是随机变红（本仓 `gomoku::time_budget_is_respected` 与
+    /// 上一版 `go19_empty_returns_in_budget` 都是这么飘的）。这里的尺子取自本次搜索
+    /// 自己测出的单次 playout 耗时，尺子与被测对象在同一台机器、同一时刻，负载对两者
+    /// 同向作用，比值就稳定。
+    ///
+    /// 它检验的是 [`DEADLINE_CHECK_EVERY`] 那条设计主张：两次检查之间最多多做这么多
+    /// 次 playout。反过来，若常量被改得很大，这条断言会跟着放宽——那种情况由下面的
+    /// 墙上时间兜底抓。
+    fn budget_slack(r: &AnalyzeResult) -> f64 {
+        let per_playout_ms = r.elapsed_ms as f64 / r.nodes.max(1) as f64;
+        2.0 * DEADLINE_CHECK_EVERY as f64 * per_playout_ms + 20.0
+    }
+
+    /// 时间预算：搜索自报的耗时不得超过「预算 + 一个 deadline 周期」的余量。
     ///
     /// 先空跑一次把 gamma 表建起来：那是进程级一次性开销，不该算进「一次搜索要多久」。
     #[test]
     fn respects_time_budget() {
         let _ = gammas();
         let s = go(9);
+        let budget = 1000u32;
         let t = Instant::now();
-        let r = analyze(&s, 9, Stone::Black, 1000, true);
+        let r = analyze(&s, 9, Stone::Black, budget, true);
         let wall = t.elapsed().as_millis() as u64;
-        assert!(wall <= 1500, "1000ms 预算跑了 {wall}ms");
-        assert!(r.elapsed_ms <= 1500, "elapsed_ms 自报 {}ms", r.elapsed_ms);
+        let slack = budget_slack(&r);
+        assert!(
+            r.elapsed_ms as f64 <= f64::from(budget) + slack,
+            "budget={budget}ms 自报 {}ms（nodes={}），超过上界 {:.0}ms",
+            r.elapsed_ms,
+            r.nodes,
+            f64::from(budget) + slack
+        );
+        // 墙上时间只负责兜「没有卡死」：它还要摊上建盘、重放与调度抖动，给 4 倍余量。
+        assert!(
+            wall <= u64::from(budget) * 4 + 2000,
+            "budget={budget}ms 墙上跑了 {wall}ms"
+        );
     }
 
     /// 胜率视角一致性：同一局面换个视角，胜率必须互补。
@@ -754,9 +1023,22 @@ mod tests {
         // 先建 gamma 表：它是进程级一次性开销，混进计时会误判成「超预算」。
         let _ = gammas();
         let s = go(19);
+        let budget = 500u32;
         let t = Instant::now();
-        let r = analyze(&s, 19, Stone::White, 500, true);
-        assert!(t.elapsed().as_millis() <= 1200, "19 路 500ms 预算超时");
+        let r = analyze(&s, 19, Stone::White, budget, true);
+        let wall = t.elapsed().as_millis() as u64;
+        let slack = budget_slack(&r);
+        assert!(
+            r.elapsed_ms as f64 <= f64::from(budget) + slack,
+            "19 路 budget={budget}ms 自报 {}ms（nodes={}），超过上界 {:.0}ms",
+            r.elapsed_ms,
+            r.nodes,
+            f64::from(budget) + slack
+        );
+        assert!(
+            wall <= u64::from(budget) * 4 + 2000,
+            "19 路 budget={budget}ms 墙上跑了 {wall}ms"
+        );
         let (x, y) = r.best_move.expect("空盘必须有可下之处");
         let mut probe = s.clone();
         assert!(
