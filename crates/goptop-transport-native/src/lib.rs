@@ -46,7 +46,9 @@ pub struct SessionConfig {
 
 /// 核心：状态机 + 待处理事件队列 + IO 句柄。
 ///
-/// 与 wasm 版的 `Core` 逐字对应，只有共享方式不同（`Arc<Mutex>` vs `Rc<RefCell>`）。
+/// 与 wasm 版的 `Core` 一一对应，只有两处差异：共享方式（`Arc<Mutex>` vs
+/// `Rc<RefCell>`），以及同源通道——wasm 分「presence / 对局」两个 `Bc`，这边只有一个
+/// 全局订阅（见 io/bc.rs 的说明）。
 pub struct Core {
     pub session: Session,
     pub queue: VecDeque<Event>,
@@ -82,7 +84,11 @@ impl Core {
     }
 }
 
-/// 单调毫秒。
+/// 毫秒时间戳（**墙钟**，与 wasm 侧 `Date.now()` 同一时间轴）。
+///
+/// 注意它**不是单调时钟**：系统时间被回拨（NTP 校时）时会倒退，状态机的超时判定
+/// 随之整体后移。这里刻意与 wasm 保持一致——换 `Instant` 会让两端对同一份状态机
+/// 得出不同的超时结论，那才是真正难查的分叉。
 pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

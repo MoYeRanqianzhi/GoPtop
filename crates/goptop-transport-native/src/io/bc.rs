@@ -8,6 +8,13 @@
 //! **行为差异记录**：wasm 端 BC 的 announce 语义在本层不成立（没有「另一个页面」
 //! 可宣告），因此 presence 的跨实例发现能力在 native 端目前是空的。这不影响
 //! 服务器模式与 P2P 直连（那两条路走 WS 与 RTC），只影响「同机双窗口自动发现」。
+//!
+//! 还有一处**尚未收敛**的差异：wasm 的对局通道是**按局名**分的
+//!（`goptop-game-{gameId}`，跨局天然隔离），本层只有一个全局 hub，而 `GameMsg` 里
+//! 也没有局号可过滤——同进程的两个窗口若处在不同局，一方广播的对局消息会被另一方
+//! 的 presence 分类器收下（`Event::Net`）并送进它自己的状态机。要修得把通道名做成
+//! hub 的 topic（`JoinChannel` 收到的 `name` 正是它），且要保证两端此时已切到同一
+//! 个局名，属于跨层改动，不在本层单独收敛。
 
 use std::sync::Arc;
 
@@ -45,19 +52,16 @@ impl Bc {
     pub fn send(&self, v: serde_json::Value) {
         // 没有订阅者时 send 返回 Err——不是错误，忽略
         if std::env::var("GOPTOP_TRACE_BC").is_ok() {
-            eprintln!("[bc send {}] {}", self.me, v.to_string().chars().take(160).collect::<String>());
+            eprintln!("[bc {} send {}] {}", self.name, self.me, v.to_string().chars().take(160).collect::<String>());
         }
         let _ = hub().send((self.me.clone(), v.to_string()));
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// 关闭通道。全局 hub 不因单个会话关闭而销毁（其他会话还在用），
-    /// 订阅任务在自己的 `rx` 失效时自然退出。
+    /// 关闭通道：**当前无调用点**（`bridge` 的 `LeaveChannel` 有意不再撤订阅，见那里的
+    /// 说明），保留是为了与 wasm 侧 `Bc::close` 的调用面一致。全局 hub 也不因单个会话
+    /// 关闭而销毁（其他会话还在用），订阅任务只在自己的 `rx` 失效时退出。
     pub fn close(&self) {
-        // 保留方法是为了与 wasm 侧 `Bc::close` 的调用面一致（bridge 里会调）
+        // 保留方法（见上），无实际动作。
     }
 
     /// 克隆一个发送端句柄（`Effect::Broadcast` 要在不持 Core 锁的情况下发）。
@@ -87,14 +91,21 @@ impl BcHandle {
 ///
 /// `name` 目前只用于标识（native 单实例下无路由意义），保留是为了与 wasm 侧签名一致。
 pub fn join(core: &SharedCore, name: &str) {
-    if core.lock().map(|c| c.presence.is_some()).unwrap_or(false) {
-        return;
-    }
-
-    let me = core.lock().map(|c| c.session.user_id.clone()).unwrap_or_default();
-    let bc = Bc { name: name.to_string(), me: me.clone() };
-
+    // 订阅拿到手就先占位，**登记与检查必须在同一把锁里**：分两步（先查、出锁、再登记）
+    // 的话，两个并发泵（`cmd` 的同步泵与 50ms 后台泵同时跑）会各自通过检查、各挂一个
+    // 订阅者，同一条广播被处理两遍——正是上面「challenge 被受理 4 次」那类故障。
+    // 提前返回时多订的那个 rx 立即析构，无害。
     let mut rx = hub().subscribe();
+    let me = {
+        let Ok(mut c) = core.lock() else { return };
+        if c.presence.is_some() {
+            return;
+        }
+        let me = c.session.user_id.clone();
+        c.presence = Some(Bc { name: name.to_string(), me: me.clone() });
+        me
+    };
+
     let sub = core.clone();
     tokio::spawn(async move {
         while let Ok((from, text)) = rx.recv().await {
@@ -105,12 +116,6 @@ pub fn join(core: &SharedCore, name: &str) {
             presence::on_presence_text(&sub, &me, &text);
         }
     });
-
-    if let Ok(mut c) = core.lock() {
-        if c.presence.is_none() {
-            c.presence = Some(bc);
-        }
-    }
 }
 
 /// 启动 presence（与 wasm 侧 `start_presence` 对应）。

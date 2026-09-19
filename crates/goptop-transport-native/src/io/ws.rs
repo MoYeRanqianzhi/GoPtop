@@ -29,9 +29,12 @@ impl ServerSocket {
         let _ = self.tx.send(v.to_string());
     }
 
-    /// 关闭：丢掉发送端，IO 任务的 `rx.recv()` 返回 None 后自然退出（不重连）。
+    /// 关闭：本方法无实际动作——发送端只能靠**整体析构**丢弃（`&self` 里 drop 不掉 tx）。
+    /// 调用方（`bridge` 的 `ServerClose`）用 `Core::ws.take()` 把整个句柄移出 Core，
+    /// 出块即析构：tx 一死，IO 任务的 `rx.is_closed()` 为真、`rx.recv()` 返回 None，
+    /// 任务随即退出且不再重连（该检查在 `run` 的循环开头，见那里的说明）。
     pub fn close(&self) {
-        // 显式 drop 不了 &self 里的 tx，交给 Core 侧 take() 后整体析构
+        // 真正的释放是 take() 之后的析构，见上。
     }
 }
 
@@ -75,6 +78,13 @@ pub fn selected_server_url(host: &dyn crate::host::Host) -> Option<String> {
 
 async fn run(core: SharedCore, url: String, mut rx: mpsc::UnboundedReceiver<String>) {
     loop {
+        // 主动关闭的退出点（**必须在循环开头**）：Core 侧 take 掉 ServerSocket 后 tx 被
+        // drop，rx 随之关闭。下方的连接失败分支走 `continue` 直接回到这里，不经过循环
+        // 尾部——只在尾部检查的话，服务器不可达时这个任务会永远重连下去，连同它持有的
+        // `Arc<Core>`（以及 Core 里的 tx，所以 rx 永远不会自己关闭）一起泄漏。
+        if rx.is_closed() {
+            return;
+        }
         bridge::queue(&core, Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
 
         let ws = match tokio_tungstenite::connect_async(&url).await {
@@ -131,12 +141,8 @@ async fn run(core: SharedCore, url: String, mut rx: mpsc::UnboundedReceiver<Stri
             }
         }
 
-        // 断开：等重连间隔再进下一轮
+        // 断开：等重连间隔再进下一轮（主动关闭由下一轮开头的 rx 检查兜住）
         tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_MS)).await;
-        // 期间若被主动关闭（rx 关闭），下一轮 loop 会因 recv 返回 None 退出
-        if rx.is_closed() {
-            return;
-        }
     }
 }
 

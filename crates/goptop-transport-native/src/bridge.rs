@@ -63,12 +63,12 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
                 }
             }
             Effect::JoinChannel(name) => io::bc::join(core, &name),
-            Effect::LeaveChannel => {
-                let bc = core.lock().ok().and_then(|mut c| c.presence.take());
-                if let Some(bc) = bc {
-                    bc.close();
-                }
-            }
+            // **有意为空**：native 只有一个进程内广播订阅（`start_presence` 建的），
+            // 它同时承载 presence 与对局消息；wasm 侧 `LeaveChannel` 关的是独立的
+            // `goptop-game-{gid}` channel，presence channel 不受影响。这里若跟着撤掉
+            // 订阅，返回主页后就再也收不到同源挑战（wasm 双标签页照样收得到），
+            // 表现为「打过一局之后，同机另一窗口的挑战永远弹不出来」。
+            Effect::LeaveChannel => {}
 
             Effect::CreatePeer { tag, inviter, spectator } => {
                 if std::env::var("GOPTOP_TRACE_EFFECTS").is_ok() {
@@ -78,7 +78,9 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
             }
             // 说明：offer/answer 的「包 JSON + pwd 加密」在 io::rtc 生成 SDP 之后由
             // 本层补齐（见 io::rtc 里回喂 RtcReady 前的 encode_payload），与 wasm 侧
-            // bridge 的分工一致——rtc 层只管 SDP，编码不归它管。
+            // bridge 的分工一致——rtc 层只管 SDP，编码不归它管。两处调用点的**钥匙规则**
+            // 也各自与 wasm 对应分支对齐（offer 看 server_mode、answer 看 encrypted），
+            // 见 io::rtc::encode_payload 的说明。
             Effect::FeedOffer { tag, offer, encrypted } => {
                 if std::env::var("GOPTOP_TRACE_EFFECTS").is_ok() {
                     eprintln!("[eff] FeedOffer tag={tag} len={} encrypted={encrypted}", offer.len());
@@ -116,6 +118,19 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
                     bc.send(serde_json::to_value(&msg).unwrap_or(serde_json::Value::Null));
                 }
                 io::rtc::broadcast(core, &msg);
+                // 服务器 relay 兜底 —— 与 wasm 侧的三链路（BC + DC + relay）逐条对齐。
+                // **漏掉这一条不会报任何错**：服务器模式下 DC 建不起来（无 TURN 的 NAT
+                // 失败是常态）时 relay 是对局消息的唯一通路，缺了它表现为「双方都进了
+                // 对局态、棋盘不动、peerConnected 恒 false」。
+                if let Ok(c) = core.lock() {
+                    if c.session.relay_available() {
+                        if let Some(ws) = &c.ws {
+                            for to in &c.session.relay_targets {
+                                ws.send(&serde_json::json!({ "t": "relay", "to": to, "payload": &msg }));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -143,8 +143,18 @@ pub fn create(core: &SharedCore, tag: String, inviter: bool, _spectator: bool) {
     tokio::spawn(async move {
         match build(&core2, &tag2).await {
             Ok(peer) => {
-                let dc_slot = peer.dc.clone();
                 let pc = peer.pc.clone();
+                // 同 tag 重建时先丢旧句柄 —— wasm 侧 `peers.retain(|(t, _)| *t != tag)`
+                // 的对应物。缺了它，同一 tag 会同时留着新旧两条连接，而所有按 tag 的查找
+                //（`send_to` / `wait_peer` / `peer_gather`）命中的都是**第一条**（可能是
+                // 已经关闭的旧连接），新连接的 DC 再也不会被用到，消息静默丢进死连接。
+                let stale = core2.lock().ok().and_then(|mut c| {
+                    let idx = c.peers.iter().position(|(t, _)| *t == tag2)?;
+                    Some(c.peers.remove(idx))
+                });
+                if let Some((_, old)) = stale {
+                    old.close();
+                }
                 if let Ok(mut c) = core2.lock() {
                     c.peers.push((tag2.clone(), peer));
                 }
@@ -154,7 +164,6 @@ pub fn create(core: &SharedCore, tag: String, inviter: bool, _spectator: bool) {
                     }
                     bridge::queue(&core2, Event::PeerState { tag: tag2.clone(), opened: false, closed: true, failed: true });
                 }
-                let _ = dc_slot;
             }
             Err(e) => {
                 if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
@@ -235,12 +244,18 @@ async fn make_offer(core: &SharedCore, tag: &str, pc: Arc<dyn PeerConnection>) -
     }
     if trace { eprintln!("[rtc {tag}] make_offer: gathering 结束"); }
     let desc = pc.local_description().await.ok_or("no local description")?;
-    let (plain, enc) = encode_payload(core, &desc.sdp, "offer", "player");
+    // offer 的编码判据与 wasm 侧 CreatePeer 分支一致：服务器模式不加密（明文进信令），
+    // 无服务器模式用当前局 pwd 编成 G1 密文进邀请链接。
+    let key = match core.lock() {
+        Ok(c) if !c.session.server_mode => c.session.pwd.clone(),
+        _ => None,
+    };
+    let (plain, enc) = encode_payload(&desc.sdp, "offer", "player", key.as_deref());
     bridge::queue(
         core,
         Event::RtcReady {
             tag: tag.to_string(),
-            offer_plain: plain,
+            offer_plain: Some(plain),
             answer_plain: None,
             offer_enc: enc,
             answer_enc: None,
@@ -250,63 +265,84 @@ async fn make_offer(core: &SharedCore, tag: &str, pc: Arc<dyn PeerConnection>) -
 }
 
 /// 被动侧：喂远端 offer → createAnswer → setLocal → 等 gathering → 回 RtcReady。
-pub fn feed_offer(core: &SharedCore, tag: &str, offer: &str, _encrypted: bool) {
-    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+pub fn feed_offer(core: &SharedCore, tag: &str, offer: &str, encrypted: bool) {
+    let trace = std::env::var("GOPTOP_TRACE_RTC").is_ok();
+    if trace {
         eprintln!("[rtc {tag}] feed_offer 收到 offer（{} 字节）", offer.len());
+    }
+    // **解码与「answer 用什么钥匙」都必须在入队时刻同步取定，不能挪进 spawn**：两者都要读
+    // `session.pwd` / `spec_pwd`，而 spawn 之后的 await（等 peer 建好）期间状态机可能已把
+    // 它们清空——`accept_answer` 踩过同一个坑（见那里的说明）。同步解码也与 wasm 侧一致
+    //（wasm 的 FeedOffer 就是在 Effect 执行时同步 `decode_sdp`）。
+    let Some((sdp, typ)) = decode_payload(core, offer, encrypted) else {
+        if trace {
+            eprintln!("[rtc {tag}] feed_offer: 解码失败");
+        }
+        return;
+    };
+    // answer 的编码判据与 wasm 侧 FeedOffer 分支逐字对齐：**跟 offer 的 encrypted 标志走**，
+    // 钥匙取 pwd 再回退 spec_pwd。不能按「pwd 是否存在」反推——无服务器观战链
+    //（`accept_spec_offer_serverless`，encrypted=false）若此时残留着上一局的 pwd，
+    // 明文 answer 会被编成密文，而房主按明文解（`accept_spec_receipt` 也是 encrypted=false），
+    // 观战直连永远建不起来且不报错。
+    let (key, role) = {
+        let Ok(c) = core.lock() else { return };
+        let key = if encrypted {
+            c.session.pwd.clone().or_else(|| c.session.spec_pwd.clone())
+        } else {
+            None
+        };
+        // `r` 与 wasm 侧同源（观战 offer 的 answer 标 spectator）——两端载荷逐字段一致。
+        let role = if c.session.role == goptop_net::session::Role::Spectator { "spectator" } else { "player" };
+        (key, role)
+    };
+    if trace {
+        eprintln!("[rtc {tag}] feed_offer: 解码出 sdp {} 字节 / type={typ}", sdp.len());
     }
     let core = core.clone();
     let tag = tag.to_string();
-    let offer = offer.to_string();
     tokio::spawn(async move {
         let Some(pc) = wait_peer(&core, &tag, "feed_offer").await else { return };
         let gather = peer_gather(&core, &tag);
-        // 无服务器模式的 offer 是 G1 加密载荷，先解码出 {s,t,r}
-        let (sdp, typ) = match decode_payload(&core, &offer, _encrypted) {
-            Some(v) => v,
-            None => return,
-        };
-        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
-            eprintln!("[rtc {tag}] feed_offer: 解码出 sdp {} 字节 / type={typ}", sdp.len());
-        }
         let r = async {
             let desc = match typ.as_str() {
                 "answer" => RTCSessionDescription::answer(sdp).map_err(|e| e.to_string())?,
                 _ => RTCSessionDescription::offer(sdp).map_err(|e| e.to_string())?,
             };
-            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            if trace {
                 eprintln!("[rtc {tag}] feed_offer: set_remote");
             }
             pc.set_remote_description(desc).await.map_err(|e| e.to_string())?;
-            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            if trace {
                 eprintln!("[rtc {tag}] feed_offer: create_answer");
             }
             let answer = pc.create_answer(None).await.map_err(|e| e.to_string())?;
             pc.set_local_description(answer).await.map_err(|e| e.to_string())?;
-            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            if trace {
                 eprintln!("[rtc {tag}] feed_offer: 等 gathering");
             }
             if let Some((g, d)) = &gather {
                 wait_gathering(g, d).await;
             }
-            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            if trace {
                 eprintln!("[rtc {tag}] feed_offer: gathering 结束");
             }
             pc.local_description().await.ok_or_else(|| "no local description".to_string())
         }
         .await;
         if let Err(e) = &r {
-            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            if trace {
                 eprintln!("[rtc {tag}] feed_offer 失败: {e}");
             }
         }
         if let Ok(desc) = r {
-            let (plain, enc) = encode_payload(&core, &desc.sdp, "answer", "player");
+            let (plain, enc) = encode_payload(&desc.sdp, "answer", role, key.as_deref());
             bridge::queue(
                 &core,
                 Event::RtcReady {
                     tag: tag.clone(),
                     offer_plain: None,
-                    answer_plain: plain,
+                    answer_plain: Some(plain),
                     offer_enc: None,
                     answer_enc: enc,
                 },
@@ -424,40 +460,33 @@ fn peer_gather(
 /// 等 ICE gathering 完成。wasm 侧是 100ms 轮询 + 8s 上限；这边有事件回调，
 /// 直接等通知，超时仍留 8s 兜底（对齐 wasm 侧的量级）。
 async fn wait_gathering(gather: &Arc<tokio::sync::Notify>, done: &Arc<std::sync::atomic::AtomicBool>) {
+    // **先注册等待者，再复查标志**：`notify_waiters()` 只唤醒已注册的等待者、不存许可。
+    // 若按「先查标志再 notified()」的顺序写，gathering 恰在这两步之间完成时通知会丢
+    //（标志的 store 与 notify 的间隔里我们还没注册，之后只能干等 8s 兜底）——
+    // 表现是 offer/answer 晚 8 秒才产出，对端在这期间停在等待态。
+    let mut wait = std::pin::pin!(gather.notified());
+    wait.as_mut().enable();
     if done.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), gather.notified()).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), wait).await;
 }
 
-/// 把 SDP 包成载荷：`{"s":sdp,"t":type,"r":role}`，无服务器模式再用当前局 pwd 加密。
+/// 把 SDP 包成载荷：`{"s":sdp,"t":type,"r":role}`；`key` 给定时再编成 G1 密文。
 ///
 /// **与 wasm 侧 bridge 的约定逐字一致**——两端互操作全靠这个 JSON 形状与 G1 编码。
 /// 少了编码这一步，无服务器模式下 `offer_enc` 会是 None，状态机据此判定
 /// 「直连邀请生成失败：已生成同源链接（跨设备不可用）」，配对永远停在等待态。
-fn encode_payload(
-    core: &SharedCore,
-    sdp: &str,
-    typ: &str,
-    role: &str,
-) -> (Option<String>, Option<String>) {
-    let (server_mode, pwd) = match core.lock() {
-        Ok(c) => (c.session.server_mode, c.session.pwd.clone()),
-        Err(_) => (false, None),
-    };
+///
+/// 钥匙由调用点给：两端的两处调用点各自与 wasm 对应分支同规则（offer 看 `server_mode`、
+/// answer 看 offer 带来的 `encrypted` 标志），不在这里用某一种判据统一反推。
+fn encode_payload(sdp: &str, typ: &str, role: &str, key: Option<&str>) -> (String, Option<String>) {
     let payload = serde_json::json!({ "s": sdp, "t": typ, "r": role }).to_string();
+    let enc = key.and_then(|p| goptop_net::codec::encode(&payload, p).ok());
     if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
-        eprintln!("[rtc] encode_payload typ={typ} server_mode={server_mode} pwd={:?}", pwd.as_deref().map(|p| p.len()));
+        eprintln!("[rtc] encode_payload typ={typ} enc={:?}", enc.as_ref().map(|e| e.len()));
     }
-    let enc = if server_mode {
-        None
-    } else {
-        pwd.as_deref().and_then(|p| goptop_net::codec::encode(&payload, p).ok())
-    };
-    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
-        eprintln!("[rtc] encode_payload -> enc={:?}", enc.as_ref().map(|e| e.len()));
-    }
-    (Some(payload), enc)
+    (payload, enc)
 }
 
 /// 还原载荷：加密的先解 G1，再取 (sdp, type)。
