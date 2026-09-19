@@ -2,7 +2,7 @@
  * net/store 门面单测：后端探测、平台侧读写、失败回退浏览器存储、首次迁移。
  *
  * 门面是模块级单例（内存表 + ready 标志），所以每个用例都要 `vi.resetModules()`
- * 重新 import，并先把全局环境（window.goptopStore / __TAURI_INTERNALS__）铺好。
+ * 重新 import，并先把全局环境（window.goptopHost / __TAURI_INTERNALS__）铺好。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -48,11 +48,11 @@ describe("store 门面", () => {
     stubLocal({ "goptop:name": "浏览器里的旧值" });
     const saved = new Map<string, string>([["goptop:name", "桥里的值"]]);
     const bridge = {
-      load: () => JSON.stringify(Object.fromEntries(saved)),
-      set: (k: string, v: string) => void saved.set(k, v),
-      remove: (k: string) => void saved.delete(k),
+      storeLoad: () => JSON.stringify(Object.fromEntries(saved)),
+      storeSet: (k: string, v: string) => void saved.set(k, v),
+      storeRemove: (k: string) => void saved.delete(k),
     };
-    vi.stubGlobal("window", { goptopStore: bridge });
+    vi.stubGlobal("window", { goptopHost: bridge });
     const { storeInit, storeGet, storeSet, storeBackend } = await freshStore();
     await storeInit();
     expect(storeBackend()).toBe("harmony");
@@ -65,10 +65,10 @@ describe("store 门面", () => {
     stubLocal({ "goptop:name": "老大", "goptop:server-sel": "local" });
     const saved = new Map<string, string>();
     vi.stubGlobal("window", {
-      goptopStore: {
-        load: () => JSON.stringify(Object.fromEntries(saved)),
-        set: (k: string, v: string) => void saved.set(k, v),
-        remove: (k: string) => void saved.delete(k),
+      goptopHost: {
+        storeLoad: () => JSON.stringify(Object.fromEntries(saved)),
+        storeSet: (k: string, v: string) => void saved.set(k, v),
+        storeRemove: (k: string) => void saved.delete(k),
       },
     });
     const { storeInit, storeGet } = await freshStore();
@@ -81,10 +81,10 @@ describe("store 门面", () => {
   it("平台侧已有数据 → 不迁移（浏览器旧值不得覆盖平台值）", async () => {
     stubLocal({ "goptop:name": "浏览器旧值" });
     vi.stubGlobal("window", {
-      goptopStore: {
-        load: () => JSON.stringify({ "goptop:name": "平台值" }),
-        set: () => undefined,
-        remove: () => undefined,
+      goptopHost: {
+        storeLoad: () => JSON.stringify({ "goptop:name": "平台值" }),
+        storeSet: () => undefined,
+        storeRemove: () => undefined,
       },
     });
     const { storeInit, storeGet } = await freshStore();
@@ -95,10 +95,10 @@ describe("store 门面", () => {
   it("平台读取失败 → 回退浏览器后端（不是崩，也不是空设置）", async () => {
     stubLocal({ "goptop:name": "兜底值" });
     vi.stubGlobal("window", {
-      goptopStore: {
-        load: () => { throw new Error("桥挂了"); },
-        set: () => { throw new Error("桥挂了"); },
-        remove: () => { throw new Error("桥挂了"); },
+      goptopHost: {
+        storeLoad: () => { throw new Error("桥挂了"); },
+        storeSet: () => { throw new Error("桥挂了"); },
+        storeRemove: () => { throw new Error("桥挂了"); },
       },
     });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -113,10 +113,10 @@ describe("store 门面", () => {
   it("平台写入失败 → 该条同时落到浏览器存储兜底", async () => {
     stubLocal();
     vi.stubGlobal("window", {
-      goptopStore: {
-        load: () => "{}",
-        set: () => { throw new Error("写失败"); },
-        remove: () => { throw new Error("写失败"); },
+      goptopHost: {
+        storeLoad: () => "{}",
+        storeSet: () => { throw new Error("写失败"); },
+        storeRemove: () => { throw new Error("写失败"); },
       },
     });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);

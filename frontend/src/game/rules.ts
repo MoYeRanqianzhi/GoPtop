@@ -17,7 +17,7 @@
  * board 可直接 setBoard。
  */
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
-import { harmonyNative, isTauri } from "../net/links";
+import { harmonyHost, isTauri } from "../net/links";
 
 /** wasm 规则判定结果：ok 时 board 为权威棋盘（围棋含提子效果）。 */
 export type PlaceResult =
@@ -181,38 +181,39 @@ class NativeBackend implements Backend {
 /**
  * 鸿蒙壳：规则判定直连 Rust（NAPI），与 Tauri 那条一样是**原生**，不是 wasm。
  *
- * 与 [`NativeBackend`] 的差别只在「地址」：Tauri 走 `invoke` 的异步 IPC，鸿蒙走
- * javaScriptProxy 的**同步**调用。同步是本层刻意保留的——规则命令是微秒级的纯计算，
- * 包成 Promise 只会让调用方多一次无谓的微任务跳转（AI 那条才需要异步，见 ai/client.ts）。
- *
- * 返回值形态：原生侧已经把 json_api 的字符串契约解成了对象（见 crates/goptop-ohos
- * 的分发表），所以这里**不再 JSON.parse 一次**——多解一层会在字符串里再套一层引号。
+ * 与 [`NativeBackend`] 的差别有两处，都是宿主形态决定的，不是重复代码：
+ * - **调用是同步的**：javaScriptProxy 只有同步方法。规则命令是微秒级的纯计算，
+ *   包成 Promise 只是白多一次微任务跳转（AI 那条才必须异步，见 ai/client.ts）。
+ * - **返回值是一整条 JSON 字符串**：鸿蒙侧的 C ABI 只有 `(cmd, argsJson) → 回执`
+ *   这一个口子，没法像 Tauri 那样按命令给不同的返回类型，所以回执统一是 JSON 文本
+ *   （与 Tauri 侧 `game_place`/`game_state_json` 的形态一致）。
  */
 class HarmonyBackend implements Backend {
   private id: number | null = null;
 
-  /** 桥在页面存活期内不会变，取一次即可；取不到说明壳没带原生模块。 */
+  /** 桥在页面存活期内不会变，取不到说明壳没带原生模块（回落 wasm）。 */
   private get bridge() {
-    return harmonyNative();
+    return harmonyHost();
+  }
+
+  /** 发一条命令，返回解析后的回执；空回执/无此局给 null。 */
+  private call<T>(cmd: string, args: Record<string, unknown> = {}): T | null {
+    const b = this.bridge;
+    if (!b) return null;
+    const payload = this.id === null ? args : { id: this.id, ...args };
+    const raw = b.call(cmd, JSON.stringify(payload));
+    return raw && raw !== "null" ? (JSON.parse(raw) as T) : null;
   }
 
   async newGame(kindJson: string): Promise<boolean> {
-    const b = this.bridge;
-    if (!b) return false;
+    if (!this.bridge) return false;
     // 与 NativeBackend 同款：先摘旧 id 再取新局，失败时不至于继续用旧局落子
     const stale = this.id;
     this.id = null;
-    const id = b.call("game_new", JSON.stringify({ kindJson }));
-    this.id = typeof id === "number" ? id : null;
-    if (stale !== null) b.call("game_drop", JSON.stringify({ id: stale }));
+    this.id = this.call<number>("game_new", { kindJson });
+    // 旧对局活在 Rust 的 HashMap 里，不显式 drop 就永久留着
+    if (stale !== null) this.call<void>("game_drop", { id: stale });
     return this.id !== null;
-  }
-
-  private call<T>(cmd: string, args: Record<string, unknown> = {}): T | null {
-    const b = this.bridge;
-    if (!b || this.id === null) return null;
-    const raw = b.call(cmd, JSON.stringify({ id: this.id, ...args }));
-    return (raw ?? null) as T | null;
   }
 
   async place(x: number, y: number): Promise<PlaceResult | null> {
@@ -259,7 +260,7 @@ class HarmonyBackend implements Backend {
  */
 function pickBackend(): Backend {
   if (isTauri()) return new NativeBackend();
-  if (harmonyNative()) return new HarmonyBackend();
+  if (harmonyHost()) return new HarmonyBackend();
   return new WasmBackend();
 }
 

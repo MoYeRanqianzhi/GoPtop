@@ -1,5 +1,5 @@
 /**
- * ai/client —— AI 分析的门面（**双后端**）。
+ * ai/client —— AI 分析的门面（**三后端**：Web Worker / Tauri invoke / 鸿蒙 NAPI）。
  *
  * - **Web 端**：引擎跑在 Web Worker 里（`worker.ts`）。wasm 是单线程的，一次
  *   1 秒搜索中间没有任何可让步的点，不隔离就会把主线程整个冻住。
@@ -11,7 +11,7 @@
  *
  * 三个后端的对外行为完全一致：Promise 化、失败可捕获。
  */
-import { harmonyNative, isTauri } from "../net/links";
+import { harmonyHost, isTauri } from "../net/links";
 import type { AnalyzeRequest, AnalyzeResult, WorkerRequest, WorkerResponse } from "./types";
 
 /** AI 轮询间隔：分析预算是 0.3~3 秒，50ms 的粒度用户感知不到，轮询本身也几乎无成本。 */
@@ -36,7 +36,7 @@ type Pending = {
  * marshalling 行为」。
  */
 function analyzeHarmony(reqJson: string): Promise<AnalyzeResult> {
-  const bridge = harmonyNative();
+  const bridge = harmonyHost();
   if (!bridge) return Promise.reject(new Error("鸿蒙原生宿主不可用"));
   let ticket: number;
   try {
@@ -80,7 +80,7 @@ export class AiClient {
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private readonly native = isTauri();
-  private readonly harmony = !isTauri() && harmonyNative() !== null;
+  private readonly harmony = !isTauri() && harmonyHost() !== null;
 
   /** 懒建 Worker：只有真要分析时才付 wasm 加载与 1.7MB 权重解压的代价。 */
   private ensureWorker(): Worker {
@@ -143,7 +143,7 @@ export class AiClient {
       return;
     }
     if (this.harmony) {
-      harmonyNative()?.call("ai_warmup", "{}");
+      harmonyHost()?.call("ai_warmup", "{}");
       return;
     }
     await this.send({ kind: "warmup" });

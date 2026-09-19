@@ -9,9 +9,13 @@
       // 源码是 UTF-8（注释按项目规范是中文）。Windows 上 clang 会按系统代码页读源文件，
       // 不钉死编码时中文注释进了诊断信息就是乱码，排查时反而看不清是哪一行
       "cppFlags": "-finput-charset=UTF-8",
-      // 只出 arm64：模拟器与真机都是 aarch64，多出一份 armeabi-v7a 只会让 HAP 翻倍
+      // 两份都要：真机是 arm64-v8a，而 DevEco 模拟器跑 x86_64 镜像——只带 arm64 的
+      // HAP 在模拟器上装不上（`install parse native so failed: Abi type … does not
+      // match`），而模拟器是排查 NAPI 问题唯一的手段。**不含 armeabi-v7a**：
+      // 32 位设备不在支持范围内，多一份只会让 HAP 白白翻倍。
       "abiFilters": [
-        "arm64-v8a"
+        "arm64-v8a",
+        "x86_64"
       ]
     }
   },

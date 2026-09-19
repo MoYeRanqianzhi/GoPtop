@@ -11,9 +11,8 @@
  * - domStorageAccess 必须开：每标签页的用户 id 走 sessionStorage；平台存储不可用时
  *   （见下）的前端门面也回退到这里，关了会每启重生成身份。
  *
- * 平台存储（用户拍板 2026-09-19：数据按平台规定位置落盘）：鸿蒙不是 Tauri，Web 侧
- * 没有 Rust 后端，因此由本壳注入 `goptopStore` 代理，把前端 net/store 门面的读写
- * 落到**应用私有目录 filesDir/store.json**（无需任何权限）。注意：本模块 backup_config.json
+ * 平台存储（用户拍板 2026-09-19：数据按平台规定位置落盘）：由本壳注入 `goptopHost`
+ * 代理，把前端 net/store 门面的读写落到**应用私有目录 filesDir/store.json**（无需任何权限）。注意：本模块 backup_config.json
  * 开了 allowToBackupRestore 且未配 includes，store.json 落在系统默认备份集内——「卸载即清除」
  * 只描述本地文件，系统备份/恢复可把它带回重装后的设备。
  * 前端探测到该代理即用平台存储，探测不到才回落 localStorage。
@@ -26,6 +25,7 @@ import { common } from '@kit.AbilityKit';
 // （见 .agents/memory/2026-09-19-wasm-is-web-only-native-platforms-link-rust.md）。
 import goptop from 'libgoptop.so';
 
+
 // 虚拟域名（承载打包资源，公网不可达）。host 必须与前端 frontend/src/net/links.ts 的
 // ARKWEB_SHELL_HOST 逐字一致：isShellRuntime() 靠它判定「打包壳」并决定分享链接基地址，
 // 只改一处会让分享链接指向对方打不开的 appassets.goptop。
@@ -35,13 +35,21 @@ const SCHEME_HOST = 'https://appassets.goptop/';
 const STORE_FILE = 'store.json';
 
 /**
- * 平台存储代理：注入给 Web 页的前端门面（javaScriptProxy）。
+ * 宿主能力代理：**一个对象、一次注册**，注入给 Web 页的前端门面。
  *
- * 契约与 src-tauri/src/store.rs 一致：`load()` 返回整表 JSON 字符串，
- * `set/remove` 就地改一行并整表写回。**同步**方法——前端门面是同步读语义
- * （设置要在首帧可读），换异步会牵动 React 渲染时序。
+ * 两件事都在这里：
+ * - **存储**（`storeLoad/storeSet/storeRemove`）：契约与 src-tauri/src/store.rs 一致，
+ *   `storeLoad()` 返回整表 JSON 字符串，`set/remove` 就地改一行并整表写回。同步方法
+ *   ——前端门面是同步读语义（设置要在首帧可读），换异步会牵动 React 渲染时序。
+ * - **原生宿主**（`call/aiPost/aiPoll`）：转发到 NAPI（`libgoptop.so`），最终落到
+ *   Rust 的 `goptop_call`。
+ *
+ * **为什么合成一个类**：`Web` 组件上的 `.javaScriptProxy()` 是单值属性，
+ * 调用两次只有最后一次生效——实测先注册的 `goptopStore` 直接变成 undefined，
+ * 而设备日志里只留一句「native proxy object not found」，看不出是被覆盖了。
+ * ArkWeb 没有多对象重载（`web.d.ts` 里只有 `javaScriptProxy(value: JavaScriptProxy)`）。
  */
-class GoptopStoreProxy {
+class GoptopHostProxy {
   private path: string = '';
 
   constructor(dir: string) {
@@ -77,18 +85,20 @@ class GoptopStoreProxy {
     }
   }
 
+  /* ---- 存储面 ---- */
+
   /** 给前端门面的全量读口（JSON 字符串）。 */
-  load(): string {
+  storeLoad(): string {
     return JSON.stringify(this.readAll());
   }
 
-  set(key: string, value: string): void {
+  storeSet(key: string, value: string): void {
     const map = this.readAll();
     map[key] = value;
     this.writeAll(map);
   }
 
-  remove(key: string): void {
+  storeRemove(key: string): void {
     const map = this.readAll();
     const next: Record<string, string> = {};
     for (const k of Object.keys(map)) {
@@ -98,21 +108,19 @@ class GoptopStoreProxy {
     }
     this.writeAll(next);
   }
-}
 
-/**
- * 原生宿主代理：注入给前端门面（javaScriptProxy），把规则判定与 AI 分析接到 Rust。
- *
- * 契约与 src-tauri/src/rules.rs（Tauri command）同源——两边都只是
- * `goptop_core::json_api` 的宿主适配，前端因而能共用一份后端代码。
- *
- * **AI 必须拆成 post/poll**：`call('ai_analyze', …)` 是同步阻塞的纯计算，按预算要跑
- * 0.3~3 秒；javaScriptProxy 的方法在 UI 线程上执行，直接同步调会把界面冻死
- * （桌面端必须 `spawn_blocking`、Web 端必须开 Worker，是同一件事）。而
- * javaScriptProxy **不支持返回 Promise**，所以走「后台算 + JS 轮询票号」。
- */
-class GoptopNativeProxy {
-  /** 同步命令（微秒级）：落子/悔棋/停一手/状态/计分/建局/释放。 */
+  /* ---- 原生宿主面（转发到 NAPI → Rust） ----
+   *
+   * 契约与 src-tauri/src/rules.rs（Tauri command）同源——两边都只是
+   * `goptop_core::json_api` 的宿主适配，前端因而能共用一份后端代码。
+   *
+   * **AI 必须拆成 post/poll**：`call('ai_analyze', …)` 是同步阻塞的纯计算，按预算要跑
+   * 0.3~3 秒；javaScriptProxy 的方法在 UI 线程上执行，直接同步调会把界面冻死
+   * （桌面端必须 `spawn_blocking`、Web 端必须开 Worker，是同一件事）。而
+   * javaScriptProxy **不支持返回 Promise**，所以走「后台算 + JS 轮询票号」。
+   */
+
+  /** 同步命令（微秒级）：落子/悔棋/停一手/状态/计分/建局/释放。回执是 JSON 文本。 */
   call(cmd: string, argsJson: string): string {
     return goptop.call(cmd, argsJson);
   }
@@ -155,28 +163,21 @@ struct Index {
   // 用 getContext(this) 而非新的 this.getUIContext().getHostContext()：字段初始化
   // 发生在 UI 上下文绑定之前，新 API 在这个时机取不到（编译期告警是弃用提示，
   // API 20 仍可用；等迁到 aboutToAppear 初始化代理时再一并换）。
-  store: GoptopStoreProxy = new GoptopStoreProxy(
+  host: GoptopHostProxy = new GoptopHostProxy(
     (getContext(this) as common.UIAbilityContext).filesDir
   );
-  /** 原生宿主（规则 + AI）代理，见类说明。 */
-  native: GoptopNativeProxy = new GoptopNativeProxy();
 
   build() {
     Column() {
       // 初始 src 用根路径：SPA 路由把 /index.html 解析成用户主页段，/ 才是菜单页
       Web({ src: SCHEME_HOST, controller: this.controller })
-        // 平台存储注入（前端 net/store 门面探测 window.goptopStore）
+        // **只注册这一个**（属性是单值，注册第二个会把第一个顶掉，见类说明）。
+        // 前端探测 window.goptopHost：有它就走原生 Rust（规则/AI）+ 平台存储，
+        // 没有才回落 wasm + localStorage（老壳仍能跑）。
         .javaScriptProxy({
-          object: this.store,
-          name: 'goptopStore',
-          methodList: ['load', 'set', 'remove'],
-          controller: this.controller,
-        })
-        // 原生宿主（前端探测到 window.goptopNative 即走原生 Rust 而非 wasm）
-        .javaScriptProxy({
-          object: this.native,
-          name: 'goptopNative',
-          methodList: ['call', 'aiPost', 'aiPoll'],
+          object: this.host,
+          name: 'goptopHost',
+          methodList: ['storeLoad', 'storeSet', 'storeRemove', 'call', 'aiPost', 'aiPoll'],
           controller: this.controller,
         })
         .domStorageAccess(true)

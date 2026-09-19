@@ -4,7 +4,7 @@
  * 各端落盘位置（本文件是**唯一**读写门面，业务模块不许再直接碰 localStorage）：
  * - 桌面壳（Tauri / Windows）：`~/.goptop/store.json`（Rust 侧 `src-tauri/src/store.rs`）；
  * - 移动端（Tauri 的 Android/iOS 后端）：平台给应用的私有数据目录（同一套 Rust 命令）；
- * - 鸿蒙壳（ArkWeb）：应用 `filesDir/store.json`（ArkTS 注入的 `goptopStore` 代理）；
+ * - 鸿蒙壳（ArkWeb）：应用 `filesDir/store.json`（ArkTS 注入的 `goptopHost` 代理）；
  * - **Web 端：浏览器 localStorage**——这是 Web 端自身的落盘方式，也是其余端
  *   平台存储不可用时的兜底（无 Tauri 运行时、无鸿蒙桥、权限拒绝等）。
  *
@@ -23,15 +23,23 @@ export type StoreBackend = "tauri" | "harmony" | "browser";
 
 const PREFIX = "goptop:";
 
-/** 鸿蒙壳注入的存储代理（ArkTS 侧 javaScriptProxy，见 harmony/.../pages/Index.ets）。 */
+/**
+ * 鸿蒙壳注入的宿主桥（ArkTS 侧 javaScriptProxy，见 harmony/.../pages/Index.ets）。
+ * 这里只用它的存储面；原生规则/AI 那三个方法由 net/links.ts 的 `harmonyHost()` 取。
+ *
+ * **存储与原生宿主在同一个对象上**：`Web` 的 `.javaScriptProxy()` 是单值属性，
+ * 注册第二个会把第一个顶掉——曾经分成 `goptopStore` / `goptopNative` 两个对象，
+ * 结果存储那个直接被顶成 undefined（设备日志只有一句「native proxy object not
+ * found」，看不出是被覆盖了）。
+ */
 type HarmonyStore = {
-  load(): string;
-  set(key: string, value: string): void;
-  remove(key: string): void;
+  storeLoad(): string;
+  storeSet(key: string, value: string): void;
+  storeRemove(key: string): void;
 };
 declare global {
   interface Window {
-    goptopStore?: HarmonyStore;
+    goptopHost?: HarmonyStore;
   }
 }
 
@@ -79,7 +87,7 @@ function browserRemove(key: string) {
 async function platformLoad(which: StoreBackend): Promise<Record<string, string> | null> {
   try {
     if (which === "harmony") {
-      const raw = window.goptopStore?.load() ?? "";
+      const raw = window.goptopHost?.storeLoad() ?? "";
       return raw.trim() ? (JSON.parse(raw) as Record<string, string>) : {};
     }
     const { invoke } = await import("@tauri-apps/api/core");
@@ -100,8 +108,8 @@ function platformSave(which: StoreBackend, key: string, value: string | null) {
   if (which === "harmony") {
     // 鸿蒙桥是同步调用：失败当场兜底
     try {
-      if (value === null) window.goptopStore?.remove(key);
-      else window.goptopStore?.set(key, value);
+      if (value === null) window.goptopHost?.storeRemove(key);
+      else window.goptopHost?.storeSet(key, value);
     } catch (e) {
       console.warn("[store] 鸿蒙桥写入失败，浏览器存储兜底", e);
       fallback();
@@ -123,7 +131,7 @@ function platformSave(which: StoreBackend, key: string, value: string | null) {
 
 /** 后端探测：鸿蒙桥 → Tauri → 浏览器（浏览器是 Web 端本体，也是其余端的兜底）。 */
 function detect(): StoreBackend {
-  if (typeof window !== "undefined" && window.goptopStore) return "harmony";
+  if (typeof window !== "undefined" && window.goptopHost) return "harmony";
   if (isTauri()) return "tauri";
   return "browser";
 }

@@ -26,11 +26,17 @@
  * 板上钉钉的同步 NAPI 能力，没有一处依赖「某版本才支持的 marshalling 行为」。
  */
 #include <napi/native_api.h>
+#include <hilog/log.h>
 
 #include <cstdlib>
 #include <map>
 #include <mutex>
 #include <string>
+
+#undef LOG_DOMAIN
+#undef LOG_TAG
+#define LOG_DOMAIN 0x3200
+#define LOG_TAG "GoPtopNapi"
 
 // Rust 侧（crates/goptop-ohos）导出的 C ABI。返回的字符串必须交 goptop_free 释放。
 extern "C" char *goptop_call(const char *cmd, const char *args_json);
@@ -133,9 +139,16 @@ napi_value AiPost(napi_env env, napi_callback_info info) {
     job->ticket = g_next_ticket++;
     g_results[job->ticket] = "";  // 占位：空串即「还没算完」
   }
+  // `async_resource_name` **不能传 nullptr**：Node 的 NAPI 文档写明它是必填，
+  // 传空在 OHOS 上会让 napi_create_async_work 直接返回 napi_invalid_arg，
+  // 表现为「无法排队 AI 分析任务」——而真正的错因（参数为空）得翻 NAPI 源码才看得出来。
+  napi_value res_name = nullptr;
+  napi_create_string_utf8(env, "goptop.ai", NAPI_AUTO_LENGTH, &res_name);
   napi_async_work work = nullptr;
-  if (napi_create_async_work(env, nullptr, nullptr, AiExecute, AiComplete, job, &work) != napi_ok ||
-      napi_queue_async_work(env, work) != napi_ok) {
+  napi_status cst = napi_create_async_work(env, nullptr, res_name, AiExecute, AiComplete, job, &work);
+  napi_status qst = cst == napi_ok ? napi_queue_async_work(env, work) : cst;
+  if (qst != napi_ok) {
+    OH_LOG_ERROR(LOG_APP, "AI 任务排队失败 create=%{public}d queue=%{public}d", (int)cst, (int)qst);
     std::lock_guard<std::mutex> lock(g_mu);
     g_results.erase(job->ticket);
     delete job;
@@ -194,6 +207,11 @@ napi_module g_module = {
 
 }  // namespace
 
-extern "C" __attribute__((constructor)) void RegisterGoptopModule(void) {
+// **必须 `used`**：鸿蒙的构建带 `-ffunction-sections` + `--gc-sections`，而本函数除了
+// 被 `.init_array` 引用之外没有任何调用点——没有 `used` 时它会被整段回收，`.init_array`
+// 剩一个全零的段（实测如此）。后果是模块**从不注册**：`import … from 'libgoptop.so'`
+// 得到一个空对象，方法调用在 ArkTS 里抛异常，ArkWeb 只转述成一句
+// 「napi api call fail」，完全看不出是「构造器被 GC 掉了」。
+extern "C" __attribute__((constructor, used)) void RegisterGoptopModule(void) {
   napi_module_register(&g_module);
 }

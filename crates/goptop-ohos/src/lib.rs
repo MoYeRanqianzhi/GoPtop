@@ -14,22 +14,24 @@
 //! # 契约
 //!
 //! 与桌面/Android 端（`src-tauri/src/rules.rs` 的 Tauri command）**同源**：两边都只是
-//! `goptop_core::json_api` 的宿主适配。返回值刻意与 Tauri command 的**逻辑返回值**
-//! 一致（`game_place` 给 PlaceResult 对象、`game_state_json` 给 GameState 对象），
-//! 而不是再套一层字符串——前端不必为鸿蒙多写一次 `JSON.parse`。
+//! `goptop_core::json_api` 的宿主适配。
 //!
-//! | cmd | args | 返回 |
+//! **回执统一是一条 JSON 文本**（不是结构体）：C ABI 只有 `(cmd, argsJson) → char*`
+//! 这一个口子，没法像 Tauri 那样按命令给不同的返回类型。前端因此与 Tauri 侧
+//! （`game_place`/`game_state_json` 也回字符串）保持同一套解析习惯。
+//!
+//! | cmd | args | 回执（JSON 文本） |
 //! |---|---|---|
-//! | `game_new` | `{kindJson}` | 局号 `number`，失败 `null` |
+//! | `game_new` | `{kindJson}` | 局号；失败 `null` |
 //! | `game_drop` | `{id}` | `null` |
-//! | `game_state_json` | `{id}` | GameState 对象；无此局 `null` |
-//! | `game_place` | `{id,x,y}` | PlaceResult 对象；无此局 `{"ok":false,"error":"no_game"}` |
+//! | `game_state_json` | `{id}` | GameState；无此局 `null` |
+//! | `game_place` | `{id,x,y}` | PlaceResult；无此局 `{"ok":false,"error":"no_game"}` |
 //! | `game_pass` / `game_undo` | `{id}` | 同上 |
-//! | `game_score` | `{id,deadJson}` | 计分结果对象 |
+//! | `game_score` | `{id,deadJson}` | 计分结果 |
 //! | `game_reset` | `{id}` | `null` |
-//! | `game_adopt` | `{id,boardJson,toMove,winner,historyJson}` | `bool` |
-//! | `game_board_size` | `{id}` | `number`（无此局 `0`） |
-//! | `ai_analyze` | AnalyzeRequest | AnalyzeResult 对象 |
+//! | `game_adopt` | `{id,boardJson,toMove,winner,historyJson}` | `true`/`false` |
+//! | `game_board_size` | `{id}` | 尺寸（无此局 `0`） |
+//! | `ai_analyze` | AnalyzeRequest | AnalyzeResult |
 //! | `ai_warmup` | — | `null` |
 //!
 //! # 线程
