@@ -21,12 +21,22 @@
       - **桌面壳**（Tauri，原生 Rust）：`ai.js cdp:9222` 9/9、`stress.js cdp:9222 120` 8/8。
       - **鸿蒙**（NAPI 原生 Rust）：`ohos-native-probe.js` 11/11、`ai.js cdp:9444` 9/9、
         `stress.js cdp:9444 120` 8/8（120 手，堆 11→11MB）。
-      - **安卓**：**未完成**。宿主是同为 Tauri 的原生 Rust，逻辑面与桌面壳走同一条
-        代码路径（桌面壳已验），但安卓特有的「`__TAURI_INTERNALS__` 不在 document-start
-        注入」会影响 `pickBackend()` 的判定时机，**必须真机/模拟器验一次**。
-        本轮尝试过：AVD `goptop_test` 能起来，但 `tauri android build` 与模拟器同时跑
-        把系统内存压到临界，Claude Code 回收了后台任务（构建未完成、APK 仍是 9-19 的旧包）。
-        重试前先关掉其它模拟器、并给足内存。
+      - **安卓**（AVD `goptop_test`，x86_64）：`ai.js android` 9/9、
+        `stress.js android 120` 8/8。**后端判定已确证走原生**（不是"能下棋"就算数）：
+        `__TAURI_INTERNALS__` 存在且 `invoke` 可用；资源时间线里**没有** `goptop_core`
+        与 `goptop_ai`（规则与 AI 的 wasm 都是懒加载，回落才会出现）、没有 AI Worker；
+        `__store.backend()` 为 `tauri`。
+        （首轮因模拟器与 gradle 构建同时跑把内存压到临界被回收；改成**先构建后起模拟器**
+        串行执行即通过，峰值内存减半。）
+- [ ] **原生平台的传输层仍是 wasm**（本轮查明的最大遗留）。规则与 AI 已经在
+      桌面/Android/鸿蒙三端直连 Rust，但 **P2P 会话（`WasmSession`）三端仍跑
+      `frontend/src/wasm/transport/`**——证据：安卓资源时间线里有
+      `goptop_transport_bg-*.wasm`。`crates/goptop-transport-native` 已存在且无头 5/5，
+      但**没有接进任何宿主**（`src-tauri` 只依赖 core/ai）。
+      注意：**逻辑本身已经是纯 Rust**，差别只在编译目标与 IO 后端——所以这不是
+      「功能没用 Rust 做」，而是「原生端白扛了 wasm 的边界与 WebView 限制」。
+      工作量不小（Tauri 命令面 + 事件回推 + 前端第三个 transport 后端；鸿蒙还要
+      把异步 IO 的状态回推接到 NAPI 的 post/poll 上），且会动到刚验过的 P2P 路径。
 - 遗留（本轮未动）：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死在 PUCT 改动之后，
   注释还在描述旧算法；删它要连带重建 wasm 产物与三端壳的 dist，单独立一轮更划算。
 
