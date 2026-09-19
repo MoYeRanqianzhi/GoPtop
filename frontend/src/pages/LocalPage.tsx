@@ -74,7 +74,7 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
         kind={kind} size={size} board={board} toMove={toMove} winner={winner}
         lastMove={lastMove} hover={hover} onHover={setHover}
         disabled={!!winner} onPlace={place}
-        statusText={statusText} statusNote={kind === "gomoku" ? "五子连珠 · 本地" : "围棋对弈 · 本地"}
+        statusText={statusText} statusNote=""
         moveCount={history.length}
         onUndo={history.length > 0 && !winner ? undo : null} onReset={resetBoard}
       />

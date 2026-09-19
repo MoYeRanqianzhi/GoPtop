@@ -446,11 +446,6 @@ export function BoardPanel(props: {
         <span style={{ color: "var(--muted)" }}>棋盘</span>
         <span style={{ fontFamily: "var(--font-mono)" }}>{size}×{size}</span>
       </div>
-      {winner && (
-        <div style={{ marginTop: 4, padding: "6px 8px", border: "2px solid var(--ink)", background: "var(--bg-2)", color: "#fff", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, textAlign: "center" }}>
-          {winner === "black" ? "黑" : "白"} 胜 — 点击重开开始新对局
-        </div>
-      )}
     </div>
   );
   return (
