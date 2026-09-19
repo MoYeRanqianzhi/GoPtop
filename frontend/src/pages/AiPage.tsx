@@ -117,9 +117,22 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
     setAiError(null);
   }
 
+  // 离页释放：native 侧的对局实例活在 Rust 的 HashMap 里，不 drop 就随每次
+  // 进出本页永久累积（wasm 侧只是丢引用，见 rules.ts 的 dispose 说明）
+  useEffect(() => () => { void rulesRef.current.dispose(); }, []);
+
   // AI 走子：轮到 AI 且未终局时触发一次搜索
   useEffect(() => {
-    if (winner || toMove !== aiColor) return;
+    if (winner || toMove !== aiColor) {
+      // 这里必须显式收回 thinking：上一轮若正在思考，cleanup 只置取消标记，
+      // 它的 finally（`if (!cancelled) setThinking(false)`）就再也不会执行。
+      // 少了这一行 thinking 永远停在 true——棋盘 disabled={thinking} 从此点不动、
+      // 状态行永远显示「AI 思考中…」、悔棋按钮一直禁用。
+      // 「AI 思考中 → 重开 / 切尺寸 / 换边到人类先手」稳定复现；
+      // 换成 AI 先手时下一轮会立刻重新置 true，恰好把症状盖住。
+      setThinking(false);
+      return;
+    }
     let cancelled = false;
     setThinking(true);
     void (async () => {

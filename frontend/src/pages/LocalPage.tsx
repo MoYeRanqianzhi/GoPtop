@@ -36,6 +36,10 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
     setHover(null);
   }, [kind, size]);
 
+  // 离页释放：native 侧的对局实例活在 Rust 的 HashMap 里，不 drop 就随每次
+  // 进出本页永久累积（wasm 侧只是丢引用，见 rules.ts 的 dispose 说明）
+  useEffect(() => () => { void rulesRef.current.dispose(); }, []);
+
   function resetBoard() {
     void rulesRef.current.reset();
     setBoard(emptyBoard(size));

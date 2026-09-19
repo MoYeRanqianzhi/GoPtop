@@ -75,7 +75,13 @@ export function useWinRate(opts: {
       setThinking(false);
       return;
     }
-    if (!opts.enabled) return;
+    // 同上：本轮不分析也必须把「分析中」收回。上一轮的 cleanup 只置了 cancelled，
+    // 它的 finally 不会再清 thinking，漏掉这一行则胜率条永远停在淡显的 thinking 态
+    //（终局、或 AiPage 上 AI 出错把 enabled 置 false 时最明显）。
+    if (!opts.enabled) {
+      setThinking(false);
+      return;
+    }
 
     let cancelled = false;
     const move = opts.moveCount;

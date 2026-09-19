@@ -118,8 +118,15 @@ class NativeBackend implements Backend {
 
   async newGame(kindJson: string): Promise<boolean> {
     const { invoke } = await import("@tauri-apps/api/core");
+    // 先摘掉旧实例再 await：invoke 失败会抛（command 未注册、参数名不匹配、Rust panic），
+    // 若把赋值留在 await 之后，this.id 会继续指着上一局——尺寸已经不同，之后每次
+    // place 都拿旧尺寸的棋盘覆盖 UI（wasm 后端此时成了 null，两端行为分叉）。
+    const stale = this.id;
+    this.id = null;
     const id = await invoke<number | null>("game_new", { kindJson });
     this.id = id ?? null;
+    // 旧对局活在 Rust 的 HashMap 里，不显式 drop 就永久留着——切规则/尺寸每切一次留一份
+    if (stale !== null) void invoke("game_drop", { id: stale });
     return this.id !== null;
   }
 
@@ -173,6 +180,23 @@ class NativeBackend implements Backend {
 export class RulesEngine {
   private backend: Backend = isTauri() ? new NativeBackend() : new WasmBackend();
 
+  /**
+   * 最近一次 `newGame` 的落地 Promise（两个后端都异步：wasm 要等模块 init，
+   * native 要等 IPC 往返）。
+   *
+   * **为什么必须留一手**：调用方是 effect，一律 `void engine.newGame(...)` 不等它；
+   * 而同一个 commit 里的下一个 effect 立刻就要 `stateJson()`。不等就会撞上
+   * 「新局还没建好」，且两个后端各有各的错法：
+   * - native：`newGame` 已把 `id` 摘成 null（见那里的说明），此刻 `stateJson()`
+   *   返回 null，而 AI 落子 effect 拿到 null 只是静默 return——AI 执黑时切尺寸，
+   *   空棋盘、状态行停在「黑 落子」，棋盘因 `toMove !== humanColor` 恒禁用且不再
+   *   恢复（重开也不重跑该 effect）。
+   * - wasm：`this.game` 还是**上一局**（赋值在 `await loadWasm()` 之后），
+   *   `stateJson()` 会取回旧局的快照（实测：9 路切 19 路时取回 size=9），
+   *   AI 于是照着幽灵局面选点——不报错、不卡死，只是下错。
+   */
+  private booting: Promise<void> = Promise.resolve();
+
   /** 开新局（kind/size 与前端选择器同源）。Rust 对非法组合是断言即 trap
    *（会掀翻 React 树），故在边界先挡：gomoku 只接受 15，go 只接受 9/13/19。 */
   async newGame(kind: GameKind, size: Size): Promise<void> {
@@ -180,7 +204,7 @@ export class RulesEngine {
     if (!valid) return;
     // GameKind serde 外部标签格式：{"Gomoku":{"size":15}} / {"Go":{"size":9}}
     const kindJson = JSON.stringify(kind === "gomoku" ? { Gomoku: { size } } : { Go: { size } });
-    await this.backend.newGame(kindJson);
+    this.booting = this.backend.newGame(kindJson).then(() => {});
   }
 
   /** 落子判定：占据/越界/自杀/终局由 Rust 拒绝（ok:false + 稳定 error 码）。 */
@@ -209,12 +233,16 @@ export class RulesEngine {
   }
 
   /** 当前局面的完整 JSON，交给 AI 分析用。
-   *  必须是 Rust 侧序列化的结果而非前端手拼：围棋的劫点/提子数只存在于 `GameState`。 */
+   *  必须是 Rust 侧序列化的结果而非前端手拼：围棋的劫点/提子数只存在于 `GameState`。
+   *  **先等 newGame 落地**（见 `booting` 的说明）。 */
   async stateJson(): Promise<unknown | null> {
+    await this.booting;
     return this.backend.stateJson();
   }
 
-  /** 释放原生侧的对局实例（wasm 后端是空操作）。 */
+  /** 释放对局实例。native 侧必须显式调（实例活在 Rust 的 HashMap 里，不 drop 就
+   *  随每次进出页面/切尺寸永久累积）；wasm 侧只是丢引用，Rust 堆内存由胶水的
+   *  FinalizationRegistry 在 GC 时回收，无需也不该手动 free。 */
   async dispose(): Promise<void> {
     await this.backend.dispose();
   }
