@@ -479,7 +479,7 @@ export function BoardPanel(props: {
         oppLabel={props.odds.oppLabel}
         thinking={props.odds.thinking}
       />
-      <WinRateChart series={props.odds.series} height={26} />
+      <WinRateChart series={props.odds.series} height={38} />
     </div>
   ) : (
     <div style={{ marginTop: 8, fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>

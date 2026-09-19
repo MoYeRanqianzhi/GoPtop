@@ -289,15 +289,16 @@ html.app-tauri .poster-strip { padding-right: 138px; }
    否则每手都会闪一下空白。
    尺寸整体压低（用户拍板同日）：胜率卡要能和「规则」卡一样高，见文件末尾的
    .bp-wide/.bp-swap 统一高度。 */
-.wr-bar { display: flex; flex-direction: column; gap: 4px; }
-.wr-legend {
-  display: flex; justify-content: space-between; gap: 8px;
+.wr-bar { display: flex; align-items: center; gap: 8px; }
+.wr-label {
+  flex-shrink: 0;
   font-family: var(--font-mono); font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
 }
 .wr-label--mine { color: var(--win-mine); }
 .wr-label--opp { color: var(--win-opp); }
 .wr-label b { font-size: 14px; }
 .wr-track {
+  flex: 1; min-width: 0;
   position: relative; display: flex; height: 16px;
   border: var(--border-thin); background: #fff; overflow: hidden;
 }
@@ -312,9 +313,9 @@ html.app-tauri .poster-strip { padding-right: 138px; }
 .wr-bar[data-thinking="1"] .wr-track { opacity: 0.65; }
 /* 尚无结果时整体压淡：与「真的 50%」区分开，但不占额外一行 */
 .wr-bar[data-pending="1"] .wr-track { opacity: 0.5; }
-/* 走势图：边框收细到 2px。25px 左右的高度里，3px 上下边框会和 2px 的走势线
-   挤成「三条线」，读起来像表格而不像图。 */
-.wr-chart { width: 100%; display: block; border: 2px solid var(--ink); background: #fff; }
+/* 走势图：虚线框（用户拍板 2026-09-19）——它是「随手的估计」而不是判定，
+   实线框与上面的胜率条争视觉重量；虚线也让它与实线的走势线区分得开。 */
+.wr-chart { width: 100%; display: block; border: 2px dashed var(--ink); background: #fff; }
 .wr-chart-mid { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
 .wr-chart-line { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; }
 

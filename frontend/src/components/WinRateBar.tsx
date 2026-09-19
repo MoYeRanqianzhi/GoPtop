@@ -23,22 +23,22 @@ export function WinRateBar(props: {
     ? 50
     : Math.max(0, Math.min(100, Math.round(props.winRate * 100)));
   const opp = 100 - pct;
+  // 文字摆在条的两侧（用户拍板 2026-09-19）：原本「一行标签 + 一行条」占两行，
+  // 底部卡本来就紧，并成一行后省出的高度留给走势图
   return (
     <div className="wr-bar" data-thinking={props.thinking ? "1" : "0"} data-pending={props.winRate === null ? "1" : "0"}>
-      <div className="wr-legend">
-        <span className="wr-label wr-label--mine">
-          {props.myLabel} <b>{pct}%</b>
-        </span>
-        <span className="wr-label wr-label--opp">
-          <b>{opp}%</b> {props.oppLabel}
-        </span>
-      </div>
+      <span className="wr-label wr-label--mine">
+        {props.myLabel} <b>{pct}%</b>
+      </span>
       <div className="wr-track" role="img" aria-label={`${props.myLabel}胜率 ${pct}%`}>
         <div className="wr-fill wr-fill--mine" style={{ width: `${pct}%` }} />
         <div className="wr-fill wr-fill--opp" style={{ width: `${opp}%` }} />
         {/* 分界刻度：胜率贴到 0/100 时这条线就是唯一还能看见的边界 */}
         <div className="wr-edge" style={{ left: `${pct}%` }} />
       </div>
+      <span className="wr-label wr-label--opp">
+        <b>{opp}%</b> {props.oppLabel}
+      </span>
     </div>
   );
 }
