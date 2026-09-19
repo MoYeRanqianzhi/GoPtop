@@ -349,13 +349,25 @@ pub(crate) fn on_presence(s: &mut Session, ctx: &ReduceCtx, ev: PresenceEvt) -> 
                 // rtcAns 带回邀请者的，而那条 presence **不带 pwd**（answer 分支里
                 // `"pwd": null` 是硬编码）。只按 pwd 校验的话，邀请者会把自己邀请的
                 // 受邀者当成「钥匙不对的第三人」拒掉——受邀者收到 reject 被打回主页，
-                // 一键直连永远建不起来。判据用「自己在等待 + 对方带回了 answer」。
-                let is_answer_back = rtc_ans.is_some() && s.role == Role::Inviter;
-                if is_answer_back || (s.pwd.is_some() && s.pwd == pwd) {
-                    // 带正确 pwd：自动同意（邀请钥匙语义）。
+                // 一键直连永远建不起来。
+                // 但判据**不能**降级成「带了 answer 就放行」：邀请链接是发给任意人的，
+                // 邀请者事先并不知道受邀者是谁，`from` 当不了判据——pwd 才是唯一能分辨
+                // 「本轮受邀者」与「拿着旧链接的窗口」的东西。旧链接窗口被放行的话，
+                // 下面 accept_challenge_with 会先 close_all_rtc 掐死眼前这条正在协商的
+                // 连接，再拿旧 answer 去喂新连接——两端都停在「对局中」而 peerConnected
+                // 恒 false，全程无任何报错。
+                // answer 载荷本身就是本轮 pwd 的 G1 密文，**解得开 ⇔ 持有本轮钥匙**，
+                // 于是既放行了线上不带 pwd 的合法回传，又没有放宽任何权限。
+                let holds_key = s.role == Role::Inviter
+                    && match (rtc_ans.as_deref(), s.pwd.as_deref()) {
+                        (Some(ans), Some(p)) => crate::codec::decode(ans, p).is_ok(),
+                        _ => false,
+                    };
+                if holds_key || (s.pwd.is_some() && s.pwd == pwd) {
+                    // 持有本轮钥匙：自动同意（邀请钥匙语义）。
                     fx.extend(accept_challenge_with(s, ctx, &from, &kind, size, &game_id, rtc_ans, true));
                 } else {
-                    // waiting(inviter) 但 pwd 对不上：第三人拿旧 pwd，拒绝。
+                    // waiting(inviter) 但钥匙对不上：第三人拿旧链接，拒绝。
                     fx.push(reject_presence(s, &from, &game_id));
                 }
                 return fx;
@@ -400,9 +412,14 @@ pub(crate) fn accept_challenge(s: &mut Session, ctx: &ReduceCtx) -> Vec<Effect> 
 fn accept_challenge_with(s: &mut Session, ctx: &ReduceCtx, from: &str, kind: &str, size: SizeT, invitee_game_id: &str, invitee_ans: Option<String>, auto: bool) -> Vec<Effect> {
     let _ = ctx;
     let mut fx = Vec::new();
+    // 活连接（main）的 tag 必须**先取一次**：下面 close_all_rtc() 会把 inviter_main
+    // 清成 None。喂 answer 的 Effect 与重新登记的槽位要用同一个 tag——分开两次取，
+    // 槽位就会记在回退值 "main" 上、而 answer 喂给了对端 ID（服务器模式受理后
+    // main 已改名），on_peer_state 按 tag 找不到槽位，连接通了也置不上 peer_connected。
+    let live_tag = s.inviter_main.clone();
     // 同源路径 answer 经 BC 送达，不阻塞进局；万一失败仅显示直连错误，棋局仍可下。
     if let Some(ans) = invitee_ans {
-        if let Some(tag) = s.inviter_main.clone() {
+        if let Some(tag) = live_tag.clone() {
             // 钥匙随 Effect 一起带上：本函数下面就会清 s.pwd（两人满员）
             fx.push(Effect::AcceptAnswer { tag, answer: ans, encrypted: true, pwd: s.pwd.clone() });
         }
@@ -417,9 +434,10 @@ fn accept_challenge_with(s: &mut Session, ctx: &ReduceCtx, from: &str, kind: &st
     // 而这条连接**是活的**（answer 已经喂进去、ICE 正在跑）。`on_peer_state` 只在
     // rtc_peers 里找得到对应 tag 时才置 `peer_connected = true`——账本被自己清掉后，
     // 连接再通也更新不了状态，表现为双方都已 `conn=Connected` 而 `peerConnected`
-    // 恒为 false、落子被 can_place 拒绝。
+    // 恒为 false、落子被 can_place 拒绝。opened=false 与此刻的真实状态一致：answer
+    // 刚交给 transport，连接要等 ICE 协商完才 open（open 事件随后会把它置 true）。
     s.rtc_peers.push(PeerSlot {
-        tag: s.inviter_main.clone().unwrap_or_else(|| "main".into()),
+        tag: live_tag.unwrap_or_else(|| "main".into()),
         player: true,
         spectator: false,
         opened: false,
@@ -572,7 +590,12 @@ pub(crate) fn on_rtc_ready(
                 "pwd": Option::<String>::None, "kind": s.kind, "size": s.size,
                 "gameId": gid, "rtcAns": ans,
             })));
-            let url = links::answer_to_url(&s.share_origin, &host, "", &ans, s.game_id.as_deref(), Some(s.kind.as_str()), Some(s.size));
+            // **回执必须带上本轮 pwd**：邀请者受理回执时用它做钥匙校验
+            //（`accept_receipt`：`Some(r.pwd) != s.pwd` 即拒），与观战回执那条
+            //（传 `spec_pwd`）同理。这里曾写死 `""`——回执解出来 pwd 为空，
+            // 邀请者一律回「回执钥匙与本局不符，已拒绝」，跨设备粘贴回执这条路
+            // 从头到尾走不通。TS 原实现传的是链接里带回的 `pwdOrNull`，保持一致。
+            let url = links::answer_to_url(&s.share_origin, &host, s.pwd.as_deref().unwrap_or(""), &ans, s.game_id.as_deref(), Some(s.kind.as_str()), Some(s.size));
             s.answer_back_url = Some(url);
         }
         fx.push(Effect::Emit);
@@ -670,7 +693,9 @@ pub(crate) fn accept_receipt(s: &mut Session, ctx: &ReduceCtx, r: &AnswerIntent)
         return vec![Effect::Notice(Some("本局邀请的直连信令未就绪（可能生成失败），无法受理回执；请取消等待后重新开战".into()), None)];
     };
     // answer 交给 transport 应用；应用结果经 PeerState open（直连建立）或失败提示呈现。
-    let mut fx = vec![Effect::AcceptAnswer { tag, answer: r.rtc_ans.clone(), encrypted: true, pwd: s.pwd.clone().or_else(|| s.spec_pwd.clone()) }];
+    // 钥匙只可能是局 pwd：本函数开头的校验已要求 `s.pwd == r.pwd`，走到这里 s.pwd 必为
+    // Some；观战钥匙（spec_pwd）是另一把钥匙，解不开对局 answer，不能当兜底。
+    let mut fx = vec![Effect::AcceptAnswer { tag, answer: r.rtc_ans.clone(), encrypted: true, pwd: s.pwd.clone() }];
     // await 间隙用户可能已取消等待：进入对局状态放 PeerState open 统一处理
     //（对齐 TS：直连建立才切 playing，坏回执保持 waiting 可重试）。
     let k = r.kind.clone().unwrap_or_else(|| s.kind.clone());

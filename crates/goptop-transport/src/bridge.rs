@@ -127,7 +127,7 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             core.borrow_mut().peers.push((tag, peer));
         }
         Effect::FeedOffer { tag, offer, encrypted } => {
-            let (sdp, typ, _r) = decode_sdp(&offer, encrypted, core);
+            let (sdp, typ, _r) = decode_sdp(&offer, encrypted, core, None);
             if let Some((sdp, typ)) = sdp.zip(typ) {
                 if let Some((_, peer)) = core.borrow().peers.iter().find(|(t, _)| *t == tag) {
                     let core2 = core.clone();
@@ -159,8 +159,16 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
                 core.peers.push((to, entry.1));
             }
         }
-        Effect::AcceptAnswer { tag, answer, encrypted, pwd: _pwd } => {
-            let (sdp, typ, _) = decode_sdp(&answer, encrypted, core);
+        Effect::AcceptAnswer { tag, answer, encrypted, pwd } => {
+            // 钥匙取 Effect 自带的那把（与 native 侧 `decode_payload_with` 同规则）。
+            // **不能在这里读 `session.pwd`**：本 Effect 的构造点 `accept_challenge_with`
+            // 在 reduce 内部紧接着就把 `s.pwd` 清成 None（「两人满员，钥匙失效」），
+            // 而 Effect 是 reduce 返回之后才执行的——此处读到的已是清空后的值，只能落回
+            // 观战钥匙 `spec_pwd`。对局 answer 是局 pwd 的密文，两把钥匙不同值，解码必然
+            // 失败，而失败路径是**静默丢弃**（解不出 sdp 就不喂 answer，无任何提示）：
+            // 两端都停在「对局中」、`peerConnected` 恒 false。native 侧已按 Effect 携带的
+            // 钥匙解，这里与它对齐（曾两端分叉：只有浏览器端解不开）。
+            let (sdp, typ, _) = decode_sdp(&answer, encrypted, core, pwd.as_deref());
             if let (Some(sdp), Some(typ)) = (sdp, typ) {
                 if let Some((_, peer)) = core.borrow().peers.iter().find(|(t, _)| *t == tag) {
                     peer.accept_answer(&sdp, &typ);
@@ -206,11 +214,14 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
 }
 
 /// 解出 SDP 对：明文 JSON（服务器模式）或 G1 token（无服务器，pwd 解码）。
-fn decode_sdp(payload: &str, encrypted: bool, core: &Rc<RefCell<Core>>) -> (Option<String>, Option<String>, Option<String>) {
+///
+/// `key` 是调用方已知的解密钥匙（`AcceptAnswer` 随 Effect 携带的那把），优先于
+/// 会话里的 `pwd`/`spec_pwd`——理由见 `AcceptAnswer` 分支的说明。
+fn decode_sdp(payload: &str, encrypted: bool, core: &Rc<RefCell<Core>>, key: Option<&str>) -> (Option<String>, Option<String>, Option<String>) {
     if encrypted {
         let pwd = {
             let c = core.borrow();
-            c.session.pwd.clone().or_else(|| c.session.spec_pwd.clone()).unwrap_or_default()
+            key.map(str::to_string).or_else(|| c.session.pwd.clone()).or_else(|| c.session.spec_pwd.clone()).unwrap_or_default()
         };
         match goptop_net::codec::decode(payload, &pwd).ok().and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok()) {
             Some(v) => (

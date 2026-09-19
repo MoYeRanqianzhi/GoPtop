@@ -487,6 +487,143 @@ fn kick_sends_notice_before_removal() {
     assert!(a.spectators.is_empty());
 }
 
+/// 旧链接窗口拿着**上一轮**钥匙的 answer 回传：必须拒绝，且不得掐死眼前这条等待中的连接。
+/// 回归：判据曾是「带了 rtcAns 且自己是邀请者就放行」，而邀请链接是发给任意人的——
+/// 旧窗口会先 `close_all_rtc()` 掐死本轮连接、再拿旧 answer 去喂它，两端都停在
+/// 「对局中」而 `peerConnected` 恒 false，全程无报错。判据改成「answer 解得开本轮 pwd」。
+#[test]
+fn answer_from_a_stale_invite_link_is_rejected() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: None, answer_plain: None, offer_enc: Some("G1INVITE".into()), answer_enc: None }, &c);
+    let round_game = a.game_id.clone().expect("开局应有 gameId");
+    // 旧窗口形态与真实一致：answer 是**旧 pwd** 的 G1 密文，presence 不带 pwd
+    //（`on_rtc_ready` 的受邀者分支里 `"pwd": null` 是硬编码）。
+    let stale = crate::codec::encode(r#"{"s":"OLD-SDP","t":"answer","r":"player"}"#, "0000-old-key").unwrap();
+    let fx = reduce(
+        &mut a,
+        Event::Presence(PresenceEvt::Challenge {
+            from: "u-old".into(),
+            from_name: "旧窗口".into(),
+            pwd: None,
+            kind: "gomoku".into(),
+            size: 15,
+            game_id: "g-stale".into(),
+            rtc_ans: Some(stale),
+        }),
+        &c,
+    );
+    assert!(fx.iter().any(|e| matches!(e, Effect::SendPresence(v) if v["t"] == "reject")), "旧钥匙的 answer 必须被拒");
+    assert!(!fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { .. })), "不得把旧 answer 喂给本轮连接");
+    assert_eq!(a.phase, Phase::Waiting, "本局应仍在等待");
+    assert_eq!(a.game_id.as_deref(), Some(round_game.as_str()), "不得改用旧局的 gameId");
+    assert!(a.rtc_peers.iter().any(|q| q.tag == "main"), "本轮连接账本不得被清空");
+}
+
+/// 本轮受邀者的 answer（本轮 pwd 的 G1 密文）经 presence 回传：自动受理。
+/// 同时压住「钥匙随 Effect 携带」这条硬约束——`accept_challenge_with` 紧接着就清 `s.pwd`，
+/// 而 Effect 是 reduce 返回之后才执行的，到那时再读 session 只能读到 None。
+#[test]
+fn answer_back_with_the_current_key_is_accepted() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: None, answer_plain: None, offer_enc: Some("G1INVITE".into()), answer_enc: None }, &c);
+    let pwd = a.pwd.clone().expect("等待中的邀请者应有 pwd");
+    let ans = crate::codec::encode(r#"{"s":"SDP-B","t":"answer","r":"player"}"#, &pwd).unwrap();
+    let fx = reduce(
+        &mut a,
+        Event::Presence(PresenceEvt::Challenge {
+            from: "u-b".into(),
+            from_name: "乙".into(),
+            pwd: None,
+            kind: "gomoku".into(),
+            size: 15,
+            game_id: "g-b".into(),
+            rtc_ans: Some(ans.clone()),
+        }),
+        &c,
+    );
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { answer, pwd: Some(p), .. } if answer == &ans && p == &pwd)),
+        "应受理本轮 answer 并带上本局钥匙"
+    );
+    assert_eq!(a.phase, Phase::Playing);
+    assert_eq!(a.game_id.as_deref(), Some("g-b"));
+}
+
+/// 服务器 join 受理后 `main` 已改名为对端 ID：受理挑战时重登记的槽位必须沿用同一个 tag。
+/// 回归：喂 answer 取一次 tag、登记槽位再取一次（此时 `close_all_rtc()` 已把
+/// `inviter_main` 清成 None，取到的是回退值 "main"）——槽位记在 "main" 上、answer 喂给
+/// 对端 ID，`on_peer_state(tag)` 找不到槽位，连接通了 `peer_connected` 也置不上。
+#[test]
+fn accepted_connection_slot_keeps_the_renamed_tag() {
+    let mut a = mk("a", true);
+    let c = ctx(1000);
+    // 直接摆出「服务器 join 已受理」后的账本：main 已改名成对端 ID。
+    a.role = Role::Inviter;
+    a.phase = Phase::Waiting;
+    a.pwd = Some("p1w2e3".into());
+    a.game_id = Some("g-a".into());
+    a.inviter_main = Some("u-b".into());
+    a.rtc_peers.push(PeerSlot { tag: "u-b".into(), player: true, spectator: false, opened: false, offer_ready: true, offer_plain: None, awaiting_peer: None });
+    let ans = crate::codec::encode(r#"{"s":"SDP-B","t":"answer","r":"player"}"#, "p1w2e3").unwrap();
+    let fx = reduce(
+        &mut a,
+        Event::Presence(PresenceEvt::Challenge {
+            from: "u-b".into(),
+            from_name: "乙".into(),
+            pwd: Some("p1w2e3".into()),
+            kind: "gomoku".into(),
+            size: 15,
+            game_id: "g-b".into(),
+            rtc_ans: Some(ans),
+        }),
+        &c,
+    );
+    assert!(fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { tag, .. } if tag == "u-b")), "answer 应喂给 transport 里真实的 tag");
+    assert!(a.rtc_peers.iter().any(|q| q.tag == "u-b"), "受理后槽位 tag 必须仍是 transport 侧的 u-b");
+    assert!(!a.rtc_peers.iter().any(|q| q.tag == "main"), "不得登记回退 tag");
+}
+
+/// 跨设备对局回执全链路（无服务器唯一的跨设备配对通路）：A 邀请 → B 点链接出 answer →
+/// B 的回执链接 → A 粘贴受理。
+///
+/// **回执必须带回本轮 pwd**：受理端的校验是 `Some(r.pwd) == s.pwd`，回执链接里 pwd 为空
+/// 就会被一律回「回执钥匙与本局不符，已拒绝」——跨设备粘贴这条路从头到尾走不通（观战回执
+/// 那条传的是 spec_pwd，两条同理，只有对局回执曾把 pwd 写死成 ""）。
+/// 本用例刻意走**真实产物**（`answer_back_url`）而不是手工拼一条带正确 pwd 的链接：
+/// 手工拼的链接测不到「链接里到底带了什么」这一层，正是本条要压的地方。
+/// 受理后 answer 的解密钥匙取**本局 pwd**——回执校验已保证 `s.pwd == r.pwd`，此处必为 Some；
+/// 观战钥匙（spec_pwd）是另一把钥匙，解不开对局 answer，不能当兜底。
+#[test]
+fn cross_device_receipt_carries_the_key_and_is_accepted() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: None, answer_plain: None, offer_enc: Some("G1INVITE".into()), answer_enc: None }, &c);
+    let pwd = a.pwd.clone().expect("等待中的邀请者应有 pwd");
+    let link = a.invite_url.clone().expect("无服务器开局应回填邀请链接");
+    // B：真实入口——点邀请链接进来（Boot 路径）。
+    let mut b = mk("b", false);
+    reduce(&mut b, Event::Boot { href: link }, &c);
+    assert_eq!(b.role, Role::Invitee, "点链接应进受邀者态");
+    let ans = crate::codec::encode(r#"{"s":"SDP-B","t":"answer","r":"player"}"#, &pwd).unwrap();
+    reduce(&mut b, Event::RtcReady { tag: "main".into(), offer_plain: Some("PLAIN".into()), answer_plain: None, offer_enc: None, answer_enc: Some(ans.clone()) }, &c);
+    // B 的回执链接（跨设备时就是复制这条链接发回邀请者）。
+    let receipt = b.answer_back_url.clone().expect("受邀者应生成回执链接");
+    let intent = crate::links::parse_pasted_answer(&receipt).expect("回执链接应可解析");
+    assert_eq!(intent.pwd, pwd, "回执链接必须带回本轮钥匙，否则邀请者一律拒收");
+    // A 粘贴受理。
+    let fx = reduce(&mut a, Event::Ui(UiCommand::AcceptReceipt(Box::new(intent))), &c);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { answer, pwd: Some(p), .. } if answer == &ans && p == &pwd)),
+        "回执受理应带上本局 pwd；实际 effects={:?}",
+        fx.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
+    );
+}
+
 /// 观战者申请发言：向自己的 host 发 spec-chat-req 信令。
 #[test]
 fn spectator_request_chat_sends_signal_to_host() {
