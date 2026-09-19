@@ -41,3 +41,6 @@ wasm-pack.log
 
 # 实机测试临时产物（截图/调试导出）
 .agents/tmp/
+
+# e2e 截图产物（人工核验用，不入库）
+scripts/e2e/shots/

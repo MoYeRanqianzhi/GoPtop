@@ -183,6 +183,32 @@ export function isShellRuntime(): boolean {
   }
 }
 
+/**
+ * 鸿蒙壳注入的原生宿主桥（`harmony/entry/.../Index.ets` 的 javaScriptProxy）。
+ *
+ * **它与 wasm 无关**：鸿蒙能跑原生代码，规则与 AI 直接链接 Rust（NAPI）——
+ * 浏览器才是唯一需要 wasm 的端（见 .agents/memory/2026-09-19-wasm-is-web-only-…）。
+ * 探测不到就回落 wasm，所以老壳（未带原生模块的 HAP）仍能跑。
+ */
+export type HarmonyNativeBridge = {
+  /** 同步命令：落子/悔棋/停一手/状态/计分/建局/释放。 */
+  call(cmd: string, argsJson: string): string;
+  /** 起一次后台 AI 分析，返回票号；结果用 aiPoll 取。 */
+  aiPost(reqJson: string): number;
+  /** 取分析结果；未完成返回空串。 */
+  aiPoll(ticket: number): string;
+};
+
+/** 取鸿蒙原生宿主桥；不在鸿蒙壳（或壳未带原生模块）时返回 null。 */
+export function harmonyNative(): HarmonyNativeBridge | null {
+  try {
+    const g = (window as unknown as { goptopNative?: HarmonyNativeBridge }).goptopNative;
+    return g && typeof g.call === "function" && typeof g.aiPost === "function" ? g : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 分享基地址（自动）：Web 用当前站点；打包壳用 SHARE_ORIGIN_NATIVE。 */
 export function shareOrigin(): string {
   return isShellRuntime() ? SHARE_ORIGIN_NATIVE : window.location.origin;

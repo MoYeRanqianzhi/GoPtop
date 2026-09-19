@@ -3,7 +3,7 @@
 # frontend/ 为独立 npm 包，不纳入 Cargo workspace。
 
 [workspace]
-members = ["crates/goptop-core", "crates/goptop-net", "crates/goptop-transport", "crates/goptop-server", "crates/goptop-ai", "src-tauri", "crates/goptop-transport-native"]
+members = ["crates/goptop-core", "crates/goptop-net", "crates/goptop-transport", "crates/goptop-server", "crates/goptop-ai", "src-tauri", "crates/goptop-transport-native", "crates/goptop-ohos"]
 # vendored 的 figrid-board 经 [patch.crates-io] 引入，是独立 package：
 # 纳入成员会让它自己的 lock/target 与本仓库互相干扰
 exclude = ["crates/goptop-ai/vendor/figrid-board"]

@@ -21,6 +21,10 @@
 import { webview } from '@kit.ArkWeb';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
+// 原生宿主：NAPI 薄层（cpp/napi_init.cpp）转发到 Rust 的 goptop_call。
+// **鸿蒙能跑原生代码，规则与 AI 都直接链接原生 crate**——wasm 只是 Web 端的编译目标
+// （见 .agents/memory/2026-09-19-wasm-is-web-only-native-platforms-link-rust.md）。
+import goptop from 'libgoptop.so';
 
 // 虚拟域名（承载打包资源，公网不可达）。host 必须与前端 frontend/src/net/links.ts 的
 // ARKWEB_SHELL_HOST 逐字一致：isShellRuntime() 靠它判定「打包壳」并决定分享链接基地址，
@@ -96,6 +100,34 @@ class GoptopStoreProxy {
   }
 }
 
+/**
+ * 原生宿主代理：注入给前端门面（javaScriptProxy），把规则判定与 AI 分析接到 Rust。
+ *
+ * 契约与 src-tauri/src/rules.rs（Tauri command）同源——两边都只是
+ * `goptop_core::json_api` 的宿主适配，前端因而能共用一份后端代码。
+ *
+ * **AI 必须拆成 post/poll**：`call('ai_analyze', …)` 是同步阻塞的纯计算，按预算要跑
+ * 0.3~3 秒；javaScriptProxy 的方法在 UI 线程上执行，直接同步调会把界面冻死
+ * （桌面端必须 `spawn_blocking`、Web 端必须开 Worker，是同一件事）。而
+ * javaScriptProxy **不支持返回 Promise**，所以走「后台算 + JS 轮询票号」。
+ */
+class GoptopNativeProxy {
+  /** 同步命令（微秒级）：落子/悔棋/停一手/状态/计分/建局/释放。 */
+  call(cmd: string, argsJson: string): string {
+    return goptop.call(cmd, argsJson);
+  }
+
+  /** 起一次后台 AI 分析，立即返回票号（结果用 aiPoll 取）。 */
+  aiPost(reqJson: string): number {
+    return goptop.aiPost(reqJson);
+  }
+
+  /** 取分析结果；未完成返回空串（票号一次性）。 */
+  aiPoll(ticket: number): string {
+    return goptop.aiPoll(ticket);
+  }
+}
+
 // 远程调试（ArkWeb inspector），必须在任何 Web 实例创建前调用
 webview.WebviewController.setWebDebuggingAccess(true);
 
@@ -126,6 +158,8 @@ struct Index {
   store: GoptopStoreProxy = new GoptopStoreProxy(
     (getContext(this) as common.UIAbilityContext).filesDir
   );
+  /** 原生宿主（规则 + AI）代理，见类说明。 */
+  native: GoptopNativeProxy = new GoptopNativeProxy();
 
   build() {
     Column() {
@@ -136,6 +170,13 @@ struct Index {
           object: this.store,
           name: 'goptopStore',
           methodList: ['load', 'set', 'remove'],
+          controller: this.controller,
+        })
+        // 原生宿主（前端探测到 window.goptopNative 即走原生 Rust 而非 wasm）
+        .javaScriptProxy({
+          object: this.native,
+          name: 'goptopNative',
+          methodList: ['call', 'aiPost', 'aiPoll'],
           controller: this.controller,
         })
         .domStorageAccess(true)

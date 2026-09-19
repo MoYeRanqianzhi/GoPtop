@@ -1,0 +1,24 @@
+[package]
+# goptop-ohos — 鸿蒙原生宿主的 Rust 侧。
+# 与 src-tauri 的分工相同：契约逻辑全在 goptop_core::json_api（三端共用一份），
+# 这里只做「C ABI ↔ 多局实例管理」的适配。鸿蒙的 NAPI 层用 C++ 写
+# （harmony/entry/src/main/cpp），那层的 NAPI 头文件由 DevEco SDK 提供——
+# 手写 NAPI 的 FFI 声明等于自己复刻一份 ABI，出错的代价是设备上难查的静默失败。
+name = "goptop-ohos"
+version = "0.1.0-alpha.0"
+edition = "2024"
+description = "GoPtop HarmonyOS host — C ABI over goptop-core/json_api"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[lib]
+# cdylib：产物 libgoptop_ohos.so，由 entry 的 CMake 链接进 NAPI 模块。
+# rlib：留给宿主机单测——同一份 C ABI 在本机直接调，不需要鸿蒙工具链。
+name = "goptop_ohos"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 规则真源与 AI 引擎都直接链接原生 crate（鸿蒙能跑原生代码，不该绕道 wasm）
+goptop-core = { path = "../goptop-core" }
+goptop-ai = { path = "../goptop-ai" }
+serde_json = { workspace = true }

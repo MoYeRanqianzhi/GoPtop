@@ -17,7 +17,7 @@
  * board 可直接 setBoard。
  */
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
-import { isTauri } from "../net/links";
+import { harmonyNative, isTauri } from "../net/links";
 
 /** wasm 规则判定结果：ok 时 board 为权威棋盘（围棋含提子效果）。 */
 export type PlaceResult =
@@ -176,9 +176,96 @@ class NativeBackend implements Backend {
   }
 }
 
-/** 规则引擎门面：按运行环境挑后端（Web → wasm，Tauri 系 → 原生）。 */
+/* ---------------- 鸿蒙后端（NAPI 原生宿主） ---------------- */
+
+/**
+ * 鸿蒙壳：规则判定直连 Rust（NAPI），与 Tauri 那条一样是**原生**，不是 wasm。
+ *
+ * 与 [`NativeBackend`] 的差别只在「地址」：Tauri 走 `invoke` 的异步 IPC，鸿蒙走
+ * javaScriptProxy 的**同步**调用。同步是本层刻意保留的——规则命令是微秒级的纯计算，
+ * 包成 Promise 只会让调用方多一次无谓的微任务跳转（AI 那条才需要异步，见 ai/client.ts）。
+ *
+ * 返回值形态：原生侧已经把 json_api 的字符串契约解成了对象（见 crates/goptop-ohos
+ * 的分发表），所以这里**不再 JSON.parse 一次**——多解一层会在字符串里再套一层引号。
+ */
+class HarmonyBackend implements Backend {
+  private id: number | null = null;
+
+  /** 桥在页面存活期内不会变，取一次即可；取不到说明壳没带原生模块。 */
+  private get bridge() {
+    return harmonyNative();
+  }
+
+  async newGame(kindJson: string): Promise<boolean> {
+    const b = this.bridge;
+    if (!b) return false;
+    // 与 NativeBackend 同款：先摘旧 id 再取新局，失败时不至于继续用旧局落子
+    const stale = this.id;
+    this.id = null;
+    const id = b.call("game_new", JSON.stringify({ kindJson }));
+    this.id = typeof id === "number" ? id : null;
+    if (stale !== null) b.call("game_drop", JSON.stringify({ id: stale }));
+    return this.id !== null;
+  }
+
+  private call<T>(cmd: string, args: Record<string, unknown> = {}): T | null {
+    const b = this.bridge;
+    if (!b || this.id === null) return null;
+    const raw = b.call(cmd, JSON.stringify({ id: this.id, ...args }));
+    return (raw ?? null) as T | null;
+  }
+
+  async place(x: number, y: number): Promise<PlaceResult | null> {
+    return this.call<PlaceResult>("game_place", { x, y });
+  }
+
+  async pass(): Promise<PlaceResult | null> {
+    return this.call<PlaceResult>("game_pass");
+  }
+
+  async undo(): Promise<UndoResult | null> {
+    return this.call<UndoResult>("game_undo");
+  }
+
+  async reset(): Promise<void> {
+    this.call<void>("game_reset");
+  }
+
+  async adopt(board: StoneColor[][], toMove: StoneColor, winner: StoneColor | null, history: (Coord | "pass")[]): Promise<void> {
+    const ok = this.call<boolean>("game_adopt", {
+      boardJson: JSON.stringify(board),
+      toMove,
+      winner: winner ?? "null",
+      historyJson: JSON.stringify(history),
+    });
+    if (!ok) console.warn("[rules] adopt 被引擎拒绝：快照与当前对局尺寸/格式不符，已忽略该快照");
+  }
+
+  async stateJson(): Promise<unknown | null> {
+    return this.call<unknown>("game_state_json");
+  }
+
+  async dispose(): Promise<void> {
+    this.call<void>("game_drop");
+    this.id = null;
+  }
+}
+
+/**
+ * 挑后端：**能跑原生代码的平台就不该跑 wasm**。
+ * - Tauri（桌面/Android）：`__TAURI_INTERNALS__` → invoke；
+ * - 鸿蒙原生壳：`window.goptopNative` → javaScriptProxy；
+ * - 其余（浏览器，以及没带原生模块的老鸿蒙壳）→ wasm。
+ */
+function pickBackend(): Backend {
+  if (isTauri()) return new NativeBackend();
+  if (harmonyNative()) return new HarmonyBackend();
+  return new WasmBackend();
+}
+
+/** 规则引擎门面：按运行环境挑后端（Web → wasm；Tauri 系 / 鸿蒙原生壳 → 直连 Rust）。 */
 export class RulesEngine {
-  private backend: Backend = isTauri() ? new NativeBackend() : new WasmBackend();
+  private backend: Backend = pickBackend();
 
   /**
    * 最近一次 `newGame` 的落地 Promise（两个后端都异步：wasm 要等模块 init，
