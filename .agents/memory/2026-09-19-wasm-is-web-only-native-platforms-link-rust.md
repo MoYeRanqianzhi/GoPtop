@@ -44,6 +44,32 @@ UI 仍是 ArkWeb 壳（与桌面用 WebView2 渲染 UI 同构），但**业务�
   NAPI 的 async work 线程池，JS 侧轮询票号——全是同步 NAPI 能力，不依赖任何
   「某版本才有的 marshalling 行为」。
 
+### NAPI 接入的四个真因（2026-09-20 实测）
+
+第一版 HAP 能装能跑，但桥的每次调用都返回 null，设备日志只有一句
+「napi api call fail」。四个真因分属四层，**没有一条能从那句话看出来**：
+
+1. **构造器被 GC 掉 → 模块从不注册**。`RegisterGoptopModule` 除 `.init_array` 外没有
+   引用点，而鸿蒙的构建带 `-ffunction-sections --gc-sections`，整段被回收，
+   `.init_array` 剩一个全零段（`llvm-readobj` 可见，连重定位都没有）。加
+   `__attribute__((used))`。
+2. **DT_NEEDED 写进了绝对路径**。Rust 产物没有 SONAME，链接方把
+   `G:/…/libs/arm64-v8a/libgoptop_ohos.so` 整条写进动态段，设备上不存在 → dlopen 失败。
+   `build-ohos.sh` 补 `-Wl,-soname,libgoptop_ohos.so`。
+3. **`.javaScriptProxy()` 是单值属性**。注册两个对象只有最后一个生效——先注册的
+   `goptopStore` 直接变 undefined，日志只留「native proxy object not found」。
+   ArkWeb 没有多对象重载（`web.d.ts` 只有单个 `javaScriptProxy(value)`）。
+   改成**一个对象一次注册**（`goptopHost` 同时带存储面与原生宿主面）。
+4. **`napi_create_async_work` 的 `async_resource_name` 不能传 nullptr**（Node 文档写明
+   必填）。传空在 OHOS 上返回 `napi_invalid_arg`，表现为自抛的「无法排队 AI 分析任务」。
+
+**排错顺序建议**：先 `llvm-readobj -d/-x .init_array` 看链接产物（1、2 都在这里），
+再看设备日志。C++ 侧的 `hilog` 与 ArkTS 侧的异常栈比 ArkWeb 的转述有用得多——
+`ArkCompiler: Error: <你自己的中文报错>` 会把真正的抛出点连行号一起打出来。
+
+**模拟器是 x86_64**，只带 arm64 的 HAP 装不上（`install parse native so failed:
+Abi type … does not match`）。两个 ABI 都要编、都要拷进 `cpp/libs/`。
+
 ### 工具链的坑（`scripts/build-ohos.sh`）
 
 OHOS NDK 装在 `D:\Huawei\DevEco Studio\…`，路径带空格，而 **RUSTFLAGS 是按空白切分**的：
