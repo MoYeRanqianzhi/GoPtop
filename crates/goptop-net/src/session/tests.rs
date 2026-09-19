@@ -653,3 +653,59 @@ fn spectator_request_chat_sends_signal_to_host() {
         fx.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
     );
 }
+
+/// `UiCommand` 的 serde 往返：原生宿主（Tauri / 鸿蒙）的命令面只有
+/// `session_cmd(cmdJson)` 一个口子，路径全靠这份标签——**写错标签在设备上只是
+/// 「这条命令没反应」**，不会报错，所以逐条锁死。
+///
+/// 覆盖三类形状（serde 的**外部标签**默认形态）：单元变体是裸字符串 `"backHome"`、
+/// 结构体变体是 `{"place":{"x":7,"y":8}}`、元组变体是 `{"sendChat":"文本"}`，
+/// 另外还有带 `#[serde(rename_all="camelCase")]` 字段的 `AnswerIntent`（回执受理那条，
+/// 字段最多）。前端按同一份形状构造，写错就是「这条命令没反应」，所以形态要钉死。
+#[test]
+fn ui_command_json_round_trip() {
+    use crate::links::AnswerIntent;
+    let cases = vec![
+        UiCommand::CreateInvite,
+        UiCommand::BackHome,
+        UiCommand::Place { x: 7, y: 8 },
+        UiCommand::ToggleDead { x: 0, y: 14 },
+        UiCommand::AcceptInvite {
+            inviter_id: "u-a".into(),
+            pwd: Some("p1w2e3".into()),
+            kind: "gomoku".into(),
+            size: 15,
+            rtc: Some("G1TOKEN".into()),
+            spec: false,
+        },
+        UiCommand::SendChat("你好".into()),
+        UiCommand::MuteSpec("u-c".into(), true),
+        UiCommand::PickSize(19),
+        UiCommand::AcceptReceipt(Box::new(AnswerIntent {
+            inviter_id: "u-a".into(),
+            pwd: "p1w2e3".into(),
+            rtc_ans: "G1ANS".into(),
+            spectator: false,
+            game_id: Some("g-1".into()),
+            kind: Some("go".into()),
+            size: Some(9),
+        })),
+    ];
+    for c in cases {
+        let json = serde_json::to_string(&c).expect("UiCommand 必须可序列化");
+        let back: UiCommand = serde_json::from_str(&json).unwrap_or_else(|e| panic!("往返失败: {json} → {e}"));
+        // 逐字节比对而不是 Debug：Debug 不保证稳定，而这里要锁的正是**线上形态**
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+    // 标签是 camelCase 而非 PascalCase（前端按 camelCase 构造，写死在这里防回退）；
+    // 单元变体是**裸字符串**（serde 外部标签的默认形态），不是 {"backHome":null}
+    assert_eq!(serde_json::to_string(&UiCommand::BackHome).unwrap(), r#""backHome""#);
+    assert_eq!(serde_json::to_string(&UiCommand::Place { x: 1, y: 2 }).unwrap(), r#"{"place":{"x":1,"y":2}}"#);
+    assert_eq!(serde_json::to_string(&UiCommand::SendChat("嗨".into())).unwrap(), r#"{"sendChat":"嗨"}"#);
+    assert_eq!(
+        serde_json::to_string(&UiCommand::AcceptInvite { inviter_id: "u-a".into(), pwd: None, kind: "go".into(), size: 9, rtc: None, spec: true }).unwrap(),
+        r#"{"acceptInvite":{"inviterId":"u-a","pwd":null,"kind":"go","size":9,"rtc":null,"spec":true}}"#
+    );
+    // 未知标签必须报错，不能静默吞掉（否则前端拼错命令名 = 无声无息）
+    assert!(serde_json::from_str::<UiCommand>(r#"{"noSuchCmd":null}"#).is_err());
+}

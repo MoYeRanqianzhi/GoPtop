@@ -447,7 +447,19 @@ pub enum Event {
 }
 
 /// UI 命令。
-#[derive(Clone, Debug)]
+///
+/// 带 serde 是为了**原生宿主的命令面只有一个口子**：wasm 端每个命令一个
+/// `#[wasm_bindgen]` 方法（JS 侧是静态类型调用），而 Tauri/NAPI 侧的 C 边界只能收
+/// 字符串——若不序列化本枚举，就得在宿主里再抄一份「方法名 → 命令」的分派表，
+/// 两处契约迟早分叉，而分叉的表现是「某个命令在某个端静默无效」。
+///
+/// 标签走 camelCase（与快照、链接、AI 契约一致）；外部标签形式即
+/// `{"place":{"x":7,"y":7}}`、`{"backHome":null}`。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+// `rename_all` 只管**变体名**；结构体变体的字段要另一条 `rename_all_fields`，
+// 否则线上形态是驼峰标签配蛇形字段（`{"acceptInvite":{"inviter_id":…}}`）——
+// JS 侧得记两套命名，写错只是「这条命令没反应」。两条一起给，线上形态统一是驼峰。
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UiCommand {
     /// 主页开启对战（waiting）。
     CreateInvite,

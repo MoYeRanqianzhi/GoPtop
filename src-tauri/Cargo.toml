@@ -31,6 +31,14 @@ serde_json = { workspace = true }
 # 只在 `wasm` feature 下启用），直接 use 即可，零桥接成本。
 goptop-core = { path = "../crates/goptop-core" }
 goptop-ai = { path = "../crates/goptop-ai" }
+# HostAction 的 serde 派生（回给前端的宿主动作队列）
+serde = { workspace = true }
+# P2P 会话的原生执行器（WebSocket / WebRTC / 同源通道）。
+# 传输层的**逻辑**在 goptop-net，本 crate 是它在本平台的 IO 后端。
+goptop-transport-native = { path = "../crates/goptop-transport-native" }
+# UI 命令的 serde 契约（`UiCommand`）：session.rs 的命令面只有 `session_cmd` 一个口子，
+# 线上形态就是本枚举的序列化结果——直接依赖它，而不是在宿主里再抄一份分派表。
+goptop-net = { path = "../crates/goptop-net" }
 
 # Windows Snap Layouts 覆盖层（src-tauri/src/titlebar.rs）：透明子窗口 + HTMAXBUTTON。
 # 只需 Win32 最小面：Foundation/LibraryLoader/WindowsAndMessaging。
