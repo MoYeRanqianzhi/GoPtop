@@ -4,6 +4,7 @@
 import type { GameSession } from "../state/useGameSession";
 import { BoardPanel } from "./components";
 import { NoticeLine } from "../components/NoticeLine";
+import { useWinRate } from "../ai/useWinRate";
 
 export function WatchPage(props: { s: GameSession }) {
   const {
@@ -11,6 +12,17 @@ export function WatchPage(props: { s: GameSession }) {
     peerConnected, p2pStatusText, notice, statusText, moveCount,
     setHover, backHome,
   } = props.s;
+
+  /* 胜率：观战者没有「我方」颜色，按黑方视角（标签照实写「黑/白」）。
+     只读页面同样需要它——观战时最想知道的就是「现在谁占优」。 */
+  const odds = useWinRate({
+    getState: () => props.s.stateJson(),
+    myColor: "Black",
+    moveCount,
+    budgetMs: 500,
+    enabled: !winner,
+  });
+
   return (
     <div className="play-stack">
       <div className="brutal-card" style={{ padding: "10px 12px", background: "#fff", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -31,6 +43,13 @@ export function WatchPage(props: { s: GameSession }) {
         statusText={statusText} statusNote="观战 · 只读"
         moveCount={moveCount}
         onUndo={null} onReset={null}
+        odds={{
+          winRate: odds.winRate,
+          series: odds.series,
+          thinking: odds.thinking,
+          myLabel: "黑",
+          oppLabel: "白",
+        }}
       />
     </div>
   );

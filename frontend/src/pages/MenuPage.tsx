@@ -1,5 +1,5 @@
 /**
- * 菜单页 `/`（原 App.tsx JSX 原样搬出，禁止行为变化）：四种玩法入口 + 主页链接 + 通知行。
+ * 菜单页 `/`（原 App.tsx JSX 原样搬出，禁止行为变化）：五种玩法入口 + 主页链接 + 通知行。
  */
 import { nav } from "../net/links";
 import type { GameSession } from "../state/useGameSession";
@@ -15,6 +15,7 @@ export function MenuPage(props: { s: GameSession }) {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/local")}>本地对战</button>
+        <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/ai")}>人机对战</button>
         <button className="brutal-btn brutal-btn--accent" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/p2p")}>P2P 对战</button>
         <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/users")}>在线用户（{peers.length}）</button>
         <button className="brutal-btn" style={{ padding: "16px 8px", width: "100%" }} onClick={() => nav("/settings")}>设置</button>

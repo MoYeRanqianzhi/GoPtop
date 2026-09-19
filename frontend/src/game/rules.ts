@@ -78,4 +78,12 @@ export class RulesEngine {
   reset() {
     this.game?.reset();
   }
+
+  /** 当前局面的完整 JSON，交给 AI 分析用。
+   *  必须是 Rust 侧序列化的结果而非前端手拼：围棋的劫点/提子数只存在于 `GameState`，
+   *  前端拼出来的局面会缺这些字段，AI 只会下出怪棋而不报错。 */
+  stateJson(): unknown | null {
+    if (!this.game) return null;
+    return JSON.parse(this.game.state_json()) as unknown;
+  }
 }

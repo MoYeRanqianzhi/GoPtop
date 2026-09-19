@@ -382,6 +382,16 @@ export function useGameSession() {
     // 派生
     moveCount, myHomeUrl, statusText, p2pStatusText, boardDisabled, linkLamp,
     mode, viewedUserId, viewedPeer, isSelfPage,
+    /** AI 分析输入：当前局面由 Rust 引擎序列化。
+     *  P2P/观战页没有本地规则引擎，局面归 WasmSession 所有；围棋的劫点与提子数
+     *  只在引擎内部，从 TS 侧的状态还原不出来。 */
+    stateJson: () => {
+      try {
+        return session ? (JSON.parse(session.state_json()) as unknown) : null;
+      } catch {
+        return null;
+      }
+    },
     topLocked, topLockedTitle, showNotice: (text: string | null, ms?: number) => {
       setNotice(text);
       if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);

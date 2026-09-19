@@ -11,6 +11,7 @@ import { useGameSession } from "./state/useGameSession";
 import { nav } from "./net/links";
 import { ChatPanel } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
+import { AiPage } from "./pages/AiPage";
 import { MenuPage } from "./pages/MenuPage";
 import { P2pPage } from "./pages/P2pPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -257,6 +258,9 @@ export default function App() {
 
           {/* —— 本地对战 `/local`：与 P2P 同一套棋盘 UI，只是没有邀请链接 —— */}
           {mode === "local" && <LocalPage kind={kind} size={size} />}
+
+          {/* —— 人机对战 `/ai`：本地离线 AI 对手，引擎跑在 Worker 里 —— */}
+          {mode === "ai" && <AiPage kind={kind} size={size} />}
 
           {/* —— P2P 对战 `/p2p`：大厅 / 等待 / 对局三段 —— */}
           {mode === "p2p" && <P2pPage s={s} toggleChat={() => setChatOpen((v) => !v)} />}

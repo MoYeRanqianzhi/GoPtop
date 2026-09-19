@@ -9,6 +9,8 @@ import { BoardPanel, PeerList } from "./components";
 import { NoticeLine } from "../components/NoticeLine";
 import { StatusLamp } from "../components/StatusLamp";
 import { UrlRow } from "../components/UrlRow";
+import { MessageCircle } from "lucide-react";
+import { useWinRate } from "../ai/useWinRate";
 
 export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
   const { s, toggleChat } = props;
@@ -34,6 +36,17 @@ export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
   const specUrl = s.specUrl ?? (serverMode && spectateEnabled && specPwd && (phase === "playing" || phase === "waiting") && role !== "spectator"
     ? specLinkUrl(tabUser, specPwd)
     : null);
+
+  /* 胜率（用户拍板：全部模式）。局面取自 WasmSession 而非本地规则引擎——P2P 的对局
+     归 Rust 状态机所有。观战者没有「我方」颜色（myColor 为空），与本地双人同款按
+     黑方视角处理，标签也照实写「黑/白」而不是「我/对手」。 */
+  const odds = useWinRate({
+    getState: () => s.stateJson(),
+    myColor: myColor === "white" ? "White" : "Black",
+    moveCount,
+    budgetMs: 500,
+    enabled: phase === "playing" && !winner,
+  });
 
   return (
     <>
@@ -155,14 +168,23 @@ export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
             statusNote={scoringActive ? "点击棋子标记死子" : `${myColor === "black" ? "执黑" : "执白"}`}
             moveCount={moveCount}
             onUndo={null} onReset={null}
+            odds={{
+              winRate: odds.winRate,
+              series: odds.series,
+              thinking: odds.thinking,
+              myLabel: myColor ? "我" : "黑",
+              oppLabel: myColor ? "对手" : "白",
+            }}
             chatButton={
               /* 开关同一个按钮：开着再点即收起（停靠栏形态下面板自身也有「收起」，
                  两者等价——实机用户就是点这个按钮发现关不掉的） */
-              <button className="brutal-btn brutal-btn--sm" onClick={toggleChat} title="聊天 / 悔棋 / 重开 / 换棋 / 认输">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" style={{ display: "block" }}>
-                  <path d="M21 12a8 8 0 0 1-8 8H4l2.4-3A8 8 0 1 1 21 12z" strokeLinejoin="round" />
-                  <circle cx="9" cy="12" r="0.6" fill="currentColor" /><circle cx="13" cy="12" r="0.6" fill="currentColor" /><circle cx="17" cy="12" r="0.6" fill="currentColor" />
-                </svg>
+              <button
+                className="brutal-btn brutal-btn--sm"
+                onClick={toggleChat}
+                title="聊天 / 悔棋 / 重开 / 换棋 / 认输"
+                aria-label="聊天与对局操作"
+              >
+                <MessageCircle size={15} strokeWidth={2.5} style={{ display: "block" }} />
               </button>
             }
             actions={

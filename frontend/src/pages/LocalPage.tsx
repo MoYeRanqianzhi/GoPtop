@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Coord, StoneColor } from "../net/protocol";
 import { emptyBoard } from "../game/board";
 import { RulesEngine } from "../game/rules";
+import { useWinRate } from "../ai/useWinRate";
 import { BoardPanel } from "./components";
 import type { GameKind, Size } from "../net/protocol";
 
@@ -72,6 +73,16 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
 
   const statusText = winner ? `${winner === "black" ? "黑" : "白"} 胜` : `${toMove === "black" ? "黑" : "白"} 落子`;
 
+  /* 胜率（用户拍板：全部模式都显示）。本地双人同屏没有"我方"，按黑方作视角——
+     标签也随之写「黑/白」而不是「我/对手」，否则两台对坐的人会各自以为红是自己。 */
+  const odds = useWinRate({
+    getState: () => rulesRef.current.stateJson(),
+    myColor: "Black",
+    moveCount: history.length,
+    budgetMs: 500,
+    enabled: !winner,
+  });
+
   return (
     <div className="play-stack">
       <BoardPanel
@@ -81,6 +92,13 @@ export function LocalPage(props: { kind: GameKind; size: Size }) {
         statusText={statusText} statusNote=""
         moveCount={history.length}
         onUndo={history.length > 0 && !winner ? undo : null} onReset={resetBoard}
+        odds={{
+          winRate: odds.winRate,
+          series: odds.series,
+          thinking: odds.thinking,
+          myLabel: "黑",
+          oppLabel: "白",
+        }}
       />
     </div>
   );

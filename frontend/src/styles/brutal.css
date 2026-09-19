@@ -24,6 +24,10 @@
   --font-display: "Space Grotesk", "IBM Plex Mono", ui-monospace, monospace;
   --font-mono: "Space Mono", "IBM Plex Mono", ui-monospace, monospace;
   --font-body: ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  /* 胜率单挑线（用户拍板 2026-09-19）：红＝我方、蓝＝对手 */
+  --win-mine: #ff3b30;
+  --win-opp: #0090ff;
 }
 
 * { box-sizing: border-box; }
@@ -279,3 +283,43 @@ html.app-tauri .poster-strip { padding-right: 138px; }
 @container (max-width: 300px) {
   .bp-swap { padding: 10px !important; }
 }
+
+/* —— 胜率可视化（用户拍板 2026-09-19）：红＝我方、蓝＝对手，一条线左红右蓝 ——
+   宽度过渡是「实时变动」的观感来源；thinking 时只降不透明度而不隐藏数字，
+   否则每手都会闪一下空白。
+   尺寸整体压低（用户拍板同日）：胜率卡要能和「规则」卡一样高，见文件末尾的
+   .bp-wide/.bp-swap 统一高度。 */
+.wr-bar { display: flex; flex-direction: column; gap: 4px; }
+.wr-legend {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+}
+.wr-label--mine { color: var(--win-mine); }
+.wr-label--opp { color: var(--win-opp); }
+.wr-label b { font-size: 14px; }
+.wr-track {
+  position: relative; display: flex; height: 16px;
+  border: var(--border-thin); background: #fff; overflow: hidden;
+}
+.wr-fill { height: 100%; transition: width 240ms ease-out; }
+.wr-fill--mine { background: var(--win-mine); }
+.wr-fill--opp { background: var(--win-opp); }
+/* 分界刻度：胜率贴到 0/100 时它是唯一还看得见的边界 */
+.wr-edge {
+  position: absolute; top: 0; bottom: 0; width: 3px; background: var(--ink);
+  transform: translateX(-1.5px); transition: left 240ms ease-out;
+}
+.wr-bar[data-thinking="1"] .wr-track { opacity: 0.65; }
+/* 尚无结果时整体压淡：与「真的 50%」区分开，但不占额外一行 */
+.wr-bar[data-pending="1"] .wr-track { opacity: 0.5; }
+/* 走势图：边框收细到 2px。25px 左右的高度里，3px 上下边框会和 2px 的走势线
+   挤成「三条线」，读起来像表格而不像图。 */
+.wr-chart { width: 100%; display: block; border: 2px solid var(--ink); background: #fff; }
+.wr-chart-mid { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+.wr-chart-line { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; }
+
+/* 底部卡统一高度（用户拍板 2026-09-19）：三个 tab 的内容长短不一，不锁高的话
+   每次切换都会改变棋盘可用高度、棋盘随之缩放——实测对局 142 / 规则 130 / 胜率 180，
+   切换瞬间棋盘跳 50px。以「规则」卡为准压低，压出来的空间全归棋盘。
+   宽屏两卡并排时同样受此约束（flex stretch 只管等高，管不了整体多高）。 */
+.bp-wide, .bp-swap { height: var(--bp-h, 130px); }

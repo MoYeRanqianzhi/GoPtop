@@ -9,6 +9,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 import { BoardSvg } from "../components/BoardSvg";
+import { WinRateBar } from "../components/WinRateBar";
+import { WinRateChart } from "../components/WinRateChart";
 import { loadStunLines, saveStunLines } from "../net/stun";
 import type { StunLine } from "../net/stun";
 import {
@@ -406,6 +408,20 @@ export function ServerSettings() {
   );
 }
 
+/** 胜率面板数据（由 useWinRate 提供；本页未启用 AI 分析时整个字段缺省）。 */
+export type OddsPanelData = {
+  /** 我方胜率 0..1；null 表示尚无结果。 */
+  winRate: number | null;
+  /** 逐手胜率，喂给走势图（按手数有序）。 */
+  series: { move: number; winRate: number }[];
+  /** 正在分析（数字保持上一次的值，只弱化显示）。 */
+  thinking: boolean;
+  /** 左端（红）标签：有明确我方时是「我」，本地双人/观战时是「黑」。 */
+  myLabel: string;
+  /** 右端（蓝）标签。 */
+  oppLabel: string;
+};
+
 export function BoardPanel(props: {
   kind: GameKind; size: Size;
   board: StoneColor[][]; toMove: StoneColor; winner: StoneColor | null;
@@ -419,15 +435,19 @@ export function BoardPanel(props: {
   /** 围棋终局计分：已标死子（红叉）与「可点已有点」开关，透传给棋盘。 */
   dead?: Coord[];
   allowOccupied?: boolean;
+  /** 胜率面板；缺省表示本页未启用 AI 分析，底部不出现胜率入口。 */
+  odds?: OddsPanelData;
 }) {
   const { kind, size, board, toMove, winner, lastMove, hover, onHover, disabled, onPlace } = props;
-  /* 底部三卡（2026-09-07 用户拍板）：宽时「规则」「对局」并排；显示不下时两宽卡收起，
-     显示第三个组件 .bp-swap——独立完整的一张卡，标题/底色/内容随 bottomTab 真切换，
-     默认「对局」。判定用容器查询（跟随 stack 实际宽度，视口宽≠stack 宽） */
-  const [bottomTab, setBottomTab] = useState<"game" | "rules">("game");
+  /* 底部（用户拍板 2026-09-07；2026-09-19 扩为三态）：宽时「规则」＋「对局/胜率」并排；
+     显示不下时两宽卡收起，显示 .bp-swap——标题/底色/内容随 swapTab 真切换，默认「对局」。
+     判定用容器查询（跟随 stack 实际宽度，视口宽≠stack 宽）。
+     胜率与对局共用卡位是用户的明确设计：底部放不下三个组件。 */
+  const [wideTab, setWideTab] = useState<"game" | "odds">("game");
+  const [swapTab, setSwapTab] = useState<"game" | "rules" | "odds">("game");
   const ruleLine = { whiteSpace: "nowrap" } as const;
   const rulesBody = (
-    <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
+    <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
       {kind === "gomoku" ? (
         <><li style={ruleLine}>黑先，双方轮流落子。</li><li style={ruleLine}>落子于交叉点，已有棋子处不可落子。</li><li style={ruleLine}>任意一方五子连珠即获胜。</li></>
       ) : (
@@ -436,7 +456,7 @@ export function BoardPanel(props: {
     </ul>
   );
   const gameBody = (
-    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6, fontSize: 13, lineHeight: 1.6, fontWeight: 600 }}>
+    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 3, fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
         <span style={{ color: "var(--muted)" }}>手数</span>
         <span style={{ fontFamily: "var(--font-mono)" }}>{props.moveCount}</span>
@@ -449,6 +469,21 @@ export function BoardPanel(props: {
         <span style={{ color: "var(--muted)" }}>棋盘</span>
         <span style={{ fontFamily: "var(--font-mono)" }}>{size}×{size}</span>
       </div>
+    </div>
+  );
+  const oddsBody = props.odds ? (
+    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+      <WinRateBar
+        winRate={props.odds.winRate}
+        myLabel={props.odds.myLabel}
+        oppLabel={props.odds.oppLabel}
+        thinking={props.odds.thinking}
+      />
+      <WinRateChart series={props.odds.series} height={26} />
+    </div>
+  ) : (
+    <div style={{ marginTop: 8, fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)" }}>
+      本页未启用形势分析
     </div>
   );
   return (
@@ -476,36 +511,51 @@ export function BoardPanel(props: {
         <BoardSvg size={size} board={board} onPlace={onPlace} lastMove={lastMove} hover={hover} onHover={onHover} disabled={disabled} kind={kind} dead={props.dead} allowOccupied={props.allowOccupied} />
       </div>
 
-      {/* 底部（用户拍板 2026-09-07）：宽时「规则/对局」两张原卡并排；显示不下时两卡都收起，
-          显示第三个组件 .bp-swap——它是独立完整的一张卡，可在「对局/规则」间真切换
-          （标题、底色、内容全套跟随），默认显示对局；规则每条独占一行（ruleLine） */}
+      {/* 底部（用户拍板 2026-09-07 / 2026-09-19）：宽时「规则」＋「对局/胜率」两张卡；
+          显示不下时两卡都收起，显示 .bp-swap——独立完整的一张卡，可在三者间真切换
+          （标题、底色、内容全套跟随），默认显示对局；规则每条独占一行（ruleLine）。
+          胜率与对局共用卡位是用户的明确设计：底部放不下三个组件 */}
       <div style={{ flexShrink: 0, width: "100%", maxWidth: "100%", display: "flex", gap: 12, alignItems: "stretch" }}>
         <div className="brutal-card brutal-card--paper bp-wide" style={{ flex: "1 1 0", minWidth: 0, padding: 14 }}>
           <div className="brutal-label">规则</div>
           {rulesBody}
         </div>
         <div className="brutal-card bp-wide" style={{ flex: "1 1 0", minWidth: 0, padding: 14, background: "#fff" }}>
-          <div className="brutal-label">对局</div>
-          {gameBody}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <div className="brutal-label">{wideTab === "game" ? "对局" : "胜率"}</div>
+            {props.odds && (
+              <button
+                className="brutal-btn brutal-btn--sm"
+                style={{ padding: "3px 8px", fontSize: 11, lineHeight: 1.2 }}
+                onClick={() => setWideTab((t) => (t === "game" ? "odds" : "game"))}
+                title="在对局 / 胜率之间切换"
+              >
+                ⇄ {wideTab === "game" ? "胜率" : "对局"}
+              </button>
+            )}
+          </div>
+          {wideTab === "game" ? gameBody : oddsBody}
         </div>
         {/* display:"none" 是内联基准态（内联优先于类选择器），只有 styles/brutal.css 的容器查询
             用 !important 才能翻成 flex——两处必须成对改 */}
         <div
-          className={`brutal-card bp-swap${bottomTab === "rules" ? " brutal-card--paper" : ""}`}
-          style={{ flex: 1, minWidth: 0, padding: 14, background: bottomTab === "game" ? "#fff" : undefined, display: "none", flexDirection: "column" }}
+          className={`brutal-card bp-swap${swapTab === "rules" ? " brutal-card--paper" : ""}`}
+          style={{ flex: 1, minWidth: 0, padding: 14, background: swapTab === "game" ? "#fff" : undefined, display: "none", flexDirection: "column" }}
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-            <div className="brutal-label">{bottomTab === "game" ? "对局" : "规则"}</div>
+            <div className="brutal-label">
+              {swapTab === "game" ? "对局" : swapTab === "rules" ? "规则" : "胜率"}
+            </div>
             <button
               className="brutal-btn brutal-btn--sm"
               style={{ padding: "3px 8px", fontSize: 11, lineHeight: 1.2 }}
-              onClick={() => setBottomTab((t) => (t === "game" ? "rules" : "game"))}
-              title="在对局 / 规则之间切换"
+              onClick={() => setSwapTab((t) => (t === "game" ? "rules" : t === "rules" ? "odds" : "game"))}
+              title="在 对局 / 规则 / 胜率 之间切换"
             >
-              ⇄ {bottomTab === "game" ? "规则" : "对局"}
+              ⇄ {swapTab === "game" ? "规则" : swapTab === "rules" ? "胜率" : "对局"}
             </button>
           </div>
-          {bottomTab === "game" ? gameBody : rulesBody}
+          {swapTab === "game" ? gameBody : swapTab === "rules" ? rulesBody : oddsBody}
         </div>
       </div>
     </>
