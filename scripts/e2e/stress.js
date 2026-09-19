@@ -9,7 +9,7 @@
  *
  * 用法：
  *   node stress.js [端] [URL] [手数]
- *   端：web（默认）/ mob / android / cdp:<url>
+ *   端：web（默认）/ mob / android / cdp:<url>（鸿蒙 9444、桌面壳 9222）
  *   手数默认 120（围棋 9 路，够触发多轮窗口滑动）
  *
  * 注意：本脚本走**本地对战**（`/local`）而不是人机对战——压的是胜率分析与渲染
@@ -94,13 +94,32 @@ async function openOdds(ep) {
 
 async function main() {
   const spec = process.argv[2] ?? "web";
-  const base = process.argv[3] ?? "http://localhost:1420/";
-  const total = Number(process.argv[4] ?? 120);
+  // 壳端点不需要 base（从当前页面推导 origin），于是 `node stress.js cdp:… 120`
+  // 的第二个参数直接就是手数——按位置死抠会让 120 被当成 base，拼出 "120/local"
+  // 这种地址，导航静默失败后脚本仍在**上一个页面**上跑（实测：在 /ai 上跑出
+  // 171 手、横坐标 -37 的假失败）。
+  const numeric = /^\d+$/.test(process.argv[3] ?? "");
+  const base = numeric ? "" : (process.argv[3] ?? "http://localhost:1420/");
+  const total = Number(numeric ? process.argv[3] : (process.argv[4] ?? 120));
   const url = base.replace(/\/$/, "") + "/local";
 
-  const ep = spec === "mob"
-    ? await Endpoint.browser("stress", url, { mobile: true })
-    : await Endpoint.browser("stress", url);
+  // 壳端点（android / 鸿蒙 cdp / 桌面壳 cdp）连的是**已经在跑的**应用，启动时停在
+  // 菜单页，所以要导航到 /local；且各壳的资源 origin 不同（Tauri 是
+  // http://tauri.localhost、鸿蒙是 appassets.goptop），没显式给 base 时从当前页面推导。
+  let ep;
+  let target = url;
+  if (spec === "android" || spec.startsWith("android:")) {
+    ep = await Endpoint.android("stress", { serial: spec.includes(":") ? spec.slice(8) : null });
+    target = new URL(ep.page.url()).origin + "/local";
+  } else if (spec.startsWith("cdp:")) {
+    ep = await Endpoint.cdp("stress", spec.slice(4));
+    if (!base) target = new URL(ep.page.url()).origin + "/local";
+  } else if (spec === "mob") {
+    ep = await Endpoint.browser("stress", url, { mobile: true });
+  } else {
+    ep = await Endpoint.browser("stress", url);
+  }
+  await ep.goto(target).catch(() => { /* 浏览器端点构造时已导航过，重复导航失败可忽略 */ });
   await ep.ready(40000);
 
   // 切到 19 路：361 个交叉点，走 120 手不会把坐标用重复（9 路只有 81 点，第一版
