@@ -63,11 +63,15 @@ export function useWinRate(opts: {
   getStateRef.current = opts.getState;
 
   useEffect(() => {
-    // 手数归零＝重开或退到空盘：走势必须清空，否则新对局会接着旧曲线画
+    // 手数归零＝重开或退到空盘：走势必须清空，且**必须就此返回**。
+    // 少了这个 return 的话，紧接着又会把 move=0 当成一手指去分析并记进序列，
+    // 窗口坐标 (move - head)/windowSize 随之算出负数（实测曲线首点跑到 x=-35）。
+    // 空盘也不需要分析——50/50 是绘制层的初始态，不是搜索结果。
     if (opts.moveCount === 0) {
       setSeries([]);
       setWinRate(null);
-      if (!opts.enabled) return;
+      setThinking(false);
+      return;
     }
     if (!opts.enabled) return;
     const state = getStateRef.current();

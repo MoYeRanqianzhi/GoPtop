@@ -314,7 +314,9 @@ html.app-tauri .poster-strip { padding-right: 138px; }
 /* 尚无结果时整体压淡：与「真的 50%」区分开，但不占额外一行 */
 .wr-bar[data-pending="1"] .wr-track { opacity: 0.5; }
 /* 走势图：虚线框（用户拍板 2026-09-19）——它是「随手的估计」而不是判定，
-   实线框与上面的胜率条争视觉重量；虚线也让它与实线的走势线区分得开。 */
+   实线框与上面的胜率条争视觉重量；虚线也让它与实线的走势线区分得开。
+   外层盒子只用来量宽度（滑动窗口按它算），不自带样式。 */
+.wr-chart-box { width: 100%; min-width: 0; }
 .wr-chart { width: 100%; display: block; border: 2px dashed var(--ink); background: #fff; }
 .wr-chart-mid { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
 .wr-chart-line { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; }
