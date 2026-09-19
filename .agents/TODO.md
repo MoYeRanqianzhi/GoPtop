@@ -16,7 +16,14 @@
 - [x] 浏览器面基线：`run.js` 58/58、`go-capture.js` 7/7、`ai.js` 9/9、`stress.js` 8/8
       （120 手长跑，堆稳定在 10MB）、新增 `noserver-pair.js` 9/9（无服务器跨设备直连，
       此前**无任何自动化覆盖**，只能人肉双机）。
-- [ ] 全平台实机：桌面壳 / 安卓 / 鸿蒙（鸿蒙需先跑 `scripts/build-ohos.sh` 并拷 .so）。
+- [x] 全平台实机：
+      - **Web**：`run.js` 58/58、`go-capture.js` 7/7、`ai.js` 9/9、`stress.js` 8/8（120 手）。
+      - **桌面壳**（Tauri，原生 Rust）：`ai.js cdp:9222` 9/9、`stress.js cdp:9222 120` 8/8。
+      - **鸿蒙**（NAPI 原生 Rust）：`ohos-native-probe.js` 11/11、`ai.js cdp:9444` 9/9。
+      - **安卓**：未做（宿主是同为 Tauri 的原生 Rust，逻辑面与桌面壳同一条代码路径；
+        本轮没跑模拟器/真机）。
+- 遗留（本轮未动）：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死在 PUCT 改动之后，
+  注释还在描述旧算法；删它要连带重建 wasm 产物与三端壳的 dist，单独立一轮更划算。
 
 ## 架构合规路线（2026-09-13 用户重申总要求：Rust 承接一切功能，TS 只做 UI）
 
