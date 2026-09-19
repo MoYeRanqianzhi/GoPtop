@@ -17,3 +17,4 @@
 - [2026-09-14 四端实机验证+真 Windows 标题栏+六维审查](memory/2026-09-14-four-platform-testbar-review-round.md) — HTMAXBUTTON 覆盖层真 Snap Layouts（点击/悬停必须回传页面；恒返回非客户区命中码 ⇒ 只收 WM_NCMOUSEMOVE/NCMOUSELEAVE，须配 TME_NONCLIENT，2026-09-19 补修）；Android `__TAURI_INTERNALS__` 非 document-start 注入坑；HarmonyOS ArkWeb 壳（未签名 HAP 可装模拟器+CDP 驱动）；SyncState.history 必须可表达 Pass；E2E 入库 scripts/e2e/；官服部署程序
 - [2026-09-19 聊天停靠栏三档布局](memory/2026-09-19-chat-dock-three-tier-layout.md) — 等宽(棋盘列宽) → 压缩聊天 → 弹窗；形态全实测（删 1080px 断点）；`.play-stack` 必须 `flex: 0 0 auto`；同日补修：停靠栏**关不掉**（面板加常驻「收起」、入口改开关）、**认输移入聊天区**（对局操作集合区）；人类路径必须验到「关」；run.js 58 断言
 - [2026-09-19 平台本地存储](memory/2026-09-19-platform-storage.md) — 落盘位置：桌面 `~/.goptop/store.json`、Android 应用私有根、鸿蒙 filesDir、Web localStorage 兜底；门面 net/store；**wasm 的 storage_get/set 必须走宿主钩子**否则绕开门面；四端实测 + 迁移 + 原子写
+- [2026-09-19 注释专项审查 + 注释口径收紧](memory/2026-09-19-comment-audit-and-doctrine.md) — 用户口径「不要写画蛇添足的注释」（密度是特性≠处处写）；workflow 审查 14 切片×对抗核实：确认 104/驳回 11；顺带暴露头像从未发送、计分确认横幅缺文案两处真缺陷

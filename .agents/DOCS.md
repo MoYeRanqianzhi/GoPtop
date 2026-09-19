@@ -26,6 +26,7 @@
 - `2026-09-18-multi-device-real-test-round.md` — 全维度实机测试轮：五端两两对战/聊天/观战/设计功能全通；7 个产品缺陷与 2 个布局陷阱；测试内容与结果明细
 - `2026-09-19-chat-dock-three-tier-layout.md` — 聊天停靠栏三档（等宽/压缩/弹窗）实测规则；棋盘不许被压窄的 flex 红线；run.js 基线 42→49
 - `2026-09-19-platform-storage.md` — 平台存储落盘位置（桌面 ~/.goptop / 安卓应用私有根 / 鸿蒙 filesDir / Web localStorage）；宿主钩子让 wasm 也走门面；四端实测与迁移
+- `2026-09-19-comment-audit-and-doctrine.md` — 注释专项审查（workflow 14 切片 × 对抗核实，确认 104/驳回 11）与注释口径收紧：只写非显然 WHY；顺带暴露两处真缺陷
 
 ## 规范要点（新 agent 必读）
 
