@@ -1,7 +1,22 @@
 # 原生端传输层接线（把 `WasmSession` 从三端换掉）
 
-> 状态：**未开工**，等用户拍板。背景见 `.agents/TODO.md` 的遗留条目与
+> 状态：**进行中**。已完成：`UiCommand` 的 serde 契约、Tauri 会话宿主
+> （`src-tauri/src/session.rs`）、前端会话门面（`frontend/src/net/session.ts`）、
+> 桌面双实例对局脚本（`scripts/e2e/shell-pair.js`）。
+> 待办：桌面双实例实测、鸿蒙 NAPI 命令面、安卓复测。
+> 背景见 `.agents/TODO.md` 的遗留条目与
 > `memory/2026-09-19-wasm-is-web-only-native-platforms-link-rust.md`。
+
+## 已踩过的坑（写给下一个宿主）
+
+**碰会话之前必须 `enter_runtime()`**（`goptop_transport_native` 提供）。
+传输层到处 `tokio::spawn`，而 Tauri 的**同步**命令跑在主线程、NAPI 回调跑在
+ArkWeb 线程——都不在运行时上下文里，`tokio::spawn` 直接 panic 并带走整个进程
+（实测：桌面壳点「开启对战」即崩，`there is no reactor running` 出现在
+`thread 'main'` 上）。**鸿蒙宿主接会话时会踩同一个坑**，务必先进运行时。
+
+调用点有三处，缺一不可：`session_new`（构造）、`session_poll`（泵）、
+`session_cmd`（内部也会同步泵一次）。
 
 ## 为什么
 
