@@ -345,7 +345,13 @@ pub(crate) fn on_presence(s: &mut Session, ctx: &ReduceCtx, ev: PresenceEvt) -> 
                 return fx;
             }
             if s.phase == Phase::Waiting {
-                if s.pwd.is_some() && s.pwd == pwd {
+                // **带 rtcAns 的回传要放行**：受邀者建好 answer 后是用 challenge 把
+                // rtcAns 带回邀请者的，而那条 presence **不带 pwd**（answer 分支里
+                // `"pwd": null` 是硬编码）。只按 pwd 校验的话，邀请者会把自己邀请的
+                // 受邀者当成「钥匙不对的第三人」拒掉——受邀者收到 reject 被打回主页，
+                // 一键直连永远建不起来。判据用「自己在等待 + 对方带回了 answer」。
+                let is_answer_back = rtc_ans.is_some() && s.role == Role::Inviter;
+                if is_answer_back || (s.pwd.is_some() && s.pwd == pwd) {
                     // 带正确 pwd：自动同意（邀请钥匙语义）。
                     fx.extend(accept_challenge_with(s, ctx, &from, &kind, size, &game_id, rtc_ans, true));
                 } else {
@@ -520,7 +526,11 @@ pub(crate) fn on_rtc_ready(
 ) -> Vec<Effect> {
     let mut fx = Vec::new();
     // —— 受邀方向：answer 生成完成 ——
-    if let Some(ans) = answer_plain.or(answer_enc) {
+    // **取载荷要与 offer 侧对称**：offer 用的是 `offer_enc`（无服务器时加密），
+    // answer 原先写的是 `answer_plain.or(answer_enc)`——明文优先。于是无服务器模式下
+    // 受邀者把**明文** answer 用 `encrypted: true` 发给邀请者，邀请者按加密去解，
+    // 直接解不开（实测：accept_answer 收到 1103 字节、解码失败），连接永远建不起来。
+    if let Some(ans) = answer_enc.or(answer_plain) {
         if s.role == Role::Spectator {
             // 观战者：answer 回房主——服务器走信令，无服务器走观战回执链接。
             if s.server_mode {

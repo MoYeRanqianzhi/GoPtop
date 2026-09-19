@@ -262,16 +262,31 @@ pub fn feed_offer(core: &SharedCore, tag: &str, offer: &str, _encrypted: bool) {
             Some(v) => v,
             None => return,
         };
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc {tag}] feed_offer: 解码出 sdp {} 字节 / type={typ}", sdp.len());
+        }
         let r = async {
             let desc = match typ.as_str() {
                 "answer" => RTCSessionDescription::answer(sdp).map_err(|e| e.to_string())?,
                 _ => RTCSessionDescription::offer(sdp).map_err(|e| e.to_string())?,
             };
+            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                eprintln!("[rtc {tag}] feed_offer: set_remote");
+            }
             pc.set_remote_description(desc).await.map_err(|e| e.to_string())?;
+            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                eprintln!("[rtc {tag}] feed_offer: create_answer");
+            }
             let answer = pc.create_answer(None).await.map_err(|e| e.to_string())?;
             pc.set_local_description(answer).await.map_err(|e| e.to_string())?;
+            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                eprintln!("[rtc {tag}] feed_offer: 等 gathering");
+            }
             if let Some((g, d)) = &gather {
                 wait_gathering(g, d).await;
+            }
+            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                eprintln!("[rtc {tag}] feed_offer: gathering 结束");
             }
             pc.local_description().await.ok_or_else(|| "no local description".to_string())
         }
@@ -302,9 +317,20 @@ pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool
     let core = core.clone();
     let tag = tag.to_string();
     let answer = answer.to_string();
+    if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+        eprintln!("[rtc {tag}] accept_answer 收到（{} 字节，encrypted={encrypted}）", answer.len());
+    }
     tokio::spawn(async move {
         let Some(pc) = wait_peer(&core, &tag, "accept_answer").await else { return };
-        let Some((sdp, _typ)) = decode_payload(&core, &answer, encrypted) else { return };
+        let Some((sdp, _typ)) = decode_payload(&core, &answer, encrypted) else {
+            if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+                eprintln!("[rtc {tag}] accept_answer: 解码失败");
+            }
+            return;
+        };
+        if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
+            eprintln!("[rtc {tag}] accept_answer: 解码出 {} 字节", sdp.len());
+        }
         if let Ok(desc) = RTCSessionDescription::answer(sdp) {
             let _ = pc.set_remote_description(desc).await;
         }

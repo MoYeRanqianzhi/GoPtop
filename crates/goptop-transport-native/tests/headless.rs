@@ -109,6 +109,7 @@ async fn paired() -> (NativeSession, NativeSession, Arc<HeadlessHost>, Arc<Headl
     if !ok {
         println!("[B notices] {:?}", hb.notices.lock().unwrap());
         println!("[B navs] {:?}", hb.navs.lock().unwrap());
+        println!("[B notices] {:?}", hb.notices.lock().unwrap());
         println!("[A notices] {:?}", ha.notices.lock().unwrap());
         println!("[B role={} myColor={} peerConnected={}]", s(&snap(&b), "role"), s(&snap(&b), "myColor"), snap(&b)["peerConnected"]);
     }
@@ -148,6 +149,7 @@ async fn 双人对局全流程() {
 
     let sa = snap(&a);
     let sb = snap(&b);
+    println!("[落子后] A.moveCount={:?} B.moveCount={:?} A.peerConnected={} B.peerConnected={}", sa["moveCount"], sb["moveCount"], sa["peerConnected"], sb["peerConnected"]);
     assert_eq!(sa["moveCount"].as_u64(), Some(9), "手数应为 9");
     assert_ne!(sa["winner"], Value::Null, "五连后应有胜者");
     // 胜负必须两端一致（观战者判错方向是历史 bug）
