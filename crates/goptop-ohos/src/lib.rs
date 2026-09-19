@@ -50,6 +50,8 @@ use goptop_core::game::GameState;
 use goptop_core::json_api;
 use serde_json::{Value, json};
 
+pub mod session;
+
 /// 多局实例表（与 `src-tauri/src/rules.rs` 的 `Games` 同构）。
 ///
 /// 用局号索引而非单例：本地页与 P2P 页可能同时各有一局，前端每个页面各持一个引擎
@@ -128,7 +130,13 @@ fn narg(args: &Value, key: &str) -> Option<u32> {
 }
 
 /// 分发主体：返回待序列化的 JSON 字符串。
+///
+/// 规则/AI 在本文件，P2P 会话在 [`session`]（命令名与桌面端逐字一致，
+/// 前端那份适配器两端共用）。
 fn dispatch(cmd: &str, args: &Value) -> String {
+    if let Some(v) = session::dispatch(cmd, args) {
+        return serde_json::to_string(&v).unwrap_or_else(|_| "null".into());
+    }
     let v: Value = match cmd {
         "game_new" => match json_api::new_game(&sarg(args, "kindJson")) {
             Some(state) => match with_games(|m| {

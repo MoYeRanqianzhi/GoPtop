@@ -2013,6 +2013,9 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "goptop-ai",
  "goptop-core",
+ "goptop-net",
+ "goptop-transport-native",
+ "serde",
  "serde_json",
 ]
 

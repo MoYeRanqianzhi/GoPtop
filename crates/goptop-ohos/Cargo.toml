@@ -21,4 +21,9 @@ crate-type = ["cdylib", "rlib"]
 # 规则真源与 AI 引擎都直接链接原生 crate（鸿蒙能跑原生代码，不该绕道 wasm）
 goptop-core = { path = "../goptop-core" }
 goptop-ai = { path = "../goptop-ai" }
+serde = { workspace = true }
 serde_json = { workspace = true }
+# P2P 会话的原生执行器（与桌面壳同一份）。鸿蒙能跑原生代码，传输层同样不该走 wasm。
+goptop-transport-native = { path = "../goptop-transport-native" }
+# UiCommand 的 serde 契约：命令面只有一个 `session_cmd`，线上形态即该枚举
+goptop-net = { path = "../goptop-net" }

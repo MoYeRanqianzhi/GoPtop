@@ -68,6 +68,18 @@ build_abi() {
   export "$var=$NDK_LINK_WIN/llvm/bin/clang.exe"
   export "$flags_var=-C link-arg=--target=$clang_target -C link-arg=--sysroot=$NDK_LINK_WIN/sysroot -C link-arg=-D__MUSL__ -C link-arg=-B$NDK_LINK_WIN/llvm/bin -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-soname,libgoptop_ohos.so"
 
+  # C 交叉编译器：传输层拉进了 ring（TLS），它的构建脚本走 cc-rs 编 C。
+  # 不设这些变量时报的是 `cc-rs: failed to find tool "cc": program not found`——
+  # 看着像本机缺 cc，其实是 cc-rs 不知道要交叉编到鸿蒙。
+  #
+  # 变量名用**下划线**形式（`CC_aarch64_unknown_linux_ohos`）：cc-rs 查的就是这个，
+  # 而带横线的 `CC_aarch64-unknown-linux-ohos` 在 shell 里根本不是合法标识符
+  #（`export` 会直接报 not a valid identifier）。
+  local tu; tu="$(echo "$rust_target" | tr '-' '_')"
+  export "CC_$tu=$NDK_LINK_WIN/llvm/bin/clang.exe"
+  export "AR_$tu=$NDK_LINK_WIN/llvm/bin/llvm-ar.exe"
+  export "CFLAGS_$tu=--target=$clang_target --sysroot=$NDK_LINK_WIN/sysroot -D__MUSL__"
+
   cargo build -p goptop-ohos $PROFILE_FLAG --target "$rust_target"
 
   local src="target/$rust_target/$PROFILE_DIR/libgoptop_ohos.so"

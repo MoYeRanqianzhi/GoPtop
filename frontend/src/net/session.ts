@@ -20,6 +20,7 @@
  * 50ms `setInterval` 同构——上层 `start_pump()` 的语义两端一致。
  */
 import { harmonyHost, isTauri, nav } from "./links";
+import { storeDump, storeRemove, storeSet } from "./store";
 
 /** 会话对外的行为面（= `WasmSession` 的公开方法，含返回类型）。 */
 export interface GameSession {
@@ -125,7 +126,9 @@ type NativeCall = (cmd: string, argsJson: string) => Promise<string>;
 type HostAction =
   | { t: "notice"; text: string | null; ms: number | null }
   | { t: "copy"; text: string }
-  | { t: "nav"; path: string };
+  | { t: "nav"; path: string }
+  /** 鸿蒙专有：存储写入回传给 JS 落盘（见 Rust 侧 goptop-ohos/session.rs 的说明）。 */
+  | { t: "store"; key: string; value: string | null };
 
 /** 轮询间隔：与 wasm 侧的泵同周期（50ms）。 */
 const PUMP_MS = 50;
@@ -186,6 +189,11 @@ class NativeSessionAdapter implements GameSession {
     } else if (a.t === "nav") {
       // 与 wasm 侧 `Effect::Nav` 同款：pushState + popstate
       nav(a.path);
+    } else if (a.t === "store") {
+      // 鸿蒙侧 Rust 读不到 JS 的存储门面，写入只能回传过来由**本层落盘**——
+      // 保证全程只有 JS 一个写者（两个写者会互相覆盖，且不报错）。
+      if (a.value === null) storeRemove(a.key);
+      else storeSet(a.key, a.value);
     }
   }
 
@@ -269,7 +277,16 @@ function nativeCall(): NativeCall | null {
     };
   }
   const h = harmonyHost();
-  if (h) return async (cmd, argsJson) => h.call(cmd, argsJson);
+  if (h) {
+    return async (cmd, argsJson) => {
+      let args = JSON.parse(argsJson) as Record<string, unknown>;
+      // **建会话时必须带上设置整表**：鸿蒙没有反向通道（ArkTS 不能同步调回 JS），
+      // Rust 侧的 `Host::storage_get` 读不到 JS 的存储门面，身份/STUN 线路只能这样传进去。
+      // 漏传的表现是「每启一次换一个身份」，界面上完全看不出来。
+      if (cmd === "session_new") args = { ...args, settings: storeDump() };
+      return h.call(cmd, JSON.stringify(args));
+    };
+  }
   return null;
 }
 
