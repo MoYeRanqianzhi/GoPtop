@@ -41,12 +41,35 @@ async function clickPoint(ep, gx, gy, size) {
   );
 }
 
-/** 读对局卡上的手数。 */
+/** 读对局卡上的手数。
+ *  底部卡可能停在「胜率」上（手数只在「对局」卡里），所以先切回去再读。 */
 async function moveCount(ep) {
+  await backToGame(ep);
   return ep.page.evaluate(() => {
     const m = document.querySelector(".play-stack")?.innerText.match(/手数\s*(\d+)/);
     return m ? Number(m[1]) : -1;
   });
+}
+
+/** 把底部切回「对局」卡（宽窄两套卡互斥显示，按可见性选）。 */
+async function backToGame(ep) {
+  const narrow = ep.page.locator(".bp-swap button");
+  if (await narrow.isVisible().catch(() => false)) {
+    for (let i = 0; i < 4; i++) {
+      const label = (await ep.page.locator(".bp-swap .brutal-label").first().innerText().catch(() => "")).trim();
+      if (label === "对局") return;
+      await narrow.click();
+      await sleep(400);
+    }
+  } else {
+    const wide = ep.page.locator('button[title*="对局 / 胜率"]');
+    if (await wide.isVisible().catch(() => false)) {
+      const labels = await ep.page.locator(".bp-wide .brutal-label").allInnerTexts().catch(() => []);
+      if (labels.some((t) => t.trim() === "对局")) return;
+      await wide.click();
+      await sleep(400);
+    }
+  }
 }
 
 /** JS 堆占用（MB）；非 Chromium 返回 null。 */
@@ -80,11 +103,14 @@ async function main() {
     : await Endpoint.browser("stress", url);
   await ep.ready(40000);
 
-  // 切围棋 9 路：81 个交叉点，走得下 120 手且不会像五子棋那样提前连五终局
+  // 切到 19 路：361 个交叉点，走 120 手不会把坐标用重复（9 路只有 81 点，第一版
+  // 用 `(i%9, floor(i/9)%9)` 从第 82 手起就与前面撞点，落子被正确拒绝，却被
+  // 断言记成了「落子没生效」——是脚本的错，不是产品的）。
   await ep.page.locator('button:has-text("围棋")').click();
   await sleep(900);
-  const s9 = ep.page.locator('header button:has-text("9×9")');
-  if (await s9.isVisible().catch(() => false)) { await s9.click(); await sleep(900); }
+  const s19 = ep.page.locator('header button:has-text("19×19")');
+  if (await s19.isVisible().catch(() => false)) { await s19.click(); await sleep(900); }
+  const size = 19;
 
   const heap0 = await heapMB(ep);
   console.log(`起始堆占用: ${heap0 ?? "N/A"} MB`);
@@ -93,8 +119,8 @@ async function main() {
   const t0 = Date.now();
   let placed = 0;
   for (let i = 0; i < total; i++) {
-    const gx = i % 9, gy = Math.floor(i / 9) % 9;
-    await clickPoint(ep, gx, gy, 9);
+    const gx = i % size, gy = Math.floor(i / size);
+    await clickPoint(ep, gx, gy, size);
     await sleep(1100);
     placed++;
   }
@@ -134,15 +160,15 @@ async function main() {
 
   // —— 界面仍可交互：再落一手并确认手数增长 ——
   const before = await moveCount(ep);
-  await clickPoint(ep, 8, 8, 9);
+  await clickPoint(ep, 9, 9, size);
   await sleep(2500);
   const after = await moveCount(ep);
   check("长跑后界面仍可交互", after === before + 1, `${before} → ${after}`);
 
   // —— 快速连续落子：比分析快得多，考验取消与队列 ——
   for (let i = 0; i < 12; i++) {
-    const gx = (i * 3) % 9, gy = (i * 5) % 9;
-    await clickPoint(ep, gx, gy, 9);
+    const gx = (i * 3) % size, gy = (i * 7) % size;
+    await clickPoint(ep, gx, gy, size);
     await sleep(40);
   }
   await sleep(12000);

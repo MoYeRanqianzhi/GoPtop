@@ -51,9 +51,26 @@ async function main() {
   const base = process.argv[3] ?? "http://localhost:1420/";
   const url = base.replace(/\/$/, "") + "/ai";
 
-  const ep = spec === "mob"
-    ? await Endpoint.browser("ai", url, { mobile: true })
-    : await Endpoint.browser("ai", url);
+  // 壳端点（android / 鸿蒙 cdp）连的是**已经在跑的**应用，启动时停在菜单页，
+  // 所以照样要导航到 /ai——SPA 路由能处理路径（P2P 的 e2e 同样这么进子页面）。
+  // 注意 android 不能用外部的 base：模拟器访问不到宿主机的 localhost，得用应用
+  // 自己加载资源的 origin（Tauri 是 http://tauri.localhost，鸿蒙是 appassets.goptop）。
+  let ep;
+  let target = url;
+  if (spec === "android" || spec.startsWith("android:")) {
+    ep = await Endpoint.android("ai", { serial: spec.includes(":") ? spec.slice(8) : null });
+    target = new URL(ep.page.url()).origin + "/ai";
+  } else if (spec.startsWith("cdp:")) {
+    ep = await Endpoint.cdp("ai", spec.slice(4));
+    // 壳端点各自的资源 origin 不同（鸿蒙 appassets.goptop、桌面 tauri.localhost），
+    // 没显式给 base 时就从当前页面推导，免得每端都要记一个地址
+    if (!process.argv[3]) target = new URL(ep.page.url()).origin + "/ai";
+  } else if (spec === "mob") {
+    ep = await Endpoint.browser("ai", url, { mobile: true });
+  } else {
+    ep = await Endpoint.browser("ai", url);
+  }
+  await ep.goto(target).catch(() => { /* 浏览器端点构造时已导航过，重复导航失败可忽略 */ });
   await ep.ready(40000);
 
   // —— 1) 人类落子 → AI 自动应手 ——

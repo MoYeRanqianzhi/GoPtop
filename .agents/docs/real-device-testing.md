@@ -83,6 +83,8 @@ hdc fport tcp:9444 localabstract:webview_devtools_remote_<pid>            # sock
 | `match.js` | 两两对战三场景：`game`（下到分出胜负）/ `chat`（聊天+悔棋+换棋+重开+收尾完局）/ `watch`（第三方观战） |
 | `matrix.js` | 矩阵批跑：内置 11 对端组合，逐对 spawn `match.js` 并汇总 |
 | `features.js` | 设计功能：`local` / `go` / `challenge` / `resign`（聊天区内两步确认）/ `specchat` / `kick` |
+| `ai.js` | 人机对战 + 实时胜率：9 条断言（落子→AI 应手、红蓝条/走势图、设置面板、换边） |
+| `stress.js` | 长时间对局压力：120 手后界面仍可交互、走势图点数不超窗口容量、JS 堆不失控、快速连点不崩 |
 | `diag-pair.js` / `diag-watch.js` | 配对与观战镜像诊断（逐手打印各端手数与盘面差异） |
 | `run.js` / `go-capture.js` / `ui-audit.js` / `challenge-server.js` | 既有浏览器基线（见同目录 README） |
 
@@ -94,7 +96,18 @@ node match.js chat web android                       # 聊天全流程
 node match.js watch web cdp:http://127.0.0.1:9222 mob
 node features.js go cdp:http://127.0.0.1:9222 android
 node diag-watch.js web mob web                       # 观战镜像逐手诊断
+
+# 人机对战 + 胜率（三端已实测 9/9）
+node ai.js web http://localhost:1420/                # Web（dev server）
+node ai.js android                                   # 安卓壳（origin 自动推导）
+node ai.js cdp:http://127.0.0.1:9444                 # 鸿蒙 ArkWeb 壳
+node stress.js web http://localhost:1420/ 120        # 压力：120 手
 ```
+
+`ai.js` / `stress.js` 对壳端点（android / cdp）**不需要传 base URL**——它们从当前页面
+推导 origin。原因：模拟器里访问不到宿主机的 `localhost:1420`，而各壳的资源 origin 又
+各不相同（Tauri 是 `http://tauri.localhost`、鸿蒙是 `https://appassets.goptop`）。
+
 
 **唯一不取巧的写法**：所有交互走真实输入事件（`page.mouse.click` /
 `touchscreen.tap` / 键盘键入），快照（`window.__session.snapshot()`）只用于**读取与断言**，
