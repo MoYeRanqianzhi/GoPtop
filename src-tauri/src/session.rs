@@ -34,6 +34,13 @@ use tauri::State;
 pub struct SessionEntry {
     session: NativeSession,
     host: Arc<TauriHost>,
+    /// 上次**实际回给前端**的快照文本（`session_poll` 的「无变化」判定基准）。
+    ///
+    /// 状态没变时每 50ms 重建并整段回传几 KB～几十 KB 的快照纯属浪费：序列化跑在
+    /// Tauri 主线程上，与 UI 争同一线程。有这份缓存就能在宿主侧把「无变化」拦下来，
+    /// 回 `{"snapshot":null}` 让前端沿用它的缓存——省掉整段 IPC 传输与 JS 侧解析。
+    /// 只在会话表项里存一份（随 `session_drop` 一起释放），不设上限。
+    last_served: Option<String>,
 }
 
 /// 多会话表（形状与 `rules.rs` 的 `Games` 同构）。
@@ -142,7 +149,7 @@ pub fn session_new(
         .0
         .lock()
         .map_err(|_| "会话表已中毒".to_string())?
-        .insert(id, SessionEntry { session: s, host });
+        .insert(id, SessionEntry { session: s, host, last_served: None });
     Ok(Some(id))
 }
 
@@ -159,10 +166,18 @@ pub fn session_drop(sessions: State<'_, Sessions>, id: u32) {
 /// 返回 `{"snapshot": <快照 JSON 文本>, "actions": [...]}`。快照**保持文本形态**
 /// 而不是解成对象：前端 `snapshot()` 的契约就是「给我一段 JSON」，wasm 侧也是文本，
 /// 两端一致才能共用同一份 `parseSnap`。
+///
+/// **「无变化」分支**：快照与上次回给前端的逐字相同 → `{"snapshot": null, "actions": [...]}`
+/// （注意是 JSON `null`，不是字符串 `"null"`），前端据此沿用它的缓存、不触发重渲染。
+/// 前端 50ms 轮询一次，对局页空闲时绝大多数轮询落在这条分支——省掉的是每拍的
+/// 整段快照 IPC 传输 + JS 侧 `JSON.parse` + 整串比较（原生壳上这段工作压在
+/// WebView 的 JS 线程，与动画/滚动争时间）。宿主动作**照常带回**：提示条/剪贴板/
+/// 导航不能因为快照没变就被扣住。
 #[tauri::command]
 pub fn session_poll(sessions: State<'_, Sessions>, id: u32) -> String {
-    let Ok(m) = sessions.0.lock() else { return null_poll() };
-    let Some(e) = m.get(&id) else { return null_poll() };
+    let Ok(mut m) = sessions.0.lock() else { return null_poll() };
+    // 要写 `last_served`，所以取 `get_mut` 而不是 `get`。
+    let Some(e) = m.get_mut(&id) else { return null_poll() };
     // 泵一次再取快照：IO 回调塞进队列的事件要在这里被消化，
     // 否则前端要等下一个 50ms 周期才看到变化。
     // `enter()` 不可省：pump 会执行 Effect，其中 CreatePeer / 发消息 / 定时器都会
@@ -171,9 +186,32 @@ pub fn session_poll(sessions: State<'_, Sessions>, id: u32) -> String {
     e.session.pump();
     let snap = e.session.snapshot();
     let actions = e.host.take_actions();
-    serde_json::json!({ "snapshot": snap, "actions": actions }).to_string()
+    match serve_snapshot(&mut e.last_served, snap) {
+        None => serde_json::json!({ "snapshot": null, "actions": actions }).to_string(),
+        Some(snap) => serde_json::json!({ "snapshot": snap, "actions": actions }).to_string(),
+    }
 }
 
+/// 「无变化」判定 + 缓存更新：`snap` 与上次回给前端的相同 → `None`（前端沿用缓存），
+/// 否则 `Some(snap)` 并把它记为「已回过」。
+///
+/// 首次 poll 的 `last_served` 是 `None`，必然走 `Some` 分支——契约上**首拍必须给全量**，
+/// 否则前端拿着初始缓存 `"null"` 没有东西可沿用。比较是纯文本比对：快照字段固定、
+/// 无时间戳/随机量（见 goptop-net `Session::snapshot`），同一状态两次序列化逐字节相同，
+/// 所以「串相同」当且仅当「前端已见的状态 == 当前状态」。判定错了只会退化成
+/// 「每拍都回全量」（与旧行为一致），不会丢变化。
+fn serve_snapshot(last_served: &mut Option<String>, snap: String) -> Option<String> {
+    if last_served.as_deref() == Some(snap.as_str()) {
+        return None;
+    }
+    *last_served = Some(snap.clone());
+    Some(snap)
+}
+
+/// 会话已不存在（切页面竞态 / 表已中毒）时的回包。
+///
+/// 这里刻意回**字符串** `"null"` 而非 JSON `null`：前端解析后得到空快照、界面复位，
+/// 与「无变化、沿用缓存」是两种不同的语义，不能共用一个记号。
 fn null_poll() -> String {
     serde_json::json!({ "snapshot": "null", "actions": [] }).to_string()
 }
@@ -244,4 +282,83 @@ pub fn session_parse_link(text: String) -> String {
 #[tauri::command]
 pub fn session_parse_answer(text: String) -> String {
     goptop_transport_native::session::parse_answer_json(&text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use goptop_transport_native::{HeadlessHost, Host};
+
+    /// 判定函数的契约：首拍必给全量；相同串回 `None`；不同串回全量并换缓存。
+    #[test]
+    fn serve_snapshot_first_poll_serves_full() {
+        let mut last = None;
+        assert_eq!(serve_snapshot(&mut last, "A".into()), Some("A".into()), "首拍必须给全量，前端才有东西可缓存");
+        assert_eq!(last.as_deref(), Some("A"), "已回过的快照要记下来，作为下一拍的比较基准");
+    }
+
+    #[test]
+    fn serve_snapshot_unchanged_returns_none() {
+        let mut last = Some("A".into());
+        assert_eq!(serve_snapshot(&mut last, "A".into()), None, "快照与上次相同就是「无变化」，前端沿用缓存");
+        assert_eq!(last.as_deref(), Some("A"), "无变化时缓存不动");
+    }
+
+    #[test]
+    fn serve_snapshot_changed_serves_full_and_updates_cache() {
+        let mut last = Some("A".into());
+        assert_eq!(serve_snapshot(&mut last, "B".into()), Some("B".into()));
+        assert_eq!(last.as_deref(), Some("B"), "缓存必须跟上实际回出去的内容");
+    }
+
+    /// 无头真会话驱动的回归（`HeadlessHost`，不碰 Tauri 的 `AppHandle`）：
+    /// 连续两次 poll、状态未变 → 第二次走「无变化」分支（`snapshot` 为 null）。
+    ///
+    /// 走的是与线上同一条代码路径（`NativeSession::pump` + `Session::snapshot`），
+    /// 同时守住整条优化的地基——**同一状态两次序列化必须逐字节相同**：快照里若混进
+    /// 时间戳或随机顺序的 Map，这里就会红。
+    fn headless_session() -> NativeSession {
+        let cfg = SessionConfig {
+            name: "测试甲".into(),
+            server_mode: false,
+            share_origin: String::new(),
+            kind: "gomoku".into(),
+            size: 15,
+        };
+        NativeSession::new(cfg, Arc::new(HeadlessHost::default()) as Arc<dyn Host>, "http://localhost/test")
+    }
+
+    /// 与 `session_poll` 同构的一次轮询：泵一次 → 快照 → 判定。
+    fn poll_once(s: &NativeSession, last: &mut Option<String>) -> Option<String> {
+        s.pump();
+        serve_snapshot(last, s.snapshot())
+    }
+
+    #[test]
+    fn two_polls_no_change_second_is_null() {
+        let _g = enter_runtime();
+        let s = headless_session();
+        let mut last = None;
+        let first = poll_once(&s, &mut last);
+        assert!(first.is_some(), "首拍必须回全量快照");
+        let second = poll_once(&s, &mut last);
+        assert_eq!(second, None, "状态未变的第二拍必须回 snapshot:null，不该再整段重传");
+    }
+
+    #[test]
+    fn state_change_serves_full_snapshot_again() {
+        let _g = enter_runtime();
+        let s = headless_session();
+        let mut last = None;
+        let first = poll_once(&s, &mut last).expect("首拍给全量");
+        assert_eq!(poll_once(&s, &mut last), None, "空闲拍走无变化分支");
+
+        // 改名：状态真的变了 → 下一拍恢复全量，且内容是新状态（不是旧缓存）。
+        s.cmd(UiCommand::SetName("测试乙".into()));
+        let third = poll_once(&s, &mut last).expect("状态变了必须回全量");
+        assert_ne!(third, first, "回出去的必须是新快照");
+        assert!(third.contains("\"name\":\"测试乙\""), "全量快照要带上新名字（serde_json 不转义非 ASCII）");
+        // 之后继续空闲 → 回到无变化分支。
+        assert_eq!(poll_once(&s, &mut last), None);
+    }
 }
