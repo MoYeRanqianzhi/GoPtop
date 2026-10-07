@@ -169,7 +169,7 @@ fn net_move_guard_and_dedup() {
     assert!(fx.is_empty());
     assert_eq!(a.to_move, "white");
     // 白方接力落子（合法轮转）正常应用；同 seq 重复再拦一次。
-    let fx = reduce(&mut a, Event::Net(GameMsg::new(2, "peer-b", "u-b", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 8, y: 8 } }, by: "white".into() })), &c);
+    reduce(&mut a, Event::Net(GameMsg::new(2, "peer-b", "u-b", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 8, y: 8 } }, by: "white".into() })), &c);
     assert_eq!(a.board[8][8], "white");
     let fx = reduce(&mut a, Event::Net(GameMsg::new(2, "peer-b", "u-b", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 8, y: 8 } }, by: "white".into() })), &c);
     assert!(fx.is_empty());
@@ -265,7 +265,7 @@ fn serverless_spectator_receipt_flow() {
     // 观众：以「打开链接」的真实路径处理 spec 意图（Boot 意图 → specrtc 直连）。
     let mut s = mk("spec", false);
     let intent = crate::links::parse_pasted_link(&spec_url).unwrap();
-    let UrlIntent::User { user_id, pwd, rtc, spec: true, .. } = intent else {
+    let UrlIntent::User { user_id, pwd: _, rtc, spec: true, .. } = intent else {
         panic!("spec 链接应解析为 user+spec 意图");
     };
     assert_eq!(user_id, "u-a");
@@ -1004,7 +1004,7 @@ fn bad_receipt_keeps_pwd_so_same_key_retry_is_accepted() {
     assert!(!fx.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("本局不符"))));
     assert!(a.pwd.is_some(), "重试受理后钥匙仍在，等进对局才消费");
     // 直连 open → 进对局，钥匙此刻才失效。
-    let fx = reduce(&mut a, Event::PeerState { tag: "main".into(), opened: true, closed: false, failed: false }, &c);
+    reduce(&mut a, Event::PeerState { tag: "main".into(), opened: true, closed: false, failed: false }, &c);
     assert_eq!(a.phase, Phase::Playing);
     assert!(a.peer_connected);
     assert!(a.pwd.is_none(), "钥匙只在进对局那一刻消费");

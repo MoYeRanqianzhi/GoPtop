@@ -662,6 +662,7 @@ pub fn empty_board(n: SizeT) -> (Vec<Vec<Color>>, SizeT) {
 }
 
 /// board 颜色 ↔ core Stone 换算。
+#[allow(dead_code)]
 pub(crate) fn color_to_stone(c: &str) -> Stone {
     match c {
         "black" => Stone::Black,
