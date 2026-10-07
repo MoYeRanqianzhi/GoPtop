@@ -45,14 +45,12 @@
 
 ## 遗留（记录在案，未获指令不动工）
 
-1. **transport accept_answer 的 stale-answer 子态**：[3]（坏回执重试）的主修复已落地
-   （状态机受理重试、钥匙进对局才消费），但「answer 有效且已应用、连接未成」时第二次
-   answer 在 stable 态会被静默吞掉。rollback 在 stable 态不可用（WebRTC 只允许
-   have-local-offer 回滚）；正解是「stable ⇒ 用会话保存的原 offer 重建 peer」或
-   「失败 surface 成 Event→Notice」，属真设计活，留专门一轮。
-2. **AI 执黑时点「重开」不接第一手**（F 组顺带发现的相邻既有缺陷）：resetBoard 后
-   toMove 仍 black 且 effect 依赖不变，AI 不重跑——此前被幽灵落子掩盖成死局。
-   需产品层拍板是否 resetBoard 后强制重跑 AI effect。
+1. **transport accept_answer 的 stale-answer 子态——B 方案已落地（7348822）**：
+   set_remote 失败经 `Event::RtcApplyFailed` 进状态机，邀请者等待态弹可行动提示；
+   非等待态维持静默。**A 方案仍未做**：stable 态用会话保存的原 offer（`PeerSlot.offer_plain`）
+   重建 peer，让补发回执真正连上（当前提示引导走「重发邀请」的重路径）——按实际发生率再决定。
+2. **AI 执黑思考中重开的死局——已修（7348822）**：genTick 渲染代次进 AI effect 依赖；
+   ai.js 的死局回归检查做过红验证（无修复时手数=0 死局，修复后手数=1）。
 3. **壳测未随本轮修复重跑**：壳 release 构建在链接前被系统内存回收（当前
    target/release/goptop.exe 仍是 9月20日 旧二进制），shell-pair/ohos-native-probe
    与安卓/鸿蒙模拟器矩阵留待内存宽裕时按 build→起壳/模拟器 串行重跑。

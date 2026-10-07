@@ -17,11 +17,11 @@
 - [x] 回归：cargo workspace 全绿、vitest 70/70、tsc 干净；Web 基线
       run.js 58/58、go-capture 7/7、ai.js 9/9、noserver-pair 9/9、stress 120 手 8/8。
 - [x] 产物同步（35ffdd3）：wasm 三件套、鸿蒙 .so 双 ABI、rawfile。
-- [ ] 遗留一：**transport accept_answer 的 stale-answer 子态**——「answer 有效且已应用、
-      连接未成」时第二次 answer 在 stable 态被静默吞（rollback 在 stable 不可用；
-      正解=用会话保存的原 offer 重建 peer，或失败 surface 成 Event→Notice）。设计活。
-- [ ] 遗留二：**AI 执黑时点「重开」不接第一手**（resetBoard 后 effect 不重跑），
-      需产品层拍板是否强制重跑 AI effect。
+- [x] 遗留一（B 方案落地，7348822）：set_remote 失败 surface 成 `Event::RtcApplyFailed`，
+      邀请者等待态给可行动提示；非等待态维持静默。**A 方案**（stable 态用原 offer
+      重建 peer，使补发回执真正连上）仍留观——按实际发生率再决定。
+- [x] 遗留二（7348822）：AI 执黑思考中重开的死局——genTick 渲染代次进 effect 依赖，
+      重开必然重跑；ai.js 新增死局回归检查（红验证确认无修复时手数=0）。
 - [ ] 遗留三：**桌面壳 shell-pair 与安卓/鸿蒙模拟器实测矩阵均未随本轮修复重跑**——
       壳 release 构建在链接前被系统内存回收（纪律：不自行重启，待内存宽裕或用户指示
       再构建；当前 target/release/goptop.exe 仍是 9月20日 旧二进制，跑壳测属无效验证）。
