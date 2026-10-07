@@ -45,10 +45,16 @@
 
 ## 遗留（记录在案，未获指令不动工）
 
-1. **transport accept_answer 的 stale-answer 子态——B 方案已落地（7348822）**：
+1. **transport accept_answer 的 stale-answer 子态——B 方案已落地（7348822 + c9f5010）**：
    set_remote 失败经 `Event::RtcApplyFailed` 进状态机，邀请者等待态弹可行动提示；
-   非等待态维持静默。**A 方案仍未做**：stable 态用会话保存的原 offer（`PeerSlot.offer_plain`）
-   重建 peer，让补发回执真正连上（当前提示引导走「重发邀请」的重路径）——按实际发生率再决定。
+   非等待态维持静默。**端到端 E2E（receipt-retry.js 6/6）又抓出两处单测盖不住的真路径缺口**：
+   守卫按槽位在册过滤会在「ICE 升级 failed → gone 移除槽位」时间线永远静默（改只看
+   phase/role）；**UI 在 accept_receipt 清掉 invite_url 后连回执按钮都没了**——重试窗口
+   只在状态机里存在（P2pPage inviter 等待卡补了入口）。关键界面已截图目检（等待卡新
+   分支、提示折行渲染、AI 重开三态）。**教训：文本断言在 DOM 里 ≠ UI 正确，改动点必须
+   截图亲眼看；E2E 前提假设（如「ICE 必升 failed」）要被诊断输出证伪就当场改**。
+   **A 方案仍未做**：stable 态用会话保存的原 offer（`PeerSlot.offer_plain`）重建 peer，
+   让补发回执真正连上（当前提示引导走「重发邀请」的重路径）——按实际发生率再决定。
 2. **AI 执黑思考中重开的死局——已修（7348822）**：genTick 渲染代次进 AI effect 依赖；
    ai.js 的死局回归检查做过红验证（无修复时手数=0 死局，修复后手数=1）。
 3. **壳测未随本轮修复重跑**：壳 release 构建在链接前被系统内存回收（当前
