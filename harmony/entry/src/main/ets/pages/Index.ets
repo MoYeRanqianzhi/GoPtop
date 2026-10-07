@@ -56,33 +56,63 @@ class GoptopHostProxy {
     this.path = `${dir}/${STORE_FILE}`;
   }
 
-  /** 整表读；文件不存在/损坏都按空表处理（前端会据此决定是否迁移旧数据）。 */
+  /**
+   * 整表读。文件不存在 = 空表（首次启动的正常路径）；**解析失败必须报错**而不是
+   * 当空表——与 Tauri 侧 src-tauri/src/store.rs 同位（那边有测试
+   * corrupt_file_is_reported_not_silently_emptied 钉死这一契约）。损坏若按空表处理，
+   * 下一次 storeSet 会用单键表把整张表覆盖掉，昵称/服务器/头像连同 P2P 身份
+   * （goptop:userId）一起静默丢失。报错抛到前端后，net/store 门面的 try/catch 会
+   * 走「平台存储不可用 → 回落浏览器存储」分支，数据不再往下丢。
+   */
   private readAll(): Record<string, string> {
-    const out: Record<string, string> = {};
+    const empty: Record<string, string> = {};
+    if (!fs.accessSync(this.path)) {
+      return empty;
+    }
+    const text = fs.readTextSync(this.path);
+    if (text.trim().length === 0) {
+      return empty;
+    }
     try {
-      const text = fs.readTextSync(this.path);
-      if (text.length === 0) {
-        return out;
-      }
       const parsed = JSON.parse(text) as Record<string, string>;
+      const out: Record<string, string> = {};
       for (const k of Object.keys(parsed)) {
         out[k] = parsed[k];
       }
-    } catch (e) {
-      // 首次启动文件不存在是正常路径；损坏也按空表（前端首帧不至于白屏）
       return out;
+    } catch (e) {
+      // 损坏文件先改名 .bad 留痕（保留最新一份样本供排查），再把错误抛出去
+      const bad = `${this.path}.bad`;
+      try {
+        if (fs.accessSync(bad)) {
+          fs.unlinkSync(bad);
+        }
+        fs.renameSync(this.path, bad);
+      } catch (e2) {
+        // 留痕失败不掩盖原始解析错误
+        console.warn(`[goptopHost] store.json 损坏样本留痕失败: ${e2}`);
+      }
+      throw new Error(`store.json 损坏: ${e}`);
     }
-    return out;
   }
 
-  /** 整表写：先截断重写（单文件小表，无需原子替换的复杂度）。 */
+  /**
+   * 整表写：先写 `store.json.tmp` 再 rename 覆盖（与 Tauri 侧 store.rs 的 save_to
+   * 同构）。此前是 TRUNC 截断后原地重写——写一半被杀（保存头像这种 4MB 级大值时
+   * 窗口不小）就剩半截或空 JSON，重启后按空表处理，全部设置与身份丢失。rename
+   * 是原子的：任何时刻 store.json 要么是旧完整表，要么是新完整表。
+   * 注意 rename 依赖 POSIX 语义「直接替换已存在目标」，设备上若实测拒绝覆盖，
+   * 需改为先 unlinkSync 旧文件（残窗退化为一次「文件缺失」，下游已按空表处理）。
+   */
   private writeAll(map: Record<string, string>): void {
-    const file = fs.openSync(this.path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    const tmp = `${this.path}.tmp`;
+    const file = fs.openSync(tmp, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     try {
       fs.writeSync(file.fd, JSON.stringify(map));
     } finally {
       fs.closeSync(file);
     }
+    fs.renameSync(tmp, this.path);
   }
 
   /* ---- 存储面 ---- */

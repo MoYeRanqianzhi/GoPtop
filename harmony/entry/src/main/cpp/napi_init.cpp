@@ -28,6 +28,7 @@
 #include <napi/native_api.h>
 #include <hilog/log.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <mutex>
@@ -44,9 +45,20 @@ extern "C" void goptop_free(char *p);
 
 namespace {
 
-/** 票号表：票 → 结果（空 = 还在算）。**只有完成回调与 aiPoll 会碰它**。 */
+/**
+ * 票号表条目：结果（空 = 还在算）+ 出生时刻。
+ *
+ * born 用于回收「无人认领」的条目——JS 侧有放弃轮询的路径（应用冻结进后台超过
+ * 前端 15s 轮询上限、分析进行中页面 reload 销毁 JS 上下文），之后写完的结果再也
+ * 没人来 poll，而本模块存活整个进程、表没有任何其他回收点，不清理就是只增不减。
+ */
+struct Entry {
+  std::string out;
+  std::chrono::steady_clock::time_point born;
+};
+
 std::mutex g_mu;
-std::map<int, std::string> g_results;
+std::map<int, Entry> g_results;
 int g_next_ticket = 1;
 
 /** 取一个字符串参数；非字符串或缺失返回空串（不抛，调用方自己兜底）。 */
@@ -118,7 +130,14 @@ void AiExecute(napi_env /*env*/, void *data) {
   auto *job = static_cast<AiJob *>(data);
   std::string out = CallRust("ai_analyze", job->req);
   std::lock_guard<std::mutex> lock(g_mu);
-  g_results[job->ticket] = std::move(out);
+  // 只改 out 不动 born：保留占位时的出生时刻，寿命从 post 起算。
+  // 占位可能已被上限驱逐（operator[] 重建出零值 born 的条目），补成当前时刻，
+  // 否则重建的条目下一轮清扫就会被立刻回收。
+  Entry &e = g_results[job->ticket];
+  e.out = std::move(out);
+  if (e.born == std::chrono::steady_clock::time_point{}) {
+    e.born = std::chrono::steady_clock::now();
+  }
 }
 
 /** async work 的完成体：跑回 JS 线程，这里只做清理（结果已由 AiExecute 写好）。 */
@@ -137,9 +156,28 @@ napi_value AiPost(napi_env env, napi_callback_info info) {
   int ticket = 0;
   {
     std::lock_guard<std::mutex> lock(g_mu);
+    // 顺带清扫陈旧条目（60s 远超分析最长预算 3s，正常在算的占位不会被误扫；
+    // 即使被扫——进程冻结超过 57s 的病态情形——AiExecute 的 operator[] 会重建，
+    // 行为无害）：
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = g_results.begin(); it != g_results.end();) {
+      if (now - it->second.born > std::chrono::seconds(60)) {
+        OH_LOG_DEBUG(LOG_APP, "AI 票号 %{public}d 超龄无人认领，回收", it->first);
+        it = g_results.erase(it);
+      } else {
+        ++it;
+      }
+    }
     ticket = g_next_ticket++;
     job->ticket = ticket;
-    g_results[ticket] = "";  // 占位：空串即「还没算完」
+    g_results.emplace(ticket, Entry{std::string(), now});  // 占位：空串即「还没算完」
+    // 硬上限兜底：按时间的清扫依赖「之后还有下一次 aiPost」才触发，短时间反复
+    // 弃票时条目仍会先堆积，这里把表压回 16 条。丢的必然是最老的低票号——正常
+    // 并发不过两三张票，能堆到 17 张只可能是早已弃取的票；在算占位被驱逐也无害
+    // （同上，AiExecute 会重建）。
+    if (g_results.size() > 16) {
+      g_results.erase(g_results.begin());
+    }
   }
   // `async_resource_name` **不能传 nullptr**：Node 的 NAPI 文档写明它是必填，
   // 传空在 OHOS 上会让 napi_create_async_work 直接返回 napi_invalid_arg，
@@ -151,6 +189,12 @@ napi_value AiPost(napi_env env, napi_callback_info info) {
   napi_status qst = cst == napi_ok ? napi_queue_async_work(env, work) : cst;
   if (qst != napi_ok) {
     OH_LOG_ERROR(LOG_APP, "AI 任务排队失败 create=%{public}d queue=%{public}d", (int)cst, (int)qst);
+    if (cst == napi_ok) {
+      // create 成功而 queue 失败：work 从未入队，完成回调不会执行，运行时不会
+      // 接手回收——句柄所有权仍在调用方，必须显式删除（create 就失败时 work 本
+      // 为 nullptr，守卫避免对空句柄调用）
+      napi_delete_async_work(env, work);
+    }
     std::lock_guard<std::mutex> lock(g_mu);
     g_results.erase(ticket);
     delete job;
@@ -159,7 +203,7 @@ napi_value AiPost(napi_env env, napi_callback_info info) {
   }
   // 票号取自局部变量而不是 `job->ticket`：任务已经排队，若它跑得够快，
   // `AiComplete` 会在这一行之前把 `job` 删掉——读它就是一个 use-after-free。
-  // work 句柄则由运行时在完成后回收。
+  // work 句柄由运行时在完成后回收（上面 queue 失败分支里则由本侧显式删除）。
   napi_value out = nullptr;
   napi_create_int32(env, ticket, &out);
   return out;
@@ -177,11 +221,11 @@ napi_value AiPoll(napi_env env, napi_callback_info info) {
   }
   std::lock_guard<std::mutex> lock(g_mu);
   auto it = g_results.find(ticket);
-  if (it == g_results.end() || it->second.empty()) {
+  if (it == g_results.end() || it->second.out.empty()) {
     return Str(env, "");  // 未完成（或票号早已取走）
   }
   // 取走即删：票号是一次性的，重复取会返回空串而不是重复交付同一份结果
-  std::string out = std::move(it->second);
+  std::string out = std::move(it->second.out);
   g_results.erase(it);
   return Str(env, out);
 }
