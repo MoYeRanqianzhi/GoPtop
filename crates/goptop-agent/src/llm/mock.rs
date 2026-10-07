@@ -9,11 +9,12 @@ use super::{ChatRequest, ChatResponse, LlmError, MockScript};
 /// 弹出下一步预置响应。空剧本弹尽即 Fatal（文案即骨架注明的 `mock script
 /// exhausted`——循环与测试都按它断言）。
 ///
-/// `_req` 保留入参面：`LlmClient::chat` 的分发形状三变体一致，Mock 有意不读
-/// 请求（确定性桩不解释提示词），改名 `_req` 会破坏「同一请求形态走三种客户端」
-/// 的对仗，故留原名加此注。
-pub(crate) async fn chat(script: &MockScript, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
-    let mut guard = script.0.lock().expect("锁中毒即 bug（与 EventQueue 同一语义）");
+/// `_req` 的「不读」指不解释（确定性桩不读懂提示词）；请求仍**留档**
+/// （[`MockScript::recorded`]）——计划测试项「内置事件自动推送：下一轮 LLM 请求的
+/// 注入消息里含 move 坐标」的断言对象就是请求原文，不记录只能黑盒猜。
+pub(crate) async fn chat(script: &MockScript, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+    script.requests.lock().expect("锁中毒即 bug").push(req);
+    let mut guard = script.script.lock().expect("锁中毒即 bug（与 EventQueue 同一语义）");
     if guard.is_empty() {
         return Err(LlmError::Fatal("mock script exhausted".to_string()));
     }

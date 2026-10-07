@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
+use crate::compact::{compacted_messages, estimate_tokens, Compactor, KEEP_RECENT_TOKENS, SummaryCompactor};
 use crate::llm::{
     Block, ChatRequest, LlmClient, LlmConfig, LlmError, Msg, Role, StopReason, ToolCall, ToolSpec,
 };
@@ -129,6 +130,11 @@ const WAIT_HEARTBEAT: &str = "Waiting for the opponent's action. Nothing is requ
 you right now — their move / message / request will arrive as a pushed <event>. You may \
 chat, take notes in /memory, or simply wait.";
 
+/// 空转限速拍长：队列空且轮到对手时，下一轮 LLM 调用前歇这一拍。没有它，「等待」
+/// 是紧循环——真端点上一秒几十次空请求是自找 429，Mock 测试里则把剧本在微秒内
+/// 烧穿。50ms 封顶 20 req/s，远低于 LLM 自然节奏，等待体感无差别。
+const IDLE_POLL_MS: u64 = 50;
+
 /// 收尾指令（winner 出现后的最后一轮：给模型一次写告别语的机会，随后循环收场）。
 fn farewell_instruction(winner: &str) -> String {
     format!(
@@ -151,8 +157,11 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
     }];
     // 连续 Transient 计数（≥3 → Fatal，骨架注的错误分类在循环侧的落点）。
     let mut transients: u32 = 0;
-    // 超窗兜底只重试一次（compact 接线后此处先强制压缩再重试）。
+    // 超窗兜底只重试一次：ContextWindowExceeded → 强制压缩 → 同一轮重发。
     let mut emergency_compacted = false;
+    // 最近一次压缩产出的摘要（增量压缩的 previousSummary 来源；压缩后历史被换血，
+    // 旧摘要不能再从 history 里反查，只能随身携带）。
+    let mut prev_summary: Option<String> = None;
     // winner 已现、收尾轮已给——下一轮到 winner 判定即 GameOver。
     let mut ending = false;
     let tool_specs = build_tool_specs(&tools);
@@ -167,8 +176,10 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
             return LoopOutcome { stop: LoopStop::BudgetExhausted, stats };
         }
 
-        // compact 挂点（见 maybe_compact：压缩接线前的 no-op）。
-        if let Err(e) = maybe_compact(&mut history, &cfg, &mut stats).await {
+        // compact 挂点：触发线判定 + 摘要换血（compact.rs 的参数语义在循环侧落点）。
+        if let Err(e) =
+            maybe_compact(&mut history, &llm, &cfg, &mut stats, &mut prev_summary, false).await
+        {
             return LoopOutcome { stop: LoopStop::Fatal(e.message().to_string()), stats };
         }
 
@@ -190,8 +201,9 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
             }
             Err(LlmError::ContextWindowExceeded) => {
                 // 超窗兜底（计划 compact 节）：生效上限取 min(用户上限, 模型实限)
-                // → 强制压缩 → 重试一次 → 再失败 Fatal。压缩本体在 compact.rs，
-                // 接线前挂点 no-op——同窗重试一次仍超窗就 Fatal，不空转。
+                // → 强制压缩 → 重试一次 → 再失败 Fatal。模型实限未知（错误体只有
+                // 特征没有数字），强制压缩以「保留尾段=最近的合法切点」执行——
+                // 换血幅度最大且不拆工具对；同窗重试一次仍超窗就 Fatal，不空转。
                 if emergency_compacted {
                     return LoopOutcome {
                         stop: LoopStop::Fatal(
@@ -201,6 +213,11 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
                     };
                 }
                 emergency_compacted = true;
+                if let Err(e) =
+                    maybe_compact(&mut history, &llm, &cfg, &mut stats, &mut prev_summary, true).await
+                {
+                    return LoopOutcome { stop: LoopStop::Fatal(e.message().to_string()), stats };
+                }
                 continue;
             }
             Err(LlmError::Transient(m)) => {
@@ -338,6 +355,11 @@ by the human player). Receipt: {receipt}\n"
         if !blocks.is_empty() {
             history.push(Msg { role: Role::User, content: blocks });
         }
+        // 空转限速（IDLE_POLL_MS 注）：只在「无事可做、轮到对手」的等待回合歇拍
+        // ——轮到我（该行动）或队列有事件（该处理）都不歇，行动路径零延迟。
+        if events.is_empty() && !is_my_turn(&snap) {
+            tokio::time::sleep(std::time::Duration::from_millis(IDLE_POLL_MS)).await;
+        }
     }
 }
 
@@ -356,10 +378,17 @@ fn build_tool_specs(ctx: &ToolCtx) -> Vec<ToolSpec> {
 
 /// 这次工具调用是不是「submit /game/in/resign」——resign 的 terminate 由调用面
 /// 直接判（registry 的回执没有 terminate 字段，等快照 winner 会多绕一轮）。
+///
+/// 路径做与 registry 判别表同款的宽容归一（trim + 补前导 `/`）：模型写
+/// `"game/in/resign"` 在 registry 照样执行成功，这里若按字面比对就漏判 terminate，
+/// 局已认输而循环还在空转。
 fn is_resign_submit(call: &ToolCall) -> bool {
-    call.name == crate::tools::TOOL_SUBMIT.name
-        && call.arguments.get("path").and_then(Value::as_str)
-            == Some(crate::vfs::InFile::Resign.path())
+    if call.name != crate::tools::TOOL_SUBMIT.name {
+        return false;
+    }
+    let path = call.arguments.get("path").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let path = path.strip_prefix('/').unwrap_or(path);
+    path == crate::vfs::InFile::Resign.path().trim_start_matches('/')
 }
 
 /// 是否该由循环自动确认计分：进入计分态、结果未出、我这席还没确认。
@@ -398,15 +427,37 @@ async fn auto_confirm_score(ctx: &ToolCtx) -> Result<Value, ToolError> {
     registry::execute(crate::tools::TOOL_SUBMIT.name, &commit, ctx).await
 }
 
-/// compact 挂点 —— 触发线判定与摘要的接线位（契约见 [`crate::compact`]）。
+/// compact 挂点 —— 触发线判定与摘要换血（契约见 [`crate::compact`]）。
 ///
-/// 接线形态：`compact::estimate_tokens(history) > cfg.ctx_limit −
-/// compact::RESERVE_TOKENS` 时用 `SummaryCompactor::summarize` 出摘要，把 history
-/// 重排为 `[user: <compaction-summary> 摘要] + retainedTail`（切点走
-/// `cut_point`，绝不拆 assistant 工具调用与 tool_result 对），`stats.compactions
-/// += 1`。当前 no-op：骨架期只立挂点，压缩语义由 compact 负责人落地后在此接上
-///（任务口径「可先 no-op」；超窗兜底的强制压缩同样落在这里）。
-async fn maybe_compact(history: &mut Vec<Msg>, cfg: &LoopConfig, stats: &mut LoopStats) -> Result<(), LlmError> {
-    let _ = (history, cfg, stats);
+/// 流程：`estimate_tokens(history)` 过触发线（`used > ctx_limit − RESERVE_TOKENS`）
+/// → `cut_point` 定保留尾段（绝不拆 assistant 工具调用与 tool_result 对）→
+/// `summarize`（独立一次 LLM 请求，不计入 `max_llm_calls`——压缩是维护动作不是
+/// 模型的一次思考）→ history 重排为 `[user: 摘要] + retainedTail`、计数 +1。
+/// `prev_summary` 随身携带：有旧摘要走增量更新（对手风格观察不换血）。
+///
+/// 非 force 且切点为 0 时放弃：切 0 =「摘要空集 + 全量保留」，多花一次摘要请求
+/// 还让上下文更长，违背压缩本意（触发线此后每轮都过，但判定本身零成本）。
+/// `force`（超窗兜底）无视收益必须真减量：保留尾段收到「最近的合法切点」
+/// （keep=1 token），结构一定变小。
+async fn maybe_compact(
+    history: &mut Vec<Msg>,
+    llm: &Arc<LlmClient>,
+    cfg: &LoopConfig,
+    stats: &mut LoopStats,
+    prev_summary: &mut Option<String>,
+    force: bool,
+) -> Result<(), LlmError> {
+    let compactor = SummaryCompactor { llm: Arc::clone(llm), ctx_limit: u64::from(cfg.ctx_limit) };
+    if !force && !compactor.should_compact(estimate_tokens(history)) {
+        return Ok(());
+    }
+    let cut = compactor.cut_point(history, if force { 1 } else { KEEP_RECENT_TOKENS });
+    if cut == 0 && !force {
+        return Ok(());
+    }
+    let summary = compactor.summarize(history, prev_summary.as_deref()).await?;
+    *history = compacted_messages(history, &summary, cut);
+    *prev_summary = Some(summary);
+    stats.compactions += 1;
     Ok(())
 }

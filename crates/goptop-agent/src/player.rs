@@ -58,6 +58,8 @@ pub trait PlayerHandle: Send + Sync {
 ///
 /// 持 `Arc` 而非值：pair() 要把同一会话交给调用方（A' 给前端轮询），
 /// 生命周期跨层共享；`NativeSession` 的 Drop 置停机标志，drop 最后一份即全线停机。
+/// `Clone`：同一席要多处持有（ctx.player 与测试 driver 各持一份，都泵同一会话）。
+#[derive(Clone)]
 pub struct NativePlayer {
     session: Arc<NativeSession>,
 }
@@ -145,7 +147,7 @@ impl EmitWatch {
     }
 }
 
-/// B 席的装饰宿主：拦截三个键、覆写 emit，其余全部透传给内层宿主
+/// B 席的装饰宿主：拦截三个键、覆写 emit 与 notice，其余全部透传给内层宿主
 /// （桌面=TauriHost，测试=HeadlessHost）。
 ///
 /// 三处拦截（计划「会话对」节第 2 条）：
@@ -153,13 +155,19 @@ impl EmitWatch {
 ///   免得会话初始化把人的持久设备身份覆盖成临时值）；
 /// - `goptop:stun` 读 → 强制 `"[]"`（免 ICE gathering 的 8s 超时兜底，
 ///   headless.rs:26-30 的既有手法——Agent 局要的是秒级配对，不是最优链路）；
-/// - `emit` → 先推 [`EmitWatch`] 再透传（事件物化的源头）。
+/// - `emit` → 先推 [`EmitWatch`] 再透传（事件物化的源头）；
+/// - `notice` → 协商结果的 Ack 落在提示条而非快照（`UndoAck{ok:false}` 只出
+///   Notice「对方拒绝了悔棋」）——Agent 作为**请求方**时这是被拒的唯一本地载体，
+///   由 [`ack_event_from_notice`] 物化成 request_resolved 事件喂事件队列
+///   （`bind_events` 绑定；未绑定即纯透传）。
 pub struct HookHost {
     inner: Arc<dyn Host>,
     /// 本局临时随机 userId（u- 前缀，与持久身份同形——只求 bc.rs 的回声过滤认它）。
     user_id: String,
     watch_tx: watch::Sender<(u64, String)>,
     seq: AtomicU64,
+    /// 事件队列的弱引用（notice 拦截的落点；Weak——局散时队列先死也不悬挂）。
+    events: std::sync::Mutex<Option<std::sync::Weak<EventQueue>>>,
 }
 
 impl HookHost {
@@ -175,8 +183,21 @@ impl HookHost {
         // 会让 bc.rs 的回声过滤把对方消息当自己的回声吃掉。
         let rand = goptop_transport_native::rand4();
         let user_id = goptop_net::identity::gen_user_id(goptop_transport_native::now_ms(), rand[0]);
-        let host = Arc::new(Self { inner, user_id, watch_tx, seq: AtomicU64::new(0) });
+        let host = Arc::new(Self {
+            inner,
+            user_id,
+            watch_tx,
+            seq: AtomicU64::new(0),
+            events: std::sync::Mutex::new(None),
+        });
         (host, EmitWatch::new(watch_rx))
+    }
+
+    /// 绑定事件队列（notice 拦截的物化落点）。装配层（pair 的调用方）在起事件泵
+    /// 前调用一次；不绑定则 notice 纯透传（对局功能不受影响，只是请求方的
+    /// 协商结果不进事件流）。
+    pub fn bind_events(&self, queue: &Arc<EventQueue>) {
+        *self.events.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(queue));
     }
 
     /// 本局的临时 userId（测试断言「两端 ID 不同」、日志归因用）。
@@ -213,6 +234,16 @@ impl Host for HookHost {
     }
 
     fn notice(&self, text: Option<&str>, ms: Option<u32>) {
+        // 协商 Ack 的物化口：请求方的被拒/被允只见提示条（不改快照），不拦就丢。
+        // seq 由队列锁内统一分配（与 watch diff 泵同一入口，绝不撞号）。
+        if let Some(t) = text {
+            if let Some(ev) = ack_event_from_notice(t) {
+                let sink = self.events.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(q) = sink.as_ref().and_then(std::sync::Weak::upgrade) {
+                    q.extend_new(vec![ev]);
+                }
+            }
+        }
         self.inner.notice(text, ms);
     }
 
@@ -284,6 +315,20 @@ impl GameEvent {
     }
 }
 
+/// 就地改写事件 seq（[`EventQueue::extend_new`] 的锁内重编号用；生成方先填 0 占位）。
+fn set_seq(ev: &mut GameEvent, seq: u64) {
+    match ev {
+        GameEvent::Move { seq: s, .. }
+        | GameEvent::Pass { seq: s, .. }
+        | GameEvent::Chat { seq: s, .. }
+        | GameEvent::RequestReceived { seq: s, .. }
+        | GameEvent::RequestResolved { seq: s, .. }
+        | GameEvent::ScoringStarted { seq: s }
+        | GameEvent::ScoreResult { seq: s, .. }
+        | GameEvent::GameOver { seq: s, .. } => *s = seq,
+    }
+}
+
 /// 事件队列 = 事件流的两个出口共用的那份数据。
 ///
 /// 「队列」与「全量历史」是**一份数据的两个读法**：未消费游标之前的叫待处理
@@ -338,6 +383,21 @@ impl EventQueue {
         let out = g.events[g.consumed..].to_vec();
         g.consumed = g.events.len();
         out
+    }
+
+    /// 追加一批事件，seq 由本方法**在锁内**统一分配（入参里的 seq 只是占位）。
+    ///
+    /// 为什么不用「next_seq() 取号 → push() 入队」两步式：生成方有两个——watch
+    /// diff 泵与 [`HookHost`] 的 notice 拦截（悔棋/重开/换棋被拒时协议只发
+    /// Notice 不改快照，见模块注与 [`ack_event_from_notice`]），并发取号会撞号
+    /// 把 /game/events 撕出重号。单锁内「分配+追加」原子化，seq 连续由结构保证。
+    pub fn extend_new(&self, evs: Vec<GameEvent>) {
+        let mut g = self.lock();
+        for mut ev in evs {
+            let seq = g.events.last().map_or(1, |e| e.seq() + 1);
+            set_seq(&mut ev, seq);
+            g.events.push(ev);
+        }
     }
 
     /// 未消费条数（等待谓词「队列非空」用，免得每次都拷贝整个 tail）。
@@ -528,6 +588,33 @@ fn resolved_approved(kind: &str, prev: &serde_json::Value, curr: &serde_json::Va
     }
 }
 
+/// 协商 Ack 提示文案 → 事件（HookHost::notice 的物化规则）。
+///
+/// 文案来自 goptop-net 的 matchplay（UndoAck/ResetAck/SwapAck 的本地提示，中文、
+/// 本仓内稳定）：「同意/拒绝 + 悔棋/重开/换棋」。按关键词双匹配而非整句等值——
+/// 文案微调（时长/标点）不破物化，只有 Ack 类提示同时含两者。
+/// Agent 作为**批复方**时不出这些提示（批复走本地 confirmReq diff），两条物化
+/// 路径互不重叠、不会双报。
+fn ack_event_from_notice(text: &str) -> Option<GameEvent> {
+    let kind = if text.contains("悔棋") {
+        "undo"
+    } else if text.contains("重开") {
+        "reset"
+    } else if text.contains("换棋") {
+        "swap"
+    } else {
+        return None;
+    };
+    let approved = if text.contains("同意") {
+        true
+    } else if text.contains("拒绝") {
+        false
+    } else {
+        return None;
+    };
+    Some(GameEvent::RequestResolved { seq: 0, kind: kind.into(), approved })
+}
+
 /// watch → 队列的物化泵：每拍 diff 并把新事件推进队列。
 ///
 /// 独立 tokio 任务跑（调用方 `tokio::spawn`）；首拍只记基线不产事件（快照是全量的，
@@ -548,9 +635,8 @@ pub async fn run_event_pump(mut watch: EmitWatch, queue: Arc<EventQueue>) {
         };
         let curr = parse_snap(&text);
         if let Some(p) = prev.as_ref() {
-            for ev in diff_events(Some(p), &curr, queue.next_seq()) {
-                queue.push(ev);
-            }
+            // seq 占位 0，extend_new 在锁内统一重编号（与 notice 拦截共入口，绝不撞号）。
+            queue.extend_new(diff_events(Some(p), &curr, 0));
         }
         prev = Some(curr);
     }
@@ -671,6 +757,42 @@ mod tests {
     }
 
     /* ---------------- diff_events ---------------- */
+
+    #[test]
+    fn extend_new锁内重编号_与push共存连续() {
+        let q = EventQueue::new();
+        q.push(GameEvent::Move { seq: 1, by: "black".into(), x: 7, y: 7 });
+        // extend_new 忽略入参 seq（0 占位），锁内接着队尾编号。
+        q.extend_new(vec![
+            GameEvent::RequestResolved { seq: 0, kind: "undo".into(), approved: false },
+            GameEvent::Chat { seq: 0, from: "甲".into(), text: "hi".into() },
+        ]);
+        let hist = q.history();
+        let seqs: Vec<u64> = hist.iter().map(|e| e.seq()).collect();
+        assert_eq!(seqs, vec![1, 2, 3], "两路生成方共入一口，seq 连续：{seqs:?}");
+    }
+
+    #[test]
+    fn notice拦截_协商ack物化为request_resolved() {
+        let (host, _watch) = HookHost::wrap(Arc::new(HeadlessHost::default()));
+        let q = Arc::new(EventQueue::new());
+        host.bind_events(&q);
+        // 请求方视角的被拒/被允提示（matchplay 的本地 Ack 文案）。
+        host.notice(Some("对方拒绝了悔棋"), Some(2400));
+        host.notice(Some("对方已同意重开"), Some(2400));
+        host.notice(Some("双方连续停一手，进入终局计分"), Some(5200)); // 非 Ack，不物化
+        assert_eq!(
+            q.history(),
+            vec![
+                GameEvent::RequestResolved { seq: 1, kind: "undo".into(), approved: false },
+                GameEvent::RequestResolved { seq: 2, kind: "reset".into(), approved: true },
+            ],
+            "Ack 提示物化为事件、非 Ack 透传不物化"
+        );
+        // 未绑定的宿主：notice 纯透传不炸（弱引用 None 分支）。
+        let (host2, _w2) = HookHost::wrap(Arc::new(HeadlessHost::default()));
+        host2.notice(Some("对方拒绝了悔棋"), None);
+    }
 
     #[test]
     fn diff_首拍与无变化都回空() {

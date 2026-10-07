@@ -268,8 +268,7 @@ fn read_full_text(path: &str, ctx: &ToolCtx) -> Result<String, ToolError> {
         Resolved::Game(_) => {
             let snap = ctx.player.snapshot();
             let staged = staged_move_of(ctx);
-            vfs::read_dynamic(&resolved, &snap, staged, &ctx.events, &ctx.staging)
-                .map_err(respond)
+            vfs::read_dynamic(&resolved, &snap, staged, &ctx.events).map_err(respond)
         }
     }
 }
@@ -556,14 +555,9 @@ fn grep_file_text(path: &str, ctx: &ToolCtx, snap: &serde_json::Value) -> Option
             let key = store::normalize_path(rel).ok()?;
             ctx.memory.read(ctx.memory_ns, &key).ok()??
         }
-        Resolved::Game(_) => vfs::read_dynamic(
-            &resolved,
-            snap,
-            staged_move_of(ctx),
-            &ctx.events,
-            &ctx.staging,
-        )
-        .ok()?,
+        Resolved::Game(_) => {
+            vfs::read_dynamic(&resolved, snap, staged_move_of(ctx), &ctx.events).ok()?
+        }
     })
     .filter(|t| !t.is_empty())
 }

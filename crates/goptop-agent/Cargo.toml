@@ -18,6 +18,9 @@ crate-type = ["rlib"]
 [dependencies]
 # 会话状态机的唯一命令口（UiCommand）与唯一读口（snapshot）——协议零改动复用。
 goptop-net = { version = "0.1.0-alpha.0", path = "../goptop-net" }
+# /game/history/<n> 的局面重放要过真规则引擎（围棋提子手搓必错）：核心层是
+# goptop-net 的既有 workspace 依赖，这里直接按路径挂，不添外部包。
+goptop-core = { version = "0.1.0-alpha.0", path = "../goptop-core" }
 # 无头会话执行器（NativeSession / Host）。web 端内置模式（阶段⑤）把循环驱动与
 # VfsStore/HttpChannel 换成 TS 钩子时，这份依赖再按 cfg 收窄；先按桌面全量给。
 goptop-transport-native = { version = "0.1.0-alpha.0", path = "../goptop-transport-native" }
@@ -38,3 +41,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # HttpChannel / Compactor 的 async trait 方法要 dyn 兼容（enum 变体里存 Arc<dyn>），
 # 用仓库既有同款方案（goptop-transport-native 亦用 async-trait）。
 async-trait = "0.1"
+# /game/board/image.png 的栅格编码。计划原文写 `image` crate，但其依赖树远超需求；
+# png 0.17 已在 lock 里（tauri-codegen 链路的传递依赖），按「不添依赖是纪律」的
+# 同款取舍（registry 的 mini_regex 先例）直接挂已锁定的 png，零新增 lock 条目。
+png = "0.17"

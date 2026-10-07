@@ -222,18 +222,29 @@ pub trait HttpChannel: Send + Sync {
 /// 静默循环会把它藏成「偶发卡死」。`Mutex` 而非 `&mut`：剧本被 enum 内持有，
 /// `chat(&self)` 的借用面要求内部可变性。
 #[derive(Default)]
-pub struct MockScript(std::sync::Mutex<Vec<ChatResponse>>);
+pub struct MockScript {
+    script: std::sync::Mutex<Vec<ChatResponse>>,
+    /// 收到的请求留档（[`Self::recorded`] 取）——循环注入了什么、工具面给了什么，
+    /// 测试断言的是这些原文而不是黑盒副作用。
+    requests: std::sync::Mutex<Vec<ChatRequest>>,
+}
 
 impl MockScript {
     #[must_use]
     pub fn new(script: Vec<ChatResponse>) -> Self {
-        Self(std::sync::Mutex::new(script))
+        Self { script: std::sync::Mutex::new(script), requests: std::sync::Mutex::new(Vec::new()) }
     }
 
     /// 剩余步数（测试断言「剧本恰好用完」用——用不尽说明循环提前退出或漏调）。
     #[must_use]
     pub fn remaining(&self) -> usize {
-        self.0.lock().expect("锁中毒即 bug（与 EventQueue 同一语义）").len()
+        self.script.lock().expect("锁中毒即 bug（与 EventQueue 同一语义）").len()
+    }
+
+    /// 至今收到的全部请求快照（深拷贝——循环还在跑，借用出不去）。
+    #[must_use]
+    pub fn recorded(&self) -> Vec<ChatRequest> {
+        self.requests.lock().expect("锁中毒即 bug").clone()
     }
 }
 

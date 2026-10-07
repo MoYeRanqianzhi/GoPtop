@@ -54,6 +54,9 @@ impl Driver {
     /// 外部 Agent 多次接入应读到自己的旧笔记；内置循环与外部 Agent 的记忆互不串味。
     #[must_use]
     pub fn memory_ns(self) -> &'static str {
-        todo!()
+        match self {
+            Self::Builtin => "builtin",
+            Self::Mcp => "mcp",
+        }
     }
 }

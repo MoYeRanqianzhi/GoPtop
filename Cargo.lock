@@ -1991,8 +1991,10 @@ name = "goptop-agent"
 version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
+ "goptop-core",
  "goptop-net",
  "goptop-transport-native",
+ "png 0.17.16",
  "reqwest",
  "rusqlite",
  "rustls",
