@@ -78,19 +78,35 @@ impl NativePlayer {
 
 impl PlayerHandle for NativePlayer {
     fn cmd(&self, cmd: UiCommand) {
-        todo!()
+        self.session.cmd(cmd);
     }
 
     fn snapshot(&self) -> serde_json::Value {
-        todo!()
+        // 锁坏时 session.snapshot() 已回 "null" 字符串，这里保持同一兜底口径：
+        // 坏快照 → Null，diff/合成器全字段取不到 → 不产事件、不出文件，绝不 panic。
+        serde_json::from_str(&self.session.snapshot()).unwrap_or(serde_json::Value::Null)
     }
 
     fn pump(&self) {
-        todo!()
+        self.session.pump();
     }
 
     fn wait_until(&self, pred: &mut dyn FnMut(&serde_json::Value) -> bool, timeout: Duration) -> bool {
-        todo!()
+        // 先泵后验（IO 事件可能正等在队列里）、每拍重读快照（谓词永远看最新态）。
+        // 阻塞式 std 睡眠在 native 侧可接受（见 trait 注）——调用点要么在同步线程，
+        // 要么明知占用一个运行时线程换「像前端一样拉」的简单模型。
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            self.pump();
+            let snap = self.snapshot();
+            if pred(&snap) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -153,7 +169,14 @@ impl HookHost {
     /// 生成同一条路，熵来源（进程级 RandomState + 时间 + 自增）已验证防同毫秒撞车
     ///（lib.rs 的 rand4 说明——两个会话同 userId 会让挑战发给自己）。
     pub fn wrap(inner: Arc<dyn Host>) -> (Arc<Self>, EmitWatch) {
-        todo!()
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel((0u64, String::new()));
+        // 临时 userId 与既有身份生成同一条路（gen_user_id + rand4）：u- 前缀同形，
+        // 熵来源（进程级 RandomState + 自增）已验证同毫秒不撞车——两个会话同 userId
+        // 会让 bc.rs 的回声过滤把对方消息当自己的回声吃掉。
+        let rand = goptop_transport_native::rand4();
+        let user_id = goptop_net::identity::gen_user_id(goptop_transport_native::now_ms(), rand[0]);
+        let host = Arc::new(Self { inner, user_id, watch_tx, seq: AtomicU64::new(0) });
+        (host, EmitWatch::new(watch_rx))
     }
 
     /// 本局的临时 userId（测试断言「两端 ID 不同」、日志归因用）。
@@ -165,27 +188,46 @@ impl HookHost {
 
 impl Host for HookHost {
     fn storage_get(&self, key: &str) -> Option<String> {
-        todo!()
+        match key {
+            // 身份读：恒回本局临时随机值，绝不读内层——读了就把人的持久设备身份
+            // 带进 B 席（同 ID 即回声互吞，见 struct 注）。仅去重键，无身份语义。
+            "goptop:userId" => Some(self.user_id.clone()),
+            // STUN 读：强制空表——本地候选即刻收集完，免 ICE gathering 的 8s 超时兜底
+            //（headless.rs:26-30 既有手法）；Agent 局要的是秒级配对，不是最优链路。
+            "goptop:stun" => Some("[]".into()),
+            _ => self.inner.storage_get(key),
+        }
     }
 
     fn storage_set(&self, key: &str, value: Option<&str>) {
-        todo!()
+        // 身份写路径同样吞掉：会话初始化/设置流若把 userId 落盘，覆盖的将是
+        // **人的**持久设备身份——这是本装饰存在的第一理由，读写两侧都要堵死。
+        if key == "goptop:userId" {
+            return;
+        }
+        self.inner.storage_set(key, value);
     }
 
     fn copy(&self, text: &str) {
-        todo!()
+        self.inner.copy(text);
     }
 
     fn notice(&self, text: Option<&str>, ms: Option<u32>) {
-        todo!()
+        self.inner.notice(text, ms);
     }
 
     fn nav(&self, path: &str) {
-        todo!()
+        self.inner.nav(path);
     }
 
     fn emit(&self, snapshot_json: &str) {
-        todo!()
+        // 事件物化的源头：先推 watch（seq 单调；接收方只关心最新一拍，中间态被
+        // watch 覆盖是特性——diff 也以最新拍为基线），再透传内层（TauriHost 还要
+        // 推给前端，HeadlessHost 还要计数）。无人接收时 send 回 Err：正常（泵任务
+        // 未起/已退），watch 里仍留最新值供后来者取基线。
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.watch_tx.send((seq, snapshot_json.to_string()));
+        self.inner.emit(snapshot_json);
     }
 }
 
@@ -203,7 +245,9 @@ impl Host for HookHost {
 /// 每个变体都带 `seq`：它是翻页/回查的主键（read offset/limit、grep 回查任意过往
 /// 事件），由 [`EventQueue`] 分配、单调递增，绝不由生成方自报。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "t", rename_all_fields = "camelCase")]
+// 变体名 snake_case（"request_received" 而非 "RequestReceived"）——t 值照计划
+// 「格式样例（权威基线）」逐字；字段名 camelCase 由 rename_all_fields 管。
+#[serde(tag = "t", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum GameEvent {
     /// 落子（history 新增 Place 条目；坐标即该手坐标）。
     Move { seq: u64, by: String, x: u16, y: u16 },
@@ -227,7 +271,16 @@ impl GameEvent {
     /// 该事件的 seq（消费方按 seq 判断新旧/翻页，不必 match 全部变体）。
     #[must_use]
     pub fn seq(&self) -> u64 {
-        todo!()
+        match self {
+            Self::Move { seq, .. }
+            | Self::Pass { seq, .. }
+            | Self::Chat { seq, .. }
+            | Self::RequestReceived { seq, .. }
+            | Self::RequestResolved { seq, .. }
+            | Self::ScoringStarted { seq }
+            | Self::ScoreResult { seq, .. }
+            | Self::GameOver { seq, .. } => *seq,
+        }
     }
 }
 
@@ -261,7 +314,7 @@ impl EventQueue {
     /// 下一个将分配的 seq（生成方 [`diff_events`] 的 start_seq 取这里）。
     #[must_use]
     pub fn next_seq(&self) -> u64 {
-        todo!()
+        self.lock().events.last().map_or(1, |e| e.seq() + 1)
     }
 
     /// 追加一条事件（seq 由生成方按 [`next_seq`] 预先填好）。
@@ -269,31 +322,53 @@ impl EventQueue {
     /// **必须按 seq 顺序推入**：seq 是 /game/events 的行序，乱序等于文件错行；
     /// debug 断言炸出（release 不查——生成方只有 diff_events 一个，契约内部闭环）。
     pub fn push(&self, ev: GameEvent) {
-        todo!()
+        let mut g = self.lock();
+        debug_assert_eq!(
+            ev.seq(),
+            g.events.last().map_or(1, |e| e.seq() + 1),
+            "事件 seq 必须连续：乱序推入 = /game/events 错行、read/grep 回查错位"
+        );
+        g.events.push(ev);
     }
 
     /// 排空全部未消费事件（游标推到末尾）。空队列回空 Vec——
     /// wait_events 的「空超时=`[]`（正常返回非错误）」语义就建立在空 Vec 上。
     pub fn drain(&self) -> Vec<GameEvent> {
-        todo!()
+        let mut g = self.lock();
+        let out = g.events[g.consumed..].to_vec();
+        g.consumed = g.events.len();
+        out
     }
 
     /// 未消费条数（等待谓词「队列非空」用，免得每次都拷贝整个 tail）。
     #[must_use]
     pub fn pending(&self) -> usize {
-        todo!()
+        let g = self.lock();
+        g.events.len() - g.consumed
     }
 
     /// 全量历史（/game/events 文件内容：JSONL，每行一条，含已消费的）。
     #[must_use]
     pub fn history_jsonl(&self) -> String {
-        todo!()
+        let g = self.lock();
+        g.events
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// 全量历史的结构化拷贝（测试断言「seq 连续、事件完整」用）。
     #[must_use]
     pub fn history(&self) -> Vec<GameEvent> {
-        todo!()
+        self.lock().events.clone()
+    }
+
+    /// 锁入口统一在此：临界区只有 Vec 追加/切片，无 await。中毒即持锁方 panic
+    /// （bug），但 append-only 单值追加下 into_inner 拿到的 Vec 仍是一致的旧状态
+    /// ——比把毒扩散成新 panic 稳，也绝不静默回空（那会把事件流撕出缺口）。
+    fn lock(&self) -> std::sync::MutexGuard<'_, EventQueueInner> {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -313,7 +388,144 @@ pub fn diff_events(
     curr: &serde_json::Value,
     start_seq: u64,
 ) -> Vec<GameEvent> {
-    todo!()
+    let Some(p) = prev else { return Vec::new() };
+    let mut out: Vec<GameEvent> = Vec::new();
+    // seq 由本函数统一编码（生成方只有这一个，契约内部闭环）；展开顺序即发生顺序
+    //（模块注的清单序），中间不跳号。
+    let mut seq = start_seq;
+
+    // 1) history 增长 → Move/Pass。协议 HistoryEntry 只有坐标/"pass"，不带行棋方——
+    //    执色按序数反推：黑先、悔棋后序号永远从 1 重编，序数奇偶即行棋方。
+    let (prev_hist, curr_hist) = (arr_len(p, "history"), arr_len(curr, "history"));
+    for i in prev_hist..curr_hist {
+        let by = if (i + 1) % 2 == 1 { "black" } else { "white" };
+        let entry = &curr["history"][i];
+        if entry.is_string() {
+            out.push(GameEvent::Pass { seq, by: by.into() });
+        } else {
+            out.push(GameEvent::Move {
+                seq,
+                by: by.into(),
+                x: entry["x"].as_u64().unwrap_or(0) as u16,
+                y: entry["y"].as_u64().unwrap_or(0) as u16,
+            });
+        }
+        seq += 1;
+    }
+
+    // 2) chatLog 增长 → Chat（附全文，含自己发的——事件流是全量历史，不只对手的动作）。
+    let (prev_chat, curr_chat) = (arr_len(p, "chatLog"), arr_len(curr, "chatLog"));
+    for i in prev_chat..curr_chat {
+        let entry = &curr["chatLog"][i];
+        let from = entry["name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| entry["userId"].as_str())
+            .unwrap_or_default();
+        out.push(GameEvent::Chat {
+            seq,
+            from: from.into(),
+            text: entry["text"].as_str().unwrap_or_default().into(),
+        });
+        seq += 1;
+    }
+
+    // 3) confirmReq 出现/消失/换头 → request_received/request_resolved。换头（队列化
+    //    弹窗消费了队首、下一请求顶上）在事件上=先「旧请求有了结果」再「新请求来了」。
+    let prev_req = p["confirmReq"].as_object();
+    let curr_req = curr["confirmReq"].as_object();
+    match (prev_req, curr_req) {
+        (Some(pv), Some(cv)) => {
+            let (pk, ck) =
+                (pv["kind"].as_str().unwrap_or_default(), cv["kind"].as_str().unwrap_or_default());
+            if pk != ck {
+                out.push(GameEvent::RequestResolved {
+                    seq,
+                    kind: pk.into(),
+                    approved: resolved_approved(pk, p, curr),
+                });
+                seq += 1;
+                out.push(GameEvent::RequestReceived { seq, kind: ck.into(), from: req_from(cv) });
+                seq += 1;
+            }
+        }
+        (Some(pv), None) => {
+            let kind = pv["kind"].as_str().unwrap_or_default();
+            out.push(GameEvent::RequestResolved {
+                seq,
+                kind: kind.into(),
+                approved: resolved_approved(kind, p, curr),
+            });
+            seq += 1;
+        }
+        (None, Some(cv)) => {
+            out.push(GameEvent::RequestReceived {
+                seq,
+                kind: cv["kind"].as_str().unwrap_or_default().into(),
+                from: req_from(cv),
+            });
+            seq += 1;
+        }
+        (None, None) => {}
+    }
+
+    // 4) scoring 翻真 → scoring_started（围棋双 pass 终局；回落不产事件）。
+    if !p["scoring"].as_bool().unwrap_or(false) && curr["scoring"].as_bool().unwrap_or(false) {
+        out.push(GameEvent::ScoringStarted { seq });
+        seq += 1;
+    }
+
+    // 5) scoreResult 出现 → score_result（字段与快照 scoreResult 同形）。
+    if p["scoreResult"].is_null() {
+        if let Some(r) = curr["scoreResult"].as_object() {
+            out.push(GameEvent::ScoreResult {
+                seq,
+                black: r["black"].as_f64().unwrap_or(0.0) as f32,
+                white: r["white"].as_f64().unwrap_or(0.0) as f32,
+                winner: r["winner"].as_str().unwrap_or_default().into(),
+                dead_removed: r["deadRemoved"].as_u64().unwrap_or(0) as u32,
+            });
+            seq += 1;
+        }
+    }
+
+    // 6) winner 出现 → game_over（五连/认输/计分都汇到这里——five-exit 第一退出条件的信号源）。
+    if p["winner"].is_null() {
+        if let Some(w) = curr["winner"].as_str() {
+            out.push(GameEvent::GameOver { seq, winner: w.into() });
+        }
+    }
+
+    out
+}
+
+/// 快照某数组字段的长度（缺失/类型不符按 0——diff 只关心增量，坏字段不产事件）。
+fn arr_len(v: &serde_json::Value, key: &str) -> usize {
+    v[key].as_array().map_or(0, |a| a.len())
+}
+
+/// confirmReq 的 from 取数：fromName（展示名，计划样例「小明」）优先，缺了回 from。
+fn req_from(req: &serde_json::Map<String, serde_json::Value>) -> String {
+    req["fromName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| req["from"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// resolved 的 approved 反推：快照 diff 看不到「批复了什么」，只能从批复的确定性
+/// 副作用取证——同意悔棋/重开必缩 history、同意换棋必翻执色（且重开清盘）、同意
+/// 计分必出 scoreResult；拒绝则纹丝不动。反推不出（如空盘上的重开）按未同意保守上报，
+/// 宁可让等待方多看一眼局面，不可谎报「已同意」。
+fn resolved_approved(kind: &str, prev: &serde_json::Value, curr: &serde_json::Value) -> bool {
+    match kind {
+        "undo" | "reset" => arr_len(curr, "history") < arr_len(prev, "history"),
+        "swap" => prev["myColor"] != curr["myColor"] || arr_len(curr, "history") < arr_len(prev, "history"),
+        "score-confirm" => !curr["scoreResult"].is_null(),
+        // spec-chat / wrong-pwd 与 Agent 席无关（无观战、无钥匙错路），不可观测即未同意。
+        _ => false,
+    }
 }
 
 /// watch → 队列的物化泵：每拍 diff 并把新事件推进队列。
@@ -323,5 +535,292 @@ pub fn diff_events(
 /// [`HookHost`] drop，`changed()` 回 Err 后本函数返回、任务自然退出——**不需要也不允许
 /// 外部强杀**（强杀会把 Arc 留给别处，泄漏路径见 transport 的停机标志讨论）。
 pub async fn run_event_pump(mut watch: EmitWatch, queue: Arc<EventQueue>) {
-    todo!()
+    // 基线取当前值：seq==0 说明还没任何一拍（空初值）→ prev 记 None，下一拍也只当
+    // 基线；否则以现状为 prev——泵启动前的存量一律不重发。diff 的 start_seq 每拍
+    // 现取（队列推进到哪就接着编哪），拍与拍之间 seq 连续无空洞。
+    let latest = watch.latest();
+    let mut prev = (latest.0 != 0).then(|| parse_snap(&latest.1));
+    loop {
+        let (_seq, text) = match watch.changed().await {
+            Ok(frame) => frame,
+            // sender 全部 drop = 局散（Paired drop → HookHost drop）：任务自然收摊。
+            Err(_) => return,
+        };
+        let curr = parse_snap(&text);
+        if let Some(p) = prev.as_ref() {
+            for ev in diff_events(Some(p), &curr, queue.next_seq()) {
+                queue.push(ev);
+            }
+        }
+        prev = Some(curr);
+    }
+}
+
+/// 快照文本 → Value（坏文本按 Null：diff 全字段取不到 → 不产事件，与 NativePlayer
+/// 的快照兜底同一口径）。
+fn parse_snap(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use goptop_transport_native::HeadlessHost;
+    use serde_json::json;
+
+    /* ---------------- HookHost ---------------- */
+
+    #[test]
+    fn hook_host_user_id临时且不落盘() {
+        let inner = Arc::new(HeadlessHost::default());
+        let (host, _watch) = HookHost::wrap(inner.clone());
+        let uid = host.user_id().to_string();
+        assert!(uid.starts_with("u-"), "临时 userId 与持久身份同形：{uid}");
+        // 读恒回临时值，但绝不写进内层存储
+        assert_eq!(host.storage_get("goptop:userId").as_deref(), Some(uid.as_str()));
+        assert!(
+            !inner.storage.lock().unwrap().contains_key("goptop:userId"),
+            "临时 userId 不落盘"
+        );
+        // 写路径同样吞掉：会话初始化/设置流不得把人的持久身份覆盖成临时值
+        host.storage_set("goptop:userId", Some("u-hacked"));
+        assert!(!inner.storage.lock().unwrap().contains_key("goptop:userId"));
+        assert_eq!(host.storage_get("goptop:userId").as_deref(), Some(uid.as_str()));
+    }
+
+    #[test]
+    fn hook_host_stun强制空_其余透传() {
+        let inner = Arc::new(HeadlessHost::default());
+        inner.storage_set("goptop:name", Some("甲"));
+        let (host, _w) = HookHost::wrap(inner.clone());
+        assert_eq!(host.storage_get("goptop:stun").as_deref(), Some("[]"), "stun 强制空，免 8s gathering");
+        assert!(!inner.storage.lock().unwrap().contains_key("goptop:stun"), "stun 是覆写不是写盘");
+        assert_eq!(host.storage_get("goptop:name").as_deref(), Some("甲"), "其余键读透传");
+        host.storage_set("goptop:name", Some("乙"));
+        assert_eq!(inner.storage_get("goptop:name").as_deref(), Some("乙"), "其余键写透传");
+        host.notice(Some("提示"), None);
+        host.nav("/p2p");
+        host.copy("文本");
+        assert_eq!(inner.notices.lock().unwrap().len(), 1);
+        assert_eq!(inner.navs.lock().unwrap().first().map(String::as_str), Some("/p2p"));
+    }
+
+    #[test]
+    fn hook_host两次包装得不同临时id() {
+        let (h1, _) = HookHost::wrap(Arc::new(HeadlessHost::default()));
+        let (h2, _) = HookHost::wrap(Arc::new(HeadlessHost::default()));
+        assert_ne!(h1.user_id(), h2.user_id(), "同毫秒生成也不许撞车：同 ID = 回声互吞");
+    }
+
+    #[test]
+    fn hook_host_emit推watch且透传() {
+        let inner = Arc::new(HeadlessHost::default());
+        let (host, watch) = HookHost::wrap(inner.clone());
+        host.emit(r#"{"phase":"home"}"#);
+        host.emit(r#"{"phase":"waiting"}"#);
+        let (seq, text) = watch.latest();
+        assert_eq!(seq, 2, "seq 单调递增，接收方取到最新一拍");
+        assert_eq!(text, r#"{"phase":"waiting"}"#);
+        assert!(
+            inner.emits.load(Ordering::Relaxed) >= 2,
+            "emit 仍透传内层（TauriHost 还要推前端）"
+        );
+    }
+
+    /* ---------------- GameEvent / EventQueue ---------------- */
+
+    #[test]
+    fn game_event_serde逐字对齐计划样例() {
+        // /game/events 的行形（计划「格式样例（权威基线）」逐字）——t 值 snake_case
+        let chat: GameEvent =
+            serde_json::from_str(r#"{"seq":1,"t":"chat","from":"小明","text":"你好，请多指教"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap(),
+            json!({"seq":1,"t":"chat","from":"小明","text":"你好，请多指教"})
+        );
+        let req: GameEvent =
+            serde_json::from_str(r#"{"seq":4,"t":"request_received","kind":"undo","from":"小明"}"#).unwrap();
+        assert_eq!(serde_json::to_value(&req).unwrap(), json!({"seq":4,"t":"request_received","kind":"undo","from":"小明"}));
+        let res: GameEvent =
+            serde_json::from_str(r#"{"seq":5,"t":"request_resolved","kind":"undo","approved":true}"#).unwrap();
+        assert_eq!(serde_json::to_value(&res).unwrap(), json!({"seq":5,"t":"request_resolved","kind":"undo","approved":true}));
+        let mv: GameEvent = serde_json::from_str(r#"{"seq":2,"t":"move","by":"black","x":7,"y":7}"#).unwrap();
+        assert_eq!(mv.seq(), 2);
+    }
+
+    #[test]
+    fn 事件队列_追加排空与历史() {
+        let q = EventQueue::new();
+        assert_eq!(q.next_seq(), 1);
+        assert_eq!(q.drain(), Vec::new(), "空队列排空回空（wait_events 空超时=[] 的地基）");
+        q.push(GameEvent::Move { seq: 1, by: "black".into(), x: 7, y: 7 });
+        q.push(GameEvent::Pass { seq: 2, by: "white".into() });
+        assert_eq!(q.next_seq(), 3);
+        assert_eq!(q.pending(), 2);
+        assert_eq!(q.drain().len(), 2, "排空吐出全部未消费");
+        assert_eq!(q.pending(), 0);
+        assert_eq!(q.drain(), Vec::new(), "消费后再排空为空");
+        // 历史仍在（含已消费），seq 分配不受消费游标影响
+        assert_eq!(q.history().len(), 2);
+        assert_eq!(q.next_seq(), 3);
+        let jsonl = q.history_jsonl();
+        let lines: Vec<&str> = jsonl.lines().collect();
+        assert_eq!(lines.len(), 2, "每行一条 JSONL");
+        assert!(lines[0].contains(r#""t":"move""#), "线上 t 值照计划样例：{jsonl}");
+        assert!(lines[1].contains(r#""t":"pass""#));
+    }
+
+    /* ---------------- diff_events ---------------- */
+
+    #[test]
+    fn diff_首拍与无变化都回空() {
+        let snap = json!({"history": [], "chatLog": [], "confirmReq": null, "scoring": false, "scoreResult": null, "winner": null});
+        assert!(diff_events(None, &snap, 1).is_empty(), "首拍没有基线，只记不发");
+        assert!(diff_events(Some(&snap), &snap, 1).is_empty(), "无变化无事件");
+    }
+
+    #[test]
+    fn diff_history增长展开move与pass() {
+        let prev = json!({"history": []});
+        let curr = json!({"history": [{"x":7,"y":7}, "pass", {"x":8,"y":8}]});
+        assert_eq!(
+            diff_events(Some(&prev), &curr, 1),
+            vec![
+                GameEvent::Move { seq: 1, by: "black".into(), x: 7, y: 7 },
+                GameEvent::Pass { seq: 2, by: "white".into() },
+                GameEvent::Move { seq: 3, by: "black".into(), x: 8, y: 8 },
+            ],
+            "逐条展开、执色按序数交替（黑先）、seq 连续"
+        );
+    }
+
+    #[test]
+    fn diff_chat增长附全文() {
+        let prev = json!({"chatLog": [{"userId":"u-1","name":"小明","text":"你好"}]});
+        let curr = json!({"chatLog": [{"userId":"u-1","name":"小明","text":"你好"},{"userId":"u-2","name":"Agent","text":"请多指教"}]});
+        assert_eq!(
+            diff_events(Some(&prev), &curr, 9),
+            vec![GameEvent::Chat { seq: 9, from: "Agent".into(), text: "请多指教".into() }],
+            "只发新增条目，附全文"
+        );
+    }
+
+    #[test]
+    fn diff_confirm出现与消失() {
+        let base = json!({"history": [{"x":0,"y":0}], "confirmReq": null});
+        let with_req = json!({"history": [{"x":0,"y":0}], "confirmReq": {"kind":"undo","from":"u-1","fromName":"小明","queued":1}});
+        assert_eq!(
+            diff_events(Some(&base), &with_req, 1),
+            vec![GameEvent::RequestReceived { seq: 1, kind: "undo".into(), from: "小明".into() }],
+            "出现→received，from 取展示名"
+        );
+        // 同意悔棋：请求消失且 history 缩短（批复的确定性副作用）→ approved=true
+        let approved = json!({"history": [], "confirmReq": null});
+        assert_eq!(
+            diff_events(Some(&with_req), &approved, 2),
+            vec![GameEvent::RequestResolved { seq: 2, kind: "undo".into(), approved: true }]
+        );
+        // 拒绝：请求消失而局面纹丝不动 → approved=false（等待方必须看到拒绝）
+        let declined = json!({"history": [{"x":0,"y":0}], "confirmReq": null});
+        assert_eq!(
+            diff_events(Some(&with_req), &declined, 2),
+            vec![GameEvent::RequestResolved { seq: 2, kind: "undo".into(), approved: false }]
+        );
+    }
+
+    #[test]
+    fn diff_队首换头_先结果后新请求() {
+        let undo_head = json!({"myColor":"black","confirmReq": {"kind":"undo","from":"u-1","fromName":"小明","queued":2}});
+        let reset_head = json!({"myColor":"black","confirmReq": {"kind":"reset","from":"u-1","fromName":"小明","queued":1}});
+        assert_eq!(
+            diff_events(Some(&undo_head), &reset_head, 4),
+            vec![
+                GameEvent::RequestResolved { seq: 4, kind: "undo".into(), approved: false },
+                GameEvent::RequestReceived { seq: 5, kind: "reset".into(), from: "小明".into() },
+            ],
+            "旧请求先有了结果、新请求才顶上（因果顺序）"
+        );
+    }
+
+    #[test]
+    fn diff_终局链_计分_结果_胜者() {
+        let prev = json!({"scoring": false, "scoreResult": null, "winner": null});
+        let scoring = json!({"scoring": true, "scoreResult": null, "winner": null});
+        assert_eq!(
+            diff_events(Some(&prev), &scoring, 1),
+            vec![GameEvent::ScoringStarted { seq: 1 }]
+        );
+        let scored = json!({"scoring": true, "scoreResult": {"black": 9.0, "white": 3.5, "winner": "black", "deadRemoved": 2}, "winner": "black"});
+        assert_eq!(
+            diff_events(Some(&scoring), &scored, 7),
+            vec![
+                GameEvent::ScoreResult { seq: 7, black: 9.0, white: 3.5, winner: "black".into(), dead_removed: 2 },
+                GameEvent::GameOver { seq: 8, winner: "black".into() },
+            ],
+            "scoreResult 先于 game_over（同一拍的清单展开序）"
+        );
+        // 认输直接见 winner（不进 history）
+        let resigned = json!({"scoring": false, "scoreResult": null, "winner": "white"});
+        assert_eq!(
+            diff_events(Some(&prev), &resigned, 3),
+            vec![GameEvent::GameOver { seq: 3, winner: "white".into() }]
+        );
+    }
+
+    /* ---------------- NativePlayer / run_event_pump（真会话） ---------------- */
+
+    fn test_player() -> NativePlayer {
+        let host: Arc<dyn Host> = Arc::new(HeadlessHost::default());
+        NativePlayer::new(Arc::new(NativeSession::new(
+            goptop_transport_native::SessionConfig {
+                name: "测试".into(),
+                server_mode: false,
+                share_origin: "https://goptop.pages.dev".into(),
+                kind: "gomoku".into(),
+                size: 15,
+            },
+            host,
+            "http://localhost/p2p",
+        )))
+    }
+
+    #[tokio::test]
+    async fn native_player_命令快照与等待() {
+        let player = test_player();
+        // snapshot 是 Value 形态、字段 camelCase
+        assert_eq!(player.snapshot()["phase"], json!("home"));
+        assert_eq!(player.snapshot()["kind"], json!("gomoku"));
+        // cmd 生效：同步泵让命令当场落状态
+        player.cmd(UiCommand::SetName("新名".into()));
+        assert_eq!(player.snapshot()["name"], json!("新名"));
+        // wait_until：已成立的谓词立即真
+        assert!(player.wait_until(&mut |s| s["phase"] == json!("home"), Duration::from_millis(200)));
+        // 永不成立的谓词按超时回假，不提前返回
+        let started = std::time::Instant::now();
+        assert!(!player.wait_until(&mut |_s| false, Duration::from_millis(200)));
+        assert!(started.elapsed() >= Duration::from_millis(200), "超时前不得提前返回假");
+    }
+
+    #[tokio::test]
+    async fn 事件泵_watch每拍diff进队列_局散即退() {
+        let (host, watch) = HookHost::wrap(Arc::new(HeadlessHost::default()));
+        let queue = Arc::new(EventQueue::new());
+        let handle = tokio::spawn(run_event_pump(EmitWatch::new(watch.clone_rx()), queue.clone()));
+        // 让泵先取基线（此刻 seq==0 → prev=None，第一拍也只当基线）
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        host.emit(r#"{"chatLog":[{"name":"小明","text":"你好"}]}"#);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        host.emit(r#"{"chatLog":[{"name":"小明","text":"你好"},{"name":"Agent","text":"请多指教"}]}"#);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            queue.history(),
+            vec![GameEvent::Chat { seq: 1, from: "Agent".into(), text: "请多指教".into() }],
+            "基线拍存量不重发，增量才产事件"
+        );
+        assert_eq!(queue.pending(), 1);
+        // 局散：HookHost（watch sender 持有者）drop → changed() 回 Err → 任务自然退出
+        drop(host);
+        let done = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(done.is_ok(), "sender 全 drop 后泵任务必须自然退出（不需要外部强杀）");
+    }
 }
