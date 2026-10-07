@@ -59,64 +59,115 @@ export function useGameSession() {
   /* ---------- wasm 会话挂载 ---------- */
   const [session, setSession] = useState<SessionHandle | null>(null);
   const [snap, setSnap] = useState<Snap | null>(null);
+  /** 建会话失败的原因（null = 没失败/已恢复）。不进错误态的表现是「应用开了、
+   *  所有按钮没反应」，设备上几乎无法归因。 */
+  const [bootErr, setBootErr] = useState<string | null>(null);
   const serverMode = loadServerSelection() !== "none";
   const [intent, setIntent] = useState<UrlIntent>(() => parseUrl());
+  /** 当前挂载尝试的取消器（建会话是异步的，卸载/重试时要能取消它）。 */
+  const cancelBoot = useRef<(() => void) | null>(null);
+
+  /**
+   * 建会话并接线（挂载时跑一次；失败后经 `retryBoot` 重跑同一条流程）。
+   *
+   * **adopt guard（StrictMode 双挂载语义）**：会话句柄只存进本次尝试自己的闭包，
+   * 取消器也只释放自己那次创建的句柄——第一次挂载的 cleanup 决不会释放第二次
+   * 刚采用的会话。`createSession` 在 cleanup 之后才落地时，句柄就是孤儿，
+   * 落地分支立刻补一次 `dispose`，否则它带着原生 50ms 泵/presence/服务器 WSS
+   * 常驻（dev 每次重挂漏一个，就是这个形态）。
+   */
+  const bootSession = useCallback(() => {
+    // 重试场景：上一次尝试若还在途，先取消（它建的会话由它自己的取消器释放）
+    cancelBoot.current?.();
+    let disposed = false;
+    let handle: SessionHandle | null = null;
+    void (async () => {
+      try {
+        // 分派与建会话都在门面里（Web → wasm；桌面/Android/鸿蒙 → 原生 Rust）。
+        // **href 由这里传**：wasm 侧是构造时自己读 `window.location`，
+        // 原生侧没有 window，必须显式给——两端都走 `Event::Boot` 那一条。
+        const s = await createSession(
+          JSON.stringify({
+            name: myName(),
+            serverMode,
+            shareOrigin: shareOrigin(),
+            kind: defs.kind,
+            size: defs.size,
+          }),
+          window.location.href,
+        );
+        if (disposed) {
+          // 卸载/重试已取消本次尝试：会话已建成但无人采用，立刻补释放
+          void s.dispose();
+          return;
+        }
+        handle = s;
+        (window as unknown as Record<string, unknown>).goptopOnChange = () => setSnap(parseSnap(s.snapshot()));
+        (window as unknown as Record<string, unknown>).goptopNotice = (arg: string) => {
+          try {
+            const { text, ms } = JSON.parse(arg) as { text: string | null; ms: number | null };
+            noticeRef.current = { text, ms };
+            setNotice(text);
+            if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+            noticeTimer.current = null;
+            if (text && ms) {
+              noticeTimer.current = window.setTimeout(() => {
+                setNotice(null);
+                noticeTimer.current = null;
+              }, ms);
+            }
+          } catch { /* ignore */ }
+        };
+        (window as unknown as Record<string, unknown>).goptopCopy = async (arg: string) => {
+          try {
+            const { text, ok } = JSON.parse(arg) as { text: string; ok: string };
+            await navigator.clipboard.writeText(text);
+            setCopyFb(ok);
+            setTimeout(() => setCopyFb(null), 1600);
+          } catch {
+            setCopyFb("复制失败，请手动复制");
+            setTimeout(() => setCopyFb(null), 2000);
+          }
+        };
+        s.start_pump();
+        setSession(s);
+        setBootErr(null);
+        setSnap(parseSnap(s.snapshot()));
+        // E2E/调试钩子：dump 快照用（生产无副作用）。
+        (window as unknown as Record<string, unknown>).__session = s;
+      } catch (e) {
+        // 建会话失败不能静默：session 恒 null 时 cmd() 全是 no-op，用户看到的是
+        // 「界面正常但什么按钮都没用」。留原文 + 进错误态（retryBoot 可重试）。
+        console.error("[session] 建会话失败:", e);
+        if (!disposed) setBootErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    cancelBoot.current = () => {
+      disposed = true;
+      // 只释放本次挂载创建的会话：handle 是本闭包私有的，别的挂载碰不到它
+      if (handle) {
+        void handle.dispose();
+        handle = null;
+      }
+      // 摘掉本挂载装的三个钩子，避免卸载后 Rust 侧还在往已死的 UI 回调里推
+      const w = window as unknown as Record<string, unknown>;
+      delete w.goptopOnChange;
+      delete w.goptopNotice;
+      delete w.goptopCopy;
+    };
+  }, [defs, serverMode]);
 
   useEffect(() => {
-    let disposed = false;
-    void (async () => {
-      // 分派与建会话都在门面里（Web → wasm；桌面/Android/鸿蒙 → 原生 Rust）。
-      // **href 由这里传**：wasm 侧是构造时自己读 `window.location`，
-      // 原生侧没有 window，必须显式给——两端都走 `Event::Boot` 那一条。
-      const s = await createSession(
-        JSON.stringify({
-          name: myName(),
-          serverMode,
-          shareOrigin: shareOrigin(),
-          kind: defs.kind,
-          size: defs.size,
-        }),
-        window.location.href,
-      );
-      if (disposed) return;
-      (window as unknown as Record<string, unknown>).goptopOnChange = () => setSnap(parseSnap(s.snapshot()));
-      (window as unknown as Record<string, unknown>).goptopNotice = (arg: string) => {
-        try {
-          const { text, ms } = JSON.parse(arg) as { text: string | null; ms: number | null };
-          noticeRef.current = { text, ms };
-          setNotice(text);
-          if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
-          noticeTimer.current = null;
-          if (text && ms) {
-            noticeTimer.current = window.setTimeout(() => {
-              setNotice(null);
-              noticeTimer.current = null;
-            }, ms);
-          }
-        } catch { /* ignore */ }
-      };
-      (window as unknown as Record<string, unknown>).goptopCopy = async (arg: string) => {
-        try {
-          const { text, ok } = JSON.parse(arg) as { text: string; ok: string };
-          await navigator.clipboard.writeText(text);
-          setCopyFb(ok);
-          setTimeout(() => setCopyFb(null), 1600);
-        } catch {
-          setCopyFb("复制失败，请手动复制");
-          setTimeout(() => setCopyFb(null), 2000);
-        }
-      };
-      s.start_pump();
-      setSession(s);
-      setSnap(parseSnap(s.snapshot()));
-      // E2E/调试钩子：dump 快照用（生产无副作用）。
-      (window as unknown as Record<string, unknown>).__session = s;
-    })();
-    return () => {
-      disposed = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    bootSession();
+    return () => cancelBoot.current?.();
+  }, [bootSession]);
+
+  /** 手动重试建会话（bootErr 态用）：清失败态并重跑同一条挂载流程。 */
+  const retryBoot = useCallback(() => {
+    setSession(null);
+    setBootErr(null);
+    bootSession();
+  }, [bootSession]);
 
   /* ---------- 纯 UI 状态（不进状态机） ---------- */
   const [hover, setHover] = useState<Coord | null>(null);
@@ -300,6 +351,8 @@ export function useGameSession() {
     // 状态（快照直通）
     kind, size, board, toMove, winner, lastMove, hover, history,
     intent, tabUser, name, peers, role, phase, gameId: s?.gameId ?? null, myColor,
+    /** 建会话失败的原因（非 null 时界面应给出可操作的提示；retryBoot 重试）。 */
+    bootErr, retryBoot,
     peerConnected, pwd: s?.pwd ?? null, inviteUrl: s?.inviteUrl ?? null,
     watchUrl: s?.watchUrl ?? null, incoming, notice,
     specUrl: s?.specUrl ?? null,

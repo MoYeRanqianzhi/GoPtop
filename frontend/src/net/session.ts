@@ -32,6 +32,13 @@ export interface GameSession {
   parse_link(text: string): Promise<string>;
   parse_answer(text: string): Promise<string>;
   start_pump(): void;
+  /**
+   * 释放会话：原生侧调 `session_drop` 拆掉 Rust 侧会话表项（50ms 泵、presence
+   * 订阅、服务器模式的 WSS 随真正 drop 一并退出），wasm 侧 free 掉绑定对象。
+   * 上层卸载时必须调——全仓原本没有任何调用点，表现是每次 WebView 重载
+   * （Android 转屏 / dev 刷新）永久漏一个僵尸会话。
+   */
+  dispose(): Promise<void>;
 
   create_invite(): void;
   accept_invite(inviterId: string, pwd: string | null, kind: string, size: number, rtc: string | null, spec: boolean): void;
@@ -78,6 +85,9 @@ class WasmSessionAdapter implements GameSession {
   async parse_link(t: string) { return this.s.parse_link(t); }
   async parse_answer(t: string) { return this.s.parse_answer(t); }
   start_pump() { this.s.start_pump(); }
+  /** 释放 = free 掉 Rust 绑定对象（与胶水的 `Symbol.dispose` 同一语义）；线程态的
+   *  收尾在 Rust 侧 drop 里做，本层不持句柄。 */
+  async dispose() { this.s.free(); }
 
   create_invite() { this.s.create_invite(); }
   accept_invite(a: string, b: string | null, c: string, d: number, e: string | null, f: boolean) { this.s.accept_invite(a, b, c, d, e, f); }
@@ -150,14 +160,22 @@ class NativeSessionAdapter implements GameSession {
   static async create(call: NativeCall, cfgJson: string, href: string): Promise<NativeSessionAdapter> {
     const raw = await call("session_new", JSON.stringify({ cfgJson, href }));
     const id = JSON.parse(raw) as number | null;
-    // 建会话失败就抛：静默给个哑会话，上层会以为「连上了但什么都没发生」
-    if (typeof id !== "number") throw new Error("原生会话创建失败");
+    // 建会话失败就抛：静默给个哑会话，上层会以为「连上了但什么都没发生」。
+    // 回执原文一并带上：鸿蒙侧的失败形态是 {"error": …}，没有原文设备上无法归因。
+    if (typeof id !== "number") throw new Error(`原生会话创建失败: ${raw}`);
     const a = new NativeSessionAdapter(call, id);
     await a.pump();
     return a;
   }
 
-  /** 泵一次：取快照 + 执行宿主动作。与 wasm 侧 `WasmSession::drain` 同义。 */
+  /**
+   * 泵一次：取快照 + 执行宿主动作。与 wasm 侧 `WasmSession::drain` 同义。
+   *
+   * 快照契约（与 Rust 侧 `session_poll` 配对）：`snapshot` 为 null（或缺失）表示
+   * **自上次 poll 以来无变化**——保留缓存、不触发 onChange；不判这一层的表现是
+   * 每个空轮询都把缓存覆写成 null，上层同步读 `snapshot()` 拿到坏数据。
+   * 宿主动作与快照无关，空轮询也照常执行。
+   */
   async pump(): Promise<void> {
     let raw: string;
     try {
@@ -167,10 +185,11 @@ class NativeSessionAdapter implements GameSession {
       this.stop_pump();
       return;
     }
-    const r = JSON.parse(raw) as { snapshot: string; actions: HostAction[] };
+    const r = JSON.parse(raw) as { snapshot: string | null; actions: HostAction[] };
+    for (const a of r.actions) this.applyHostAction(a);
+    if (typeof r.snapshot !== "string") return;
     const changed = r.snapshot !== this.cached;
     this.cached = r.snapshot;
-    for (const a of r.actions) this.applyHostAction(a);
     // 变了才通知，与 wasm 侧「有变化才 Emit」一致（上层 setSnap 会触发重渲染）
     if (changed) (window as unknown as Record<string, (() => void) | undefined>).goptopOnChange?.();
   }
@@ -201,6 +220,21 @@ class NativeSessionAdapter implements GameSession {
     if (this.timer !== null) {
       window.clearInterval(this.timer);
       this.timer = null;
+    }
+  }
+
+  /**
+   * 释放会话：停 JS 泵 + 调 `session_drop` 拆 Rust 侧表项。后半步不能省——
+   * Rust 侧只有 `NativeSession` 真正被 drop 才会停 tokio 泵、收 presence/WS 任务，
+   * 只停 JS 泵的话会话照旧常驻（这正是前端从未调 `session_drop` 的那个泄漏）。
+   */
+  async dispose(): Promise<void> {
+    this.stop_pump();
+    try {
+      await this.call("session_drop", JSON.stringify({ id: this.id }));
+    } catch (e) {
+      // 宿主可能正在卸载/重启：释放失败没有 UI 可报，留痕即可
+      console.warn("[session] session_drop 失败", e);
     }
   }
 
@@ -291,6 +325,27 @@ function nativeCall(): NativeCall | null {
 }
 
 /**
+ * 懒加载 wasm 传输层。**必须缓存 Promise 而不是模块对象**（与 `game/rules.ts`
+ * 的 `loadWasm` 同款，那里记着同一场事故）：胶水的 `__wbg_init` 只有「wasm 已就绪」
+ * 这一道同步检查、没有 Promise 缓存，并发调用会双双看到未初始化、各实例化一遍，
+ * 模块级内存视图被后完成者覆写——先建的那个会话内部指针随即指向错误实例，
+ * 首次调用即 `out of bounds`。React StrictMode 的双挂载恰好在同一 tick 里
+ * 并发两次 `createSession`，所以这道缓存对 web dev 不是理论问题。
+ */
+let transportReady: Promise<typeof import("../wasm/transport/goptop_transport.js")> | null = null;
+
+function loadTransport(): Promise<typeof import("../wasm/transport/goptop_transport.js")> {
+  if (!transportReady) {
+    transportReady = (async () => {
+      const mod = await import("../wasm/transport/goptop_transport.js");
+      await mod.default();
+      return mod;
+    })();
+  }
+  return transportReady;
+}
+
+/**
  * 建会话：**能跑原生代码的平台就不该跑 wasm**（与 `game/rules.ts` 的 `pickBackend` 同口径）。
  *
  * wasm 分支用**动态 import**：静态 import 会让三端都把 `goptop_transport_bg.wasm`
@@ -299,7 +354,6 @@ function nativeCall(): NativeCall | null {
 export async function createSession(cfgJson: string, href: string): Promise<GameSession> {
   const call = nativeCall();
   if (call) return await NativeSessionAdapter.create(call, cfgJson, href);
-  const mod = await import("../wasm/transport/goptop_transport.js");
-  await mod.default();
+  const mod = await loadTransport();
   return new WasmSessionAdapter(new mod.WasmSession(cfgJson));
 }
