@@ -1,0 +1,91 @@
+//! Mock 剧本桩 —— 无头测试与无 key 演示的确定性「模型」。
+//!
+//! 语义极简：按序弹出预置 [`ChatResponse`]，请求内容一概不读（剧本在测试里写死，
+//! 断言的是循环消费剧本的次序，不是模型对提示词的理解）。弹尽即
+//! [`LlmError::Fatal`]：剧本少写一步是测试 bug，静默会让它伪装成「偶发卡死」。
+
+use super::{ChatRequest, ChatResponse, LlmError, MockScript};
+
+/// 弹出下一步预置响应。空剧本弹尽即 Fatal（文案即骨架注明的 `mock script
+/// exhausted`——循环与测试都按它断言）。
+///
+/// `_req` 保留入参面：`LlmClient::chat` 的分发形状三变体一致，Mock 有意不读
+/// 请求（确定性桩不解释提示词），改名 `_req` 会破坏「同一请求形态走三种客户端」
+/// 的对仗，故留原名加此注。
+pub(crate) async fn chat(script: &MockScript, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+    let mut guard = script.0.lock().expect("锁中毒即 bug（与 EventQueue 同一语义）");
+    if guard.is_empty() {
+        return Err(LlmError::Fatal("mock script exhausted".to_string()));
+    }
+    Ok(guard.remove(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{LlmClient, StopReason, Usage};
+    use std::sync::Arc;
+
+    fn resp(text: &str) -> ChatResponse {
+        ChatResponse {
+            content: text.to_string(),
+            tool_calls: vec![],
+            stop: StopReason::EndTurn,
+            usage: Usage { input_tokens: 1, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0 },
+        }
+    }
+
+    /// 剧本按序弹出；弹尽 Fatal；remaining 随弹出递减到 0。
+    #[tokio::test]
+    async fn pops_in_order_then_fatals() {
+        let script = Arc::new(MockScript::new(vec![resp("a"), resp("b")]));
+        let client = LlmClient::Mock(Arc::clone(&script));
+        assert_eq!(script.remaining(), 2);
+
+        let r1 = client.chat(ChatRequest {
+            system: "s".into(),
+            messages: vec![],
+            tools: vec![],
+            max_output_tokens: 16,
+        }).await.expect("第一步应有响应");
+        assert_eq!(r1.content, "a");
+        assert_eq!(script.remaining(), 1);
+
+        client.chat(ChatRequest {
+            system: "s".into(),
+            messages: vec![],
+            tools: vec![],
+            max_output_tokens: 16,
+        }).await.expect("第二步应有响应");
+        assert_eq!(script.remaining(), 0);
+
+        let err = client.chat(ChatRequest {
+            system: "s".into(),
+            messages: vec![],
+            tools: vec![],
+            max_output_tokens: 16,
+        }).await.expect_err("弹尽应 Fatal");
+        assert!(matches!(&err, LlmError::Fatal(m) if m == "mock script exhausted"));
+        assert_eq!(err.message(), "mock script exhausted");
+    }
+
+    /// 空剧本直接 Fatal（测试剧本忘写是测试 bug，要炸得响）。
+    #[tokio::test]
+    async fn empty_script_fatals_immediately() {
+        let client = LlmClient::Mock(Arc::new(MockScript::new(vec![])));
+        let err = client.chat(ChatRequest {
+            system: String::new(),
+            messages: vec![],
+            tools: vec![],
+            max_output_tokens: 16,
+        }).await.expect_err("空剧本应 Fatal");
+        assert!(matches!(err, LlmError::Fatal(_)));
+    }
+
+    /// Mock 与 Anthropic 同形：工具结果带图判定为支持（最富路径）。
+    #[test]
+    fn mock_supports_image_result() {
+        let client = LlmClient::Mock(Arc::new(MockScript::default()));
+        assert!(client.supports_image_result());
+    }
+}

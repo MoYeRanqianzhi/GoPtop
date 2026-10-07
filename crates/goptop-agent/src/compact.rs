@@ -49,6 +49,12 @@ fn estimate_msg_tokens(msg: &Msg) -> u64 {
             Block::Text { text } => chars += text.chars().count() as u64,
             // 工具结果回执以字符串计入——它和文本一样整段进上下文。
             Block::ToolResult { content, .. } => chars += content.chars().count() as u64,
+            // 工具调用本体（名字+参数）同样整段上线（tool_use/function_call 块），
+            // 不计会低估触发线、压缩来得太晚。
+            Block::ToolCall { call } => {
+                chars += call.name.chars().count() as u64;
+                chars += call.arguments.to_string().chars().count() as u64;
+            }
             Block::Image { .. } => chars += ESTIMATED_IMAGE_CHARS,
         }
     }
@@ -108,6 +114,11 @@ fn serialize_conversation(messages: &[Msg]) -> String {
                     let mark = if *is_error { " (error)" } else { "" };
                     parts.push(format!("[Tool result for {call_id}{mark}]: {content}"));
                 }
+                // 模型发起的调用也要进对谈稿——只有结果没有调用的对谈史读不懂因果。
+                Block::ToolCall { call } => parts.push(format!(
+                    "[Tool call {} ({})]: {}",
+                    call.name, call.id, call.arguments
+                )),
                 Block::Image { .. } => parts.push("[User]: (image attachment)".to_string()),
             }
         }

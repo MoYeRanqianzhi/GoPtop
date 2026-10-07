@@ -15,12 +15,25 @@
 //! 错误分类：401/403/模型不存在 → [`LlmError::Fatal`]；错误特征
 //! `context_length_exceeded` → [`LlmError::ContextWindowExceeded`]（紧急压缩重试）；
 //! 429/5xx → 适配器内退避重试 2 次后回 [`LlmError::Transient`]（连续 3 轮失败→
-//! error 态，判定在循环里）。HTTP 通道走 [`HttpChannel`] trait：native=reqwest；
-//! web=TS fetch 钩子（`window.goptopAgentHttp`，阶段⑤）——循环体与通道解耦。
+//! error 态，判定在循环里）。HTTP 通道走 [`HttpChannel`] trait：native=reqwest
+//! （[`NativeHttp`]）；web=TS fetch 钩子（`window.goptopAgentHttp`，阶段⑤）——
+//! 循环体与通道解耦。
+//!
+//! 子模块：[`mock`]（剧本桩）/ [`anthropic`] / [`openai_chat`] / [`openai_responses`]
+//! （三协议适配器）/ [`native_http`](reqwest 通道)——全部私有，外界只经
+//! [`LlmClient`] 与 [`NativeHttp`] 进出。
+
+mod anthropic;
+mod mock;
+mod native_http;
+mod openai_chat;
+mod openai_responses;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+pub use native_http::NativeHttp;
 
 /// 协议种别（store 键 `goptop:llm-config.protocol` 的值域；snake_case 线上形态）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -75,6 +88,12 @@ pub enum Role {
 pub enum Block {
     /// 纯文本。
     Text { text: String },
+    /// 模型侧工具调用（assistant 消息里的发起）。**必须有这个变体**：三协议都要求
+    /// 工具结果与发起调用在线上配对出现（Anthropic 的 tool_result 无配对 tool_use
+    /// 直接 4xx；OpenAI Chat 的 role:"tool" 必须挂在前面的 tool_calls 下；Responses
+    /// 的 function_call_output 配 function_call 的 call_id）——统一形态表达不了
+    /// 「assistant 发起了调用」，回放历史就是坏请求。arguments 已是解析后的对象。
+    ToolCall { call: ToolCall },
     /// 工具结果回填（is_error=true 时适配器按各协议的错误形态装——模型看到的是
     /// 错误文本，循环不因此停）。content 统一为字符串：OpenAI 两协议本就只收
     /// 字符串，Anthropic 侧适配器负责包成 text block。
@@ -170,7 +189,11 @@ impl LlmError {
     /// 错误文本（状态上报共用）。
     #[must_use]
     pub fn message(&self) -> &str {
-        todo!()
+        match self {
+            LlmError::Fatal(m) | LlmError::Transient(m) => m,
+            // 无载荷变体：文本只用于状态展示，措辞与 compact 路径的判定字段对齐。
+            LlmError::ContextWindowExceeded => "context window exceeded",
+        }
     }
 }
 
@@ -210,7 +233,7 @@ impl MockScript {
     /// 剩余步数（测试断言「剧本恰好用完」用——用不尽说明循环提前退出或漏调）。
     #[must_use]
     pub fn remaining(&self) -> usize {
-        todo!()
+        self.0.lock().expect("锁中毒即 bug（与 EventQueue 同一语义）").len()
     }
 }
 
@@ -234,13 +257,194 @@ impl LlmClient {
     /// # Errors
     /// [`LlmError`] 三型（分类规则见模块注）。
     pub async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
-        todo!()
+        match self {
+            LlmClient::Mock(script) => mock::chat(script, req).await,
+            LlmClient::Anthropic { cfg, api_key, http } => {
+                anthropic::chat(cfg, api_key, http, req).await
+            }
+            LlmClient::OpenAiResponses { cfg, api_key, http } => {
+                openai_responses::chat(cfg, api_key, http, req).await
+            }
+            LlmClient::OpenAiChat { cfg, api_key, http } => {
+                openai_chat::chat(cfg, api_key, http, req).await
+            }
+        }
     }
 
     /// 协议是否支持工具结果带图（Anthropic ✓ / OpenAI 两协议 ✗）。
     /// registry 据此决定回图像块还是 [`crate::vfs::syn_image_placeholder`]。
+    /// Mock 按 Anthropic 同形取 true——剧本桩走最富路径，演示与图像流测试才有意义。
     #[must_use]
     pub fn supports_image_result(&self) -> bool {
-        todo!()
+        matches!(self, LlmClient::Mock(_) | LlmClient::Anthropic { .. })
+    }
+}
+
+/* ---------------- 适配器共享件（退避/分类/截断） ---------------- */
+
+/// 429/5xx（与传输层故障）的退避间隔：首次失败后重试 2 次（共 3 次尝试）。
+/// 计划只拍「退避 2 次」不给间隔——1s/2s 是对限流窗口的温和让步，再长会把
+/// 一局的等待体验拖垮（连续 3 轮 Transient 的 error 判定在循环侧）。
+const RETRY_BACKOFF_MS: [u64; 2] = [1_000, 2_000];
+
+/// POST + 429/5xx/传输故障的退避重试。非重试类状态码原样上抛给
+/// [`classify_status`] 分类；重试耗尽才回 [`LlmError::Transient`]。
+pub(crate) async fn post_with_retry(
+    http: &dyn HttpChannel,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+) -> Result<(u16, String), LlmError> {
+    for attempt in 0..=RETRY_BACKOFF_MS.len() {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS[attempt - 1])).await;
+        }
+        match http.post_json(url, headers, body.to_string()).await {
+            // 重试类：没耗尽就退避再来，耗尽回 Transient。
+            Ok((status, text)) if status == 429 || status >= 500 => {
+                if attempt < RETRY_BACKOFF_MS.len() {
+                    continue;
+                }
+                return Err(LlmError::Transient(format!("HTTP {status}: {}", excerpt(&text))));
+            }
+            Ok(result) => return Ok(result),
+            Err(transport) => {
+                if attempt < RETRY_BACKOFF_MS.len() {
+                    continue;
+                }
+                return Err(LlmError::Transient(transport));
+            }
+        }
+    }
+    unreachable!("循环每个分支要么 continue 要么 return，走不到循环外")
+}
+
+/// 非重试类错误的分类（429/5xx 已在退避层消化）：
+/// 400 且错误体带超窗特征 → [`LlmError::ContextWindowExceeded`]（compact 路径入口）；
+/// 其余（含 401/403/404——key 无效、模型或路径不存在）→ [`LlmError::Fatal`]：
+/// 配置或请求形态损坏，静默重试只会烧钱不解决问题。
+pub(crate) fn classify_status(status: u16, body: &str) -> LlmError {
+    if status == 400 && is_context_overflow(body) {
+        return LlmError::ContextWindowExceeded;
+    }
+    LlmError::Fatal(format!("HTTP {status}: {}", excerpt(body)))
+}
+
+/// 超窗错误体特征（三协议混一清单，各家文案见 pi overflow.ts 的盘点）：
+/// OpenAI 两协议的 error code `context_length_exceeded` / "exceeds the context
+/// window" / "maximum context length"；Anthropic 的 "prompt is too long: X > Y"。
+pub(crate) fn is_context_overflow(body: &str) -> bool {
+    const MARKERS: [&str; 4] = [
+        "context_length_exceeded",
+        "prompt is too long",
+        "exceeds the context window",
+        "maximum context length",
+    ];
+    MARKERS.iter().any(|m| body.contains(m))
+}
+
+/// 错误体截断（进 agent_status.error 的文本；错误体可能是整页 HTML）。
+fn excerpt(body: &str) -> String {
+    body.chars().take(400).collect()
+}
+
+/* ---------------- 测试件：本地 std::TcpListener 裸 HTTP 桩 ---------------- */
+
+#[cfg(test)]
+pub(crate) mod testing {
+    //! 三协议适配器测试的裸 HTTP 桩：真 TCP 回环收请求、按预置清单逐连接回响应、
+    //! 捕获请求原文供断言。**不用任何 mock HTTP 库**——请求关键字段的断言对象就是
+    //! 适配器真正发上线的字节。
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// 一只已启动的桩：`responses` 按**连接**次序回放（重试会开新连接），
+    /// 每次请求的原文追加进 `requests`。
+    pub struct Stub {
+        pub base_url: String,
+        pub requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Stub {
+        /// 启动桩并回吐基地址（适配器拿它当 `LlmConfig.base_url`）。
+        ///
+        /// # Panics
+        /// 端口绑定失败（回环端口耗尽，属环境故障）。
+        pub fn start(responses: Vec<(u16, String)>) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind 127.0.0.1:0");
+            let port = listener.local_addr().expect("local_addr").port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            std::thread::spawn(move || {
+                for (status, body) in responses {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(x) => x,
+                        // 桩的生命周期归测试：测试侧不再来请求时静默收摊。
+                        Err(_) => return,
+                    };
+                    let raw = read_request(&mut stream);
+                    captured.lock().expect("锁中毒即 bug").push(raw);
+                    let resp = format!(
+                        "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+            });
+            Self { base_url: format!("http://127.0.0.1:{port}"), requests }
+        }
+
+        /// 最后一次请求原文（断言路径/头/体用）。
+        ///
+        /// # Panics
+        /// 还没有请求进来（测试序错误）。
+        pub fn last_request(&self) -> String {
+            self.requests
+                .lock()
+                .expect("锁中毒即 bug")
+                .last()
+                .expect("桩至少应收到一次请求")
+                .clone()
+        }
+    }
+
+    /// 读完整 HTTP 请求：读到头结束标记，再按 Content-Length 补齐请求体。
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            let n = stream.read(&mut chunk).expect("read 请求头");
+            if n == 0 {
+                return String::from_utf8_lossy(&buf).into_owned();
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = find_head_end(&buf) {
+                break pos;
+            }
+        };
+        let content_length = String::from_utf8_lossy(&buf[..head_end])
+            .split("\r\n")
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().to_string())
+            })
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let want = head_end + 4 + content_length;
+        while buf.len() < want {
+            let n = stream.read(&mut chunk).expect("read 请求体");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn find_head_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
 }

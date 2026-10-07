@@ -26,10 +26,15 @@
 //! 截断的 JSON，执行必错）。
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::llm::{LlmClient, LlmConfig};
-use crate::registry::ToolCtx;
+use serde_json::Value;
+
+use crate::llm::{
+    Block, ChatRequest, LlmClient, LlmConfig, LlmError, Msg, Role, StopReason, ToolCall, ToolSpec,
+};
+use crate::player::GameEvent;
+use crate::registry::{self, ToolCtx, ToolError};
 
 /// LLM 调用硬预算默认值（五退出条件之一；计划拍板 240——一局五子棋的思考余量
 /// 绰绰有余，同时兜住失控循环的成本上限，计划 R2）。
@@ -90,6 +95,11 @@ pub struct LoopDeps {
     /// 用户中止标志（agent_stop 置位；循环在**每轮 LLM 调用前**检查——
     /// 检查点放在调用前而非工具间隙，保证「点了停止就不再花钱」）。
     pub stop: Arc<AtomicBool>,
+    /// 系统提示词全文（AgentHub 以 [`crate::prompt::build_system_prompt`] 现算后
+    /// 传入）。循环只持有成品字符串：PromptCfg 的输入（名字/执色/棋种/语言）归
+    /// 装配层管，循环为拼提示词再背一份配置只会造出两处真相。骨架契约缺口在
+    /// 本文件内最小补足（见实现报告）。
+    pub system: String,
 }
 
 /// 循环结局 + 统计。
@@ -99,9 +109,304 @@ pub struct LoopOutcome {
     pub stats: LoopStats,
 }
 
+/// 开局引导。对话从空史开始而 Anthropic 不收空 `messages`——第一条 user 消息
+/// 必须有；内容保持一般性，局面事实一律让模型自己读 `/game/*` 文件，这里不背
+/// 第二份配置（棋种/执色只活在系统提示词与快照里）。
+const OPENING_MESSAGE: &str = "A new game session is starting. Read /index and /game/status \
+first, greet your opponent via /game/in/chat (write + submit), and take your first action \
+through the tools.";
+
+/// TextOnly 提醒（英文，与系统提示词同语言）。只回文字不是行动：注入后继续循环，
+/// 绝不终止、绝不自动认输。
+const TEXT_ONLY_REMINDER: &str = "Your previous reply was text only — text is NOT an action, \
+and the session does not end for it. Act through the tools: write to stage (e.g. \
+/game/in/move or /game/in/chat) and then submit the path. You are never forced to move \
+every turn, but a round only counts when it ends in a tool call.";
+
+/// 等待心跳：事件队列已空且轮到对手。模型可选择做别的或直接等——落子会作为
+/// `<event>` 自动推送，无需轮询。
+const WAIT_HEARTBEAT: &str = "Waiting for the opponent's action. Nothing is required from \
+you right now — their move / message / request will arrive as a pushed <event>. You may \
+chat, take notes in /memory, or simply wait.";
+
+/// 收尾指令（winner 出现后的最后一轮：给模型一次写告别语的机会，随后循环收场）。
+fn farewell_instruction(winner: &str) -> String {
+    format!(
+        "The game has ended — winner: {winner}. Send a short, graceful farewell: write it to \
+/game/in/chat and submit the path. This is your final action; the session closes after it."
+    )
+}
+
 /// 跑完整局：阻塞到五退出条件之一。事件自动推送 / TextOnly 提醒 / 预算与压缩的
 /// 语义见模块注。对话历史由循环自持（compact 后重排），从空对话开始——系统提示词
 /// 由 [`crate::prompt::build_system_prompt`] 生成后作为 ChatRequest.system 常驻。
 pub async fn run(deps: LoopDeps) -> LoopOutcome {
-    todo!()
+    let LoopDeps { llm, llm_cfg, cfg, tools, stop, system } = deps;
+    let mut stats = LoopStats::default();
+    // 对话历史由循环自持；assistant 工具调用与 tool_result 成对入史（compact 的
+    // 切点纪律「绝不拆对」靠这个形状才可判定）。
+    let mut history: Vec<Msg> = vec![Msg {
+        role: Role::User,
+        content: vec![Block::Text { text: OPENING_MESSAGE.to_string() }],
+    }];
+    // 连续 Transient 计数（≥3 → Fatal，骨架注的错误分类在循环侧的落点）。
+    let mut transients: u32 = 0;
+    // 超窗兜底只重试一次（compact 接线后此处先强制压缩再重试）。
+    let mut emergency_compacted = false;
+    // winner 已现、收尾轮已给——下一轮到 winner 判定即 GameOver。
+    let mut ending = false;
+    let tool_specs = build_tool_specs(&tools);
+
+    loop {
+        // 退出条件 3：用户中止。检查点在 LLM 调用前——点了停止就不再花钱。
+        if stop.load(Ordering::Relaxed) {
+            return LoopOutcome { stop: LoopStop::Stopped, stats };
+        }
+        // 退出条件 5：硬预算。
+        if stats.llm_calls >= cfg.max_llm_calls {
+            return LoopOutcome { stop: LoopStop::BudgetExhausted, stats };
+        }
+
+        // compact 挂点（见 maybe_compact：压缩接线前的 no-op）。
+        if let Err(e) = maybe_compact(&mut history, &cfg, &mut stats).await {
+            return LoopOutcome { stop: LoopStop::Fatal(e.message().to_string()), stats };
+        }
+
+        let req = ChatRequest {
+            system: system.clone(),
+            messages: history.clone(),
+            tools: tool_specs.clone(),
+            max_output_tokens: llm_cfg.max_output_tokens,
+        };
+        stats.llm_calls += 1;
+        let resp = match llm.chat(req).await {
+            Ok(r) => {
+                transients = 0;
+                r
+            }
+            // 退出条件 4：Fatal（连接/配置损坏）。
+            Err(LlmError::Fatal(m)) => {
+                return LoopOutcome { stop: LoopStop::Fatal(m), stats };
+            }
+            Err(LlmError::ContextWindowExceeded) => {
+                // 超窗兜底（计划 compact 节）：生效上限取 min(用户上限, 模型实限)
+                // → 强制压缩 → 重试一次 → 再失败 Fatal。压缩本体在 compact.rs，
+                // 接线前挂点 no-op——同窗重试一次仍超窗就 Fatal，不空转。
+                if emergency_compacted {
+                    return LoopOutcome {
+                        stop: LoopStop::Fatal(
+                            "context window exceeded even after emergency compaction".to_string(),
+                        ),
+                        stats,
+                    };
+                }
+                emergency_compacted = true;
+                continue;
+            }
+            Err(LlmError::Transient(m)) => {
+                transients += 1;
+                if transients >= 3 {
+                    return LoopOutcome {
+                        stop: LoopStop::Fatal(format!("LLM unavailable after retries: {m}")),
+                        stats,
+                    };
+                }
+                continue;
+            }
+        };
+        stats.input_tokens += resp.usage.input_tokens;
+        stats.output_tokens += resp.usage.output_tokens;
+
+        // assistant 消息入史：文本与工具调用同一条（协议回放要求配对完整）。
+        let mut assistant_blocks: Vec<Block> = Vec::new();
+        if !resp.content.is_empty() {
+            assistant_blocks.push(Block::Text { text: resp.content.clone() });
+        }
+        for call in &resp.tool_calls {
+            assistant_blocks.push(Block::ToolCall { call: call.clone() });
+        }
+        if !assistant_blocks.is_empty() {
+            history.push(Msg { role: Role::Assistant, content: assistant_blocks });
+        }
+
+        // stopReason==length：半截调用的参数是截断的 JSON，执行必错——全部作废、
+        // 以错误文本回填让模型重发（agent-loop.ts:474-500）。纯文本被截断不算
+        // 「半截调用」，落到 TextOnly 提醒路径。
+        if resp.stop == StopReason::MaxTokens && !resp.tool_calls.is_empty() {
+            let blocks = resp
+                .tool_calls
+                .iter()
+                .map(|c| Block::ToolResult {
+                    call_id: c.id.clone(),
+                    content: format!(
+                        "Tool call \"{}\" was not executed: the response hit the output token \
+limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
+                        c.name
+                    ),
+                    is_error: true,
+                })
+                .collect();
+            history.push(Msg { role: Role::User, content: blocks });
+            continue;
+        }
+
+        // 工具执行 → 回填（RespondToModel → isError 文本，循环继续；Fatal → 终止）。
+        // 回执块与后面的注入文本并成**一条** user 消息：Anthropic 要求 user/assistant
+        // 严格交替，且 tool_result 块必须先于文本（紧跟配对的 tool_use）。
+        let mut blocks: Vec<Block> = Vec::new();
+        let mut resigned = false;
+        for call in &resp.tool_calls {
+            match registry::execute(&call.name, &call.arguments, &tools).await {
+                Ok(v) => {
+                    if is_resign_submit(call) {
+                        resigned = true;
+                    }
+                    blocks.push(Block::ToolResult {
+                        call_id: call.id.clone(),
+                        content: v.to_string(),
+                        is_error: false,
+                    });
+                }
+                Err(ToolError::RespondToModel(m)) => blocks.push(Block::ToolResult {
+                    call_id: call.id.clone(),
+                    content: m,
+                    is_error: true,
+                }),
+                Err(ToolError::Fatal(m)) => {
+                    return LoopOutcome { stop: LoopStop::Fatal(m), stats };
+                }
+            }
+        }
+        // 退出条件 2：resign 的 terminate（submit 成功即局终，无需再问模型）。
+        if resigned {
+            return LoopOutcome { stop: LoopStop::Resigned, stats };
+        }
+
+        // 事件自动推送：排空队列 + 读最新快照（winner/轮次/计分的判定源）。
+        let events = tools.events.drain();
+        let snap = tools.player.snapshot();
+
+        // 退出条件 1：winner。先给一轮收尾（写告别语 + submit），随后收场。
+        if let Some(winner) = snap.get("winner").and_then(Value::as_str) {
+            if ending {
+                return LoopOutcome { stop: LoopStop::GameOver, stats };
+            }
+            ending = true;
+            let mut prose = String::new();
+            if !events.is_empty() {
+                prose.push_str(&event_block(&events));
+            }
+            prose.push_str(&farewell_instruction(winner));
+            blocks.push(Block::Text { text: prose });
+            history.push(Msg { role: Role::User, content: blocks });
+            continue;
+        }
+
+        // 注入文本：事件块（或空队列+轮到对手的心跳）、TextOnly 提醒、
+        // 计分自动确认回执——全部并入本条 user 消息。
+        let mut prose = String::new();
+        if !events.is_empty() {
+            prose.push_str(&event_block(&events));
+        } else if !is_my_turn(&snap) {
+            prose.push_str(WAIT_HEARTBEAT);
+        }
+        if resp.tool_calls.is_empty() {
+            // TextOnly ≠ 行动：提醒继续，绝不终止、绝不自动认输。
+            prose.push_str(TEXT_ONLY_REMINDER);
+        }
+        // 围棋计分 v1 取舍（计划 AgentPage 节）：Agent 不标死子（工具集不含），
+        // 循环见 scoring 自动 ConfirmScore，死子由人类单方标记。
+        if needs_score_confirm(&snap) {
+            match auto_confirm_score(&tools).await {
+                Ok(receipt) => prose.push_str(&format!(
+                    "\nScoring started — auto-confirmed on your behalf (dead stones are marked \
+by the human player). Receipt: {receipt}\n"
+                )),
+                Err(ToolError::RespondToModel(m)) => {
+                    prose.push_str(&format!("\nScoring started — auto-confirm failed: {m}\n"))
+                }
+                Err(ToolError::Fatal(m)) => {
+                    return LoopOutcome { stop: LoopStop::Fatal(m), stats };
+                }
+            }
+        }
+        if !prose.is_empty() {
+            blocks.push(Block::Text { text: prose });
+        }
+        // blocks 恒非空：有工具调用必有回执块；无工具调用必有 TextOnly 提醒。
+        // 防空守卫挡的是「空 user 消息上线」这类协议级坏请求，不是死代码。
+        if !blocks.is_empty() {
+            history.push(Msg { role: Role::User, content: blocks });
+        }
+    }
+}
+
+/// 工具面 → 协议工具定义（清单过滤与 delegate 开关的判定都在 [`crate::tools`]）。
+fn build_tool_specs(ctx: &ToolCtx) -> Vec<ToolSpec> {
+    crate::tools::tools_for(ctx.driver, ctx.subagent_enabled)
+        .into_iter()
+        .map(|def| ToolSpec {
+            name: def.name.to_owned(),
+            description: def.description.to_owned(),
+            input_schema: serde_json::from_str(def.input_schema)
+                .expect("ToolDef.input_schema 是编译期常量，坏 JSON 属于骨架 bug，立即炸出"),
+        })
+        .collect()
+}
+
+/// 这次工具调用是不是「submit /game/in/resign」——resign 的 terminate 由调用面
+/// 直接判（registry 的回执没有 terminate 字段，等快照 winner 会多绕一轮）。
+fn is_resign_submit(call: &ToolCall) -> bool {
+    call.name == crate::tools::TOOL_SUBMIT.name
+        && call.arguments.get("path").and_then(Value::as_str)
+            == Some(crate::vfs::InFile::Resign.path())
+}
+
+/// 是否该由循环自动确认计分：进入计分态、结果未出、我这席还没确认。
+/// （快照缺字段按「无需确认」处理——判定只在真实快照契约上有意义。）
+fn needs_score_confirm(snap: &Value) -> bool {
+    snap.get("scoring").and_then(Value::as_bool) == Some(true)
+        && snap.get("myScoreOk").and_then(Value::as_bool) == Some(false)
+        && snap.get("scoreResult").is_none_or(Value::is_null)
+}
+
+/// 轮到我否（心跳的判定条件之一：队列空且**不**轮到我才等）。
+fn is_my_turn(snap: &Value) -> bool {
+    let to_move = snap.get("toMove").and_then(Value::as_str);
+    let my_color = snap.get("myColor").and_then(Value::as_str);
+    to_move.is_some() && to_move == my_color
+}
+
+/// 排空的事件 → `<event>` 块文本（每行一条 JSONL，与 /game/events 文件同行形）。
+fn event_block(events: &[GameEvent]) -> String {
+    let mut s = String::from("Game events since your last turn:\n");
+    for ev in events {
+        let line = serde_json::to_string(ev).expect("GameEvent 派生 Serialize，不可失败");
+        s.push_str(&format!("<event>{line}</event>\n"));
+    }
+    s
+}
+
+/// 计分自动确认：走 write 暂存 + submit，与模型动作完全同一条路，不绕过 registry
+///（回执/错误文案、格式校验、settle 节奏全部复用工具面的那份真相）。
+async fn auto_confirm_score(ctx: &ToolCtx) -> Result<Value, ToolError> {
+    let path = crate::vfs::InFile::Score.path();
+    let stage = serde_json::json!({ "path": path, "content": "ok" });
+    let _staged =
+        registry::execute(crate::tools::TOOL_WRITE.name, &stage, ctx).await?;
+    let commit = serde_json::json!({ "path": path });
+    registry::execute(crate::tools::TOOL_SUBMIT.name, &commit, ctx).await
+}
+
+/// compact 挂点 —— 触发线判定与摘要的接线位（契约见 [`crate::compact`]）。
+///
+/// 接线形态：`compact::estimate_tokens(history) > cfg.ctx_limit −
+/// compact::RESERVE_TOKENS` 时用 `SummaryCompactor::summarize` 出摘要，把 history
+/// 重排为 `[user: <compaction-summary> 摘要] + retainedTail`（切点走
+/// `cut_point`，绝不拆 assistant 工具调用与 tool_result 对），`stats.compactions
+/// += 1`。当前 no-op：骨架期只立挂点，压缩语义由 compact 负责人落地后在此接上
+///（任务口径「可先 no-op」；超窗兜底的强制压缩同样落在这里）。
+async fn maybe_compact(history: &mut Vec<Msg>, cfg: &LoopConfig, stats: &mut LoopStats) -> Result<(), LlmError> {
+    let _ = (history, cfg, stats);
+    Ok(())
 }
