@@ -134,6 +134,26 @@ async function main() {
   // 黑先，若 AI 已落子则轮白（「白 落子」），没落子会停在「黑 落子」
   check("AI 执黑后立刻落第一手", status.includes("白 落子"), status);
 
+  // —— 5) AI 执黑思考中点「重开」：AI 仍要接手（死局回归） ——
+  // 依赖里没有代次时，思考中重开五个依赖一个不变、effect 不重跑——空盘无人落子
+  // （旧回执落子的幽灵子修掉后才暴露）。选「强」档（3s 思考窗）：此刻 AI 执黑、
+  // 轮人类，人类落一手让 AI 进入思考，思考中立刻重开——稳定落在窗口内。
+  // 修复后 AI 会重新思考并落第一手：手数=1、轮白。
+  // 底部还停在胜率卡（第 2 节切过去的）：先切回对局视图，手数才读得到。
+  await ep.page.locator('button[title*="对局 / 胜率"]').click();
+  await sleep(700);
+  await ep.page.locator('.play-stack button[aria-label="对局设置"]').click();
+  await sleep(500);
+  await ep.page.locator('button[title="每步思考 3000 毫秒"]').click();
+  await sleep(300);
+  await ep.place(9, 9); // AI（黑）开始思考，3s 窗口
+  await ep.page.locator('.play-stack button[aria-label="对局设置"]').click(); // 思考中重开面板
+  await ep.page.locator(".chat-modal button", { hasText: "重开" }).click(); // 落在思考窗内
+  await sleep(12000);
+  const afterReset = await ep.page.evaluate(() => document.querySelector(".play-stack .brutal-card")?.innerText.replace(/\n/g, " ") ?? "");
+  const resetMoves = await moveCount(ep);
+  check("AI 执黑思考中重开仍接手（死局回归）", resetMoves === 1 && afterReset.includes("白 落子"), `手数=${resetMoves} | ${afterReset.slice(0, 50)}`);
+
   console.log(`\n${passed} passed, ${failed} failed`);
   await ep.close();
   process.exit(failed ? 1 : 0);

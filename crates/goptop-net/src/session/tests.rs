@@ -1073,3 +1073,44 @@ fn reset_net_message_normalizes_hostile_kind_size() {
     assert_eq!(a.board.len(), 19);
     assert_eq!(a.engine.kind.size(), 19);
 }
+
+/* ---------------- 回归：answer 应用失败不再静默（stale 回执重试） ---------------- */
+
+/// 邀请者在等待态收到 RtcApplyFailed → 必须给出可行动的提示。
+///
+/// 场景：旧回执已应用（→stable）但连接未成，对方补发新回执；状态机已受理重试
+/// （128502f），transport 的二次 SRD 却失败——此前该失败被静默吞掉，界面停在
+/// 「连接中」毫无反应。
+#[test]
+fn rtc_apply_failed_in_waiting_notices_the_inviter() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: Some("OFFER_A".into()), answer_plain: None, offer_enc: None, answer_enc: None }, &c);
+    assert!(a.phase == Phase::Waiting && a.role == Role::Inviter);
+    let fx = reduce(&mut a, Event::RtcApplyFailed { tag: "main".into() }, &c);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("回执"))),
+        "等待态的邀请者必须收到指引提示，实际 effects={fx:?}"
+    );
+}
+
+/// 同一事件在非等待态（对局中/受邀者/槽位已清）没有可行动的恢复动作 → 维持静默。
+#[test]
+fn rtc_apply_failed_outside_waiting_is_silent() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: Some("OFFER_A".into()), answer_plain: None, offer_enc: None, answer_enc: None }, &c);
+    // 走完受理进对局（PeerState open：受邀者/邀请者共用这条入口）。
+    reduce(&mut a, Event::PeerState { tag: "main".into(), opened: true, closed: false, failed: false }, &c);
+    assert_eq!(a.phase, Phase::Playing);
+    let fx = reduce(&mut a, Event::RtcApplyFailed { tag: "main".into() }, &c);
+    assert!(fx.is_empty(), "对局中的应用失败没有恢复动作，不得弹提示，实际={fx:?}");
+    // 槽位不在册（backHome 已 close_all_rtc）的残留事件同样静默。
+    let mut b = mk("b", false);
+    reduce(&mut b, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut b, Event::Ui(UiCommand::BackHome), &c);
+    let fx = reduce(&mut b, Event::RtcApplyFailed { tag: "main".into() }, &c);
+    assert!(fx.is_empty(), "残留事件不得对已回主页的会话弹提示，实际={fx:?}");
+}

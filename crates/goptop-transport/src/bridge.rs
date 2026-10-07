@@ -171,7 +171,11 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             let (sdp, typ, _) = decode_sdp(&answer, encrypted, core, pwd.as_deref());
             if let (Some(sdp), Some(typ)) = (sdp, typ) {
                 if let Some((_, peer)) = core.borrow().peers.iter().find(|(t, _)| *t == tag) {
-                    peer.accept_answer(&sdp, &typ);
+                    // 应用失败要回到状态机（→ 等待态提示），理由见 RtcPeer::accept_answer
+                    let tag2 = tag.clone();
+                    peer.accept_answer(&sdp, &typ, Box::new(move || {
+                        queue_event(Event::RtcApplyFailed { tag: tag2 });
+                    }));
                 }
             }
         }

@@ -112,6 +112,16 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
    * 选点落到刚清空的棋盘上（换边同样清盘，一并覆盖）。
    */
   const genRef = useRef(0);
+  /**
+   * 重开/换边的**渲染代次**：进 AI effect 的依赖。
+   *
+   * 只靠 genRef 拦回执不触发重跑：AI 执黑思考中点「重开」，toMove 本来就是 "black"、
+   * winner 仍是 null——五个依赖一个不变，effect 不重跑，AI 永远不接清空后的第一手
+   * （人类也点不动，纯死局；此前被「旧回执落子」的幽灵子盖住才没暴露）。genTick 每次
+   * resetBoard 必然变化，effect 必然重跑；genRef 的 isStale 继续兜 Worker dispose 等
+   * 依赖之外的作废路径。
+   */
+  const [genTick, setGenTick] = useState(0);
 
   // 预热引擎：Web 端是 Worker 启动时自己预热，原生端要显式叫一次
   // （解压 + 反序列化 1.7MB NNUE 权重，约 56ms），否则第一步棋白等这一下。
@@ -134,6 +144,7 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
   /** 重置到"轮到人类"的初始局面。 */
   function resetBoard(nextAi: StoneColor = aiColor) {
     genRef.current += 1;
+    setGenTick((t) => t + 1);
     // 把在途/排队的 stale 搜索连同它的回执一起清掉：Web 端 Worker 单线程按序跑，
     // 不 terminate 的话重开后的新请求要等旧搜索全部跑完才轮到（「强」档约 3.5s）。
     // Worker 懒重建，下次 analyze 重付初始化代价；原生端各走线程池并发、本就无
@@ -141,7 +152,7 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
     sharedAiClient().dispose();
     void rulesRef.current.reset();
     setBoard(emptyBoard(size));
-    // 人类执黑时黑先；AI 执黑时黑先但那一步该 AI 走，effect 会自动接手
+    // 人类执黑时黑先；AI 执黑时黑先且那一步该 AI 走——genTick 推高依赖让 effect 重跑接手
     setToMove("black");
     setWinner(null);
     setLastMove(null);
@@ -227,9 +238,10 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
     return () => {
       cancelled = true;
     };
-    // aiColor/budgetMs 变化要重算当前局面（换边后可能立刻轮到新 AI）
+    // aiColor/budgetMs 变化要重算当前局面（换边后可能立刻轮到新 AI）；
+    // genTick 管「依赖一个都没变」的重开（AI 执黑思考中重开，见上）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [toMove, aiColor, winner, budgetMs, size]);
+  }, [toMove, aiColor, winner, budgetMs, size, genTick]);
 
   const odds = useWinRate({
     getState: () => rulesRef.current.stateJson(),

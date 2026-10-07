@@ -138,14 +138,21 @@ impl RtcPeer {
         });
     }
 
-    /// 应用远端 answer（幂等位由状态机管理；浏览器对重复应用抛错，这里静默）。
-    pub fn accept_answer(&self, sdp: &str, sdp_type: &str) {
+    /// 应用远端 answer（幂等位由状态机管理）。
+    ///
+    /// 浏览器在 stable 态收到第二份 answer 会抛 InvalidStateError（旧回执已应用、
+    /// 连接未成，对方补发新回执时的正常形态）。这个失败必须上抛（`on_failed`），
+    /// 不能沿用旧的静默吞掉——状态机已受理重试，界面却在「连接中」毫无反应。
+    pub fn accept_answer(&self, sdp: &str, sdp_type: &str, on_failed: Box<dyn FnOnce()>) {
         let pc = self.pc.clone();
         let mut init = web_sys::RtcSessionDescriptionInit::new(sdp_type_enum(sdp_type));
         init.sdp(sdp);
         let init = init;
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = pc.set_remote_description(&init);
+            // 浏览器对「stable 态喂第二份 answer」走 promise 拒绝路径（InvalidStateError）。
+            if await_void(pc.set_remote_description(&init), "setRemoteDescription failed").await.is_err() {
+                on_failed();
+            }
         });
     }
 

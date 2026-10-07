@@ -414,6 +414,9 @@ pub fn accept_answer(core: &SharedCore, tag: &str, answer: &str, encrypted: bool
                     if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
                         eprintln!("[rtc {tag}] accept_answer: set_remote 失败: {e}");
                     }
+                    // 应用失败必须回到状态机（→ 等待态提示），不能只留 trace——
+                    // 状态机已受理重试，静默的表现是「连接中」毫无反应（与 wasm 侧同因）。
+                    bridge::queue(&core, Event::RtcApplyFailed { tag });
                 } else if std::env::var("GOPTOP_TRACE_RTC").is_ok() {
                     eprintln!("[rtc {tag}] accept_answer: set_remote 完成，等 ICE");
                 }

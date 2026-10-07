@@ -440,6 +440,10 @@ pub enum Event {
     Presence(PresenceEvt),
     /// RTC 连接状态变化。
     PeerState { tag: String, opened: bool, closed: bool, failed: bool },
+    /// transport 无法应用远端 answer（典型：stable 态收到第二份 answer——旧回执已应用
+    /// 但连接未成，对方补发新回执时浏览器/webrtc-rs 会拒绝二次 SRD）。此前该失败被
+    /// transport 静默吞掉，状态机受理了重试、界面却毫无反应。
+    RtcApplyFailed { tag: String },
     /// RTC 异步产物就绪（offer/answer 已由 transport 生成完成）。
     RtcReady { tag: String, offer_plain: Option<String>, answer_plain: Option<String>, offer_enc: Option<String>, answer_enc: Option<String> },
     /// 定时器到期。
@@ -648,6 +652,7 @@ fn dispatch(s: &mut Session, ev: Event, ctx: &ReduceCtx) -> Vec<Effect> {
         Event::Net(msg) => s.on_net(msg, ctx),
         Event::Presence(pev) => lobby::on_presence(s, ctx, pev),
         Event::PeerState { tag, opened, closed, failed } => lobby::on_peer_state(s, &tag, opened, closed || failed),
+        Event::RtcApplyFailed { tag } => lobby::on_rtc_apply_failed(s, &tag),
         Event::RtcReady { tag, offer_plain, answer_plain, offer_enc, answer_enc } => {
             lobby::on_rtc_ready(s, ctx, &tag, offer_plain, answer_plain, offer_enc, answer_enc)
         }
