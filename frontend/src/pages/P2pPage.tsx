@@ -97,10 +97,16 @@ export function P2pPage(props: { s: GameSession; toggleChat: () => void }) {
               </UrlRow>
             </>
           ) : role === "inviter" ? (
-            /* offer 生成中/失败：不给链接可复制（防发出无 rtc 的废链接，审查 A5） */
+            /* offer 生成中/失败：不给链接可复制（防发出无 rtc 的废链接，审查 A5）。
+               已受理过回执时 invite_url 已清（accept_receipt），落到本分支——重贴回执的
+               入口必须还在：状态机特意把钥匙留到进对局才消费（128502f），坏回执后的
+               同钥匙重试全靠它，没有这个按钮重试窗口就只在状态机里存在。 */
             <>
               <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700 }}>{notice ?? "正在生成直连邀请…"}</div>
               <div style={{ display: "flex", gap: 8 }}>
+                {!serverMode && (
+                  <button className="brutal-btn brutal-btn--sm brutal-btn--accent" onClick={() => { setModalInput(""); setModalErr(null); setModal("paste-answer"); }}>回执</button>
+                )}
                 <button className="brutal-btn brutal-btn--sm" onClick={backHome}>取消</button>
               </div>
             </>

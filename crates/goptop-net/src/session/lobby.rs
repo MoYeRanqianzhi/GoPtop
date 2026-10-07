@@ -600,14 +600,17 @@ pub(crate) fn on_peer_state(s: &mut Session, tag: &str, opened: bool, gone: bool
 /// 唯一有 UX 语义的场景是**邀请者的重试窗口**：旧回执已应用（→stable）但连接未成，
 /// 对方补发的新回执被状态机受理（见 `accept_receipt`，钥匙仍留着），transport 却在
 /// 二次 SRD 上失败——此前这一失败被静默吞掉，用户看到的仍是「连接中」毫无反应。
-/// 在等待态就明说，并把出路指给用户；其余阶段（对局中/受邀者）answer 应用失败
-/// 没有可行动的恢复动作，维持静默（ICE 层的失败自有 PeerState 通路）。
-pub(crate) fn on_rtc_apply_failed(s: &mut Session, tag: &str) -> Vec<Effect> {
+/// 在等待态就明说，并把出路指给用户；其余阶段（对局中/受邀者/已回主页）answer
+/// 应用失败没有可行动的恢复动作，维持静默（ICE 层的失败自有 PeerState 通路）。
+///
+/// **不查槽位在册**：receipt1 应用后对端失联，ICE 的走向不保证——Chrome 实测可能
+/// 长时间停在 disconnected（wasm 只在 Failed/Closed 才发 gone 事件，槽位还在），
+/// 也可能最终升级 failed（gone 分支把槽位移除，而 accept_receipt 不重新登记）。
+/// 提示必须在这两条时间线上都活着，所以守卫只看 phase/role；「已回主页」的残留
+/// 事件由 phase 检查兜住（backHome 后 phase 是 Home）。升级到 failed 的那条时间线
+/// 由单测 rtc_apply_failed_after_ice_gone_still_notices 钉住。
+pub(crate) fn on_rtc_apply_failed(s: &mut Session, _tag: &str) -> Vec<Effect> {
     if s.phase != Phase::Waiting || s.role != Role::Inviter {
-        return Vec::new();
-    }
-    // 槽位必须在册：已 close_all_rtc 的残留事件不提示。
-    if !s.rtc_peers.iter().any(|q| q.tag == tag && q.player) {
         return Vec::new();
     }
     vec![Effect::Notice(

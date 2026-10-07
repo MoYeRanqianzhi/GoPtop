@@ -1095,7 +1095,7 @@ fn rtc_apply_failed_in_waiting_notices_the_inviter() {
     );
 }
 
-/// 同一事件在非等待态（对局中/受邀者/槽位已清）没有可行动的恢复动作 → 维持静默。
+/// 同一事件在非等待态（对局中/受邀者/已回主页）没有可行动的恢复动作 → 维持静默。
 #[test]
 fn rtc_apply_failed_outside_waiting_is_silent() {
     let mut a = mk("a", false);
@@ -1107,10 +1107,34 @@ fn rtc_apply_failed_outside_waiting_is_silent() {
     assert_eq!(a.phase, Phase::Playing);
     let fx = reduce(&mut a, Event::RtcApplyFailed { tag: "main".into() }, &c);
     assert!(fx.is_empty(), "对局中的应用失败没有恢复动作，不得弹提示，实际={fx:?}");
-    // 槽位不在册（backHome 已 close_all_rtc）的残留事件同样静默。
+    // 已回主页（backHome 后 phase=Home）的残留事件同样静默。
     let mut b = mk("b", false);
     reduce(&mut b, Event::Ui(UiCommand::CreateInvite), &c);
     reduce(&mut b, Event::Ui(UiCommand::BackHome), &c);
     let fx = reduce(&mut b, Event::RtcApplyFailed { tag: "main".into() }, &c);
     assert!(fx.is_empty(), "残留事件不得对已回主页的会话弹提示，实际={fx:?}");
+}
+
+/// **升级时间线**：receipt1 应用后 ICE 最终升级 failed（PeerState failed → gone 分支
+/// 把 main 槽位移除），此时 receipt2 的二次 SRD 失败事件**仍必须弹提示**。
+///
+/// 实测 Chrome 可能长时间停在 disconnected 不升级（那条时间线槽位还在、E2E
+/// receipt-retry.js 已压全链）；本测试钉住「升级后槽位已被移除、accept_receipt 又不
+/// 重新登记」的另一条时间线——守卫若按槽位在册过滤，这条线上会永远静默。
+#[test]
+fn rtc_apply_failed_after_ice_gone_still_notices() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: Some("OFFER_A".into()), answer_plain: None, offer_enc: None, answer_enc: None }, &c);
+    // receipt1 已应用（SRD 成功 → stable），但对端已关：ICE 失败 → gone 分支移除槽位。
+    reduce(&mut a, Event::PeerState { tag: "main".into(), opened: false, closed: true, failed: true }, &c);
+    assert!(a.phase == Phase::Waiting, "连接从未 open，必须还留在等待态");
+    assert!(!a.rtc_peers.iter().any(|q| q.tag == "main"), "gone 分支应已移除 main 槽位（复刻真路径前提）");
+    // receipt2 的 SRD 失败事件到达：仍要提示。
+    let fx = reduce(&mut a, Event::RtcApplyFailed { tag: "main".into() }, &c);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("回执"))),
+        "槽位被 ICE 失败移除后，重试的失败事件仍必须提示，实际 effects={fx:?}"
+    );
 }
