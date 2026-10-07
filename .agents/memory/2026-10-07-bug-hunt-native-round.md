@@ -53,5 +53,6 @@
 2. **AI 执黑时点「重开」不接第一手**（F 组顺带发现的相邻既有缺陷）：resetBoard 后
    toMove 仍 black 且 effect 依赖不变，AI 不重跑——此前被幽灵落子掩盖成死局。
    需产品层拍板是否 resetBoard 后强制重跑 AI effect。
-3. E2E 壳甲类覆盖（shell-pair/ohos-native-probe）随本轮产物已重建，实机矩阵未重跑
-   （桌面壳 debug 构建后 shell-pair 已跑；安卓/鸿蒙模拟器矩阵留待下轮实测轮）。
+3. **壳测未随本轮修复重跑**：壳 release 构建在链接前被系统内存回收（当前
+   target/release/goptop.exe 仍是 9月20日 旧二进制），shell-pair/ohos-native-probe
+   与安卓/鸿蒙模拟器矩阵留待内存宽裕时按 build→起壳/模拟器 串行重跑。
