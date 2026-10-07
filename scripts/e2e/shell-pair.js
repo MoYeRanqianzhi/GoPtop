@@ -11,7 +11,10 @@
  *
  * **判定同步真的走了直连**：两个壳都是无服务器模式（没有 WS、没有 relay），
  * 进程内广播又跨不了进程——所以 B 收到 A 的落子只可能是 DataChannel 送的。
- * 复核手段：给两个壳加 `GOPTOP_TRACE_BC=1`，两份日志里 `bc recv` 应当**一次都没有**。
+ * 复核口径分两条，别混：`GOPTOP_TRACE_BC=1` 下两份日志里 `bc recv` 一次都没有，
+ * **只排除原生同进程广播**（wasm 会话的 BroadcastChannel 不产生任何 shell 日志，
+ * 对「壳静默跑 wasm」这条是盲的）；排除 wasm 靠的是脚本里逐壳的资源时间线断言
+ * （壳内不该出现 transport wasm 的加载记录）。
  *
  * 用法：node shell-pair.js [portA] [portB]      默认 9222 / 9223
  * 前置：
@@ -64,13 +67,29 @@ async function prep(ep, name, uid) {
 
 const snap = async (ep) => JSON.parse(await ep.page.evaluate(() => window.__session.snapshot()));
 
+/** 资源时间线里的 transport wasm 命中。wasm 分支的动态 import 会立刻 fetch
+ *  goptop_transport_bg.wasm（goptop_transport.js 的 wbg 胶水），所以这是页面上
+ *  唯一能区分 native/wasm 会话的自动手段——快照没有传输类型字段，
+ *  而 [bc recv]=0 只排除原生同进程广播，对「壳乙静默跑 wasm」是盲的。 */
+const wasmInTimeline = async (ep) => ep.page.evaluate(() =>
+  performance.getEntriesByType("resource").map((r) => r.name).filter((n) => /goptop_transport/.test(n)));
+
 (async () => {
   const A = await Endpoint.cdp("壳甲", `http://127.0.0.1:${PORT_A}`);
   const B = await Endpoint.cdp("壳乙", `http://127.0.0.1:${PORT_B}`);
 
   const originA = await prep(A, "壳甲", "u-shell-aaa-0001");
   const originB = await prep(B, "壳乙", "u-shell-bbb-0002");
-  check("两个壳都是原生会话（__session 已就绪）", true, `${originA} / ${originB}`);
+  console.log(`origins: ${originA} / ${originB}`);
+
+  // 「都是原生会话」必须逐壳真断言：壳乙才是环境被改写（USERPROFILE/LOCALAPPDATA/APPDATA
+  // 重定向）的那个实例，此前资源时间线只查壳甲，对半边系统假通过。prep 的整页重载
+  // 之后会话已按 isTauri 选型完毕，wasm 分支此刻必然已在时间线里留下记录——
+  // 提前到开局前拦住，别等落子全绿了才发现壳在跑 wasm。
+  for (const ep of [A, B]) {
+    const hits = await wasmInTimeline(ep);
+    check(`${ep.name} 未加载 transport wasm（原生会话，没有可退的 wasm 后端）`, hits.length === 0, hits.join(",") || "无");
+  }
 
   // 1) A 开局，等带 rtc 的邀请链接
   await A.page.evaluate(() => {
@@ -166,11 +185,6 @@ const snap = async (ep) => JSON.parse(await ep.page.evaluate(() => window.__sess
     return !!(s && s.moveCount >= 2);
   }, null, { timeout: 25000, polling: 400 }).then(() => true).catch(() => false);
   check("8. B 落子经原生直连同步回 A", aSawTwo);
-
-  // 6) 确认没退回 wasm：壳里不该加载 transport wasm
-  const chunks = await A.page.evaluate(() =>
-    performance.getEntriesByType("resource").map((r) => r.name).filter((n) => /goptop_transport/.test(n)));
-  check("9. 壳内未加载 transport wasm（没有可退的 wasm 后端）", chunks.length === 0, chunks.join(",") || "无");
 
   console.log("A 终态:", JSON.stringify(await snap(A)).slice(0, 160));
   await done();

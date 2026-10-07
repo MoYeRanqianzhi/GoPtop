@@ -20,7 +20,7 @@ async function open(spec, name) {
   const A = await open(specA, "A");
   const B = await open(specB, "B");
   const C = await open(specC, "C");
-  for (const ep of [A, B]) { await ep.home().catch(() => {}); await ep.enterP2P(); await ep.waitServerReady(); }
+  for (const ep of [A, B]) { await ep.home(); await ep.enterP2P(); await ep.waitServerReady(); } // home() 失败会抛错，交给底部 catch 判负
   const link = await A.createInvite();
   await B.joinByPaste(link);
   await A.waitSnap((s) => s.phase === "playing", 60000, "A playing");

@@ -71,6 +71,10 @@ async function main() {
     ep = await Endpoint.browser("ai", url);
   }
   await ep.goto(target).catch(() => { /* 浏览器端点构造时已导航过，重复导航失败可忽略 */ });
+  // 被吞的导航错误要用落地位置兜住：壳端点只接管不导航，这条是进 /ai 的唯一导航，
+  // 静默失败会让后续落子全落在旧页面上（stress 实测过 171 手横坐标 -37 的假失败）
+  const landed = ep.page.url();
+  if (landed !== target) throw new Error(`[ai] 导航后停在 ${landed}，未进入 ${target}——导航失败被忽略`);
   await ep.ready(40000);
 
   // —— 1) 人类落子 → AI 自动应手 ——

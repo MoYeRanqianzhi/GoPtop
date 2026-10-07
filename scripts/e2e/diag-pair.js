@@ -25,7 +25,7 @@ const brief = (s) => `role=${s.role} phase=${s.phase} my=${s.myColor} peer=${s.p
   const A = await open(specA, "A");
   const B = await open(specB, "B");
   for (const ep of [A, B]) {
-    await ep.home().catch(() => {});
+    await ep.home(); // home() 复位失败会抛错（带末态摘要），不能静默带病配对
     await ep.enterP2P();
     await ep.waitServerReady();
   }

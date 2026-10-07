@@ -34,6 +34,20 @@ async function bodyHas(c, text, timeout = 12000) {
   } catch { return false; }
 }
 
+/** 真·直连断言：等本端 DataChannel 真正 open（ice_debug → [{tag, ice, local, remote, dcState}]）。
+ *  不能用「已连接」文案或 peerConnected 顶替——它们按「直连或 relay 可用」点亮
+ *  （snapshot.peer_connected = peer_connected || relay_available），ICE 全坏、仅信令可用时照样变绿，
+ *  而后续落子/聊天/协商都有 relay 兜底，这条是整套脚本里唯一的 DataChannel 断言。 */
+async function dcOpen(c, timeout = 20000) {
+  return c.page.waitForFunction(async () => {
+    try {
+      if (!window.__session) return false;
+      const slots = JSON.parse((await window.__session.ice_debug()) || "[]");
+      return slots.some((p) => p.dcState === "open");
+    } catch { return false; } // 刚导航时 __session/ice_debug 可能还没就绪：按未就绪继续轮询
+  }, null, { timeout, polling: 400 }).then(() => true).catch(() => false);
+}
+
 async function placeStone(c) {
   await c.page.evaluate(() => {
     const svg = document.querySelector('svg[role="grid"]');
@@ -132,7 +146,8 @@ async function challengeFromList(c, peerName) {
   // —— 2. B 打开邀请 → 免回执直连 ——
   const bUrl = new URL(inviteUrl);
   await B.page.goto(B.origin + bUrl.pathname + bUrl.search, { waitUntil: "domcontentloaded" });
-  check("2. B 免回执直连", await bodyHas(B, "已连接", 20000));
+  // 服务器模式下「已连接」在对局相由指示灯满足（直连或 relay 可用都点亮），这里必须盯 DataChannel 本身
+  check("2. B 免回执直连", await dcOpen(B));
   check("2b. B 进入对局", await bodyHas(B, "对局开始", 5000));
   check("2c. A 进入对局", await bodyHas(A, "对方已加入", 5000));
 

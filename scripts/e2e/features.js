@@ -104,7 +104,7 @@ function countStones(board, color) {
 
 async function scenarioLocal(ep) {
   // 菜单 → 本地对战
-  await ep.home().catch(() => {});
+  await ep.home(); // home() 复位失败会抛错（带末态摘要），在此判负而不是静默带病跑下去
   const menu = ep.page.locator("button:visible", { hasText: "本地对战" }).first();
   if (await menu.count() && await menu.isVisible().catch(() => false)) await menu.click();
   else { await ep.clickButton("菜单"); await sleep(300); await ep.clickButton("本地对战"); }

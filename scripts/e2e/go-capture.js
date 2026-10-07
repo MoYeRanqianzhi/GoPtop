@@ -43,7 +43,10 @@ const SHOTS = require("path").join(__dirname, "shots", "phase5");
       c.getAttribute("fill"),
     ])
   );
-  const check = (name, ok) => console.log(`${ok ? "PASS" : "FAIL"} ${name}`);
+  // 失败必须计数并影响退出码：README 把本脚本的 7 项列入「全绿=浏览器面基线」，
+  // 只打印不计数的话，提子回归在 FAIL 满屏的情况下仍以 0 退出（假绿）
+  let fail = 0;
+  const check = (name, ok) => { if (!ok) fail++; console.log(`${ok ? "PASS" : "FAIL"} ${name}`); };
 
   // 棋种切换后首手前：9 路空盘
   check("1. 切到围棋 9 路空盘", (await stones()).length === 0);
@@ -93,5 +96,6 @@ const SHOTS = require("path").join(__dirname, "shots", "phase5");
 
   console.log(errors === 0 ? "无 JS 报错" : `有 ${errors} 个 JS 报错`);
   await browser.close();
-  process.exit(0);
+  // 与 run.js / ai.js 同口径：check 失败或页面 JS 异常都算不绿（退出码即结果）
+  process.exit(fail > 0 || errors > 0 ? 1 : 0);
 })().catch((e) => { console.error("CRASH:", e); process.exit(2); });

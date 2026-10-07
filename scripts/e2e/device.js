@@ -247,12 +247,21 @@ class Endpoint {
     return this;
   }
 
-  /** 回到主页（菜单页）。对局中/等待中都能用——按「离开/取消」直至 phase=home。 */
+  /** 回到主页（菜单页）。对局中/等待中都能用——按「离开/取消」直至 phase=home。
+   *  复位失败必须抛错：调用方拿不到任何成功标志的话，「没能回主页」会被静默放过，
+   *  下一组检查在旧对局状态下执行，失败被记到别的功能头上。 */
   async home(timeout = 20000) {
     const t0 = Date.now();
+    let last = null;
     while (Date.now() - t0 < timeout) {
-      const s = await this.snap();
-      if (s.phase === "home" && s.role === "idle") return this;
+      try {
+        last = await this.snap();
+      } catch {
+        // 刚导航时 evaluate 读不到 __session（同 waitSnap 的处理）：按未就绪继续轮询
+        await this.page.waitForTimeout(200);
+        continue;
+      }
+      if (last.phase === "home" && last.role === "idle") return this;
       let clicked = false;
       for (const t of [UI.backHome, "取消", "返回"]) {
         const b = this.page.locator("button:visible", { hasText: t }).first();
@@ -268,7 +277,7 @@ class Endpoint {
       }
       await this.page.waitForTimeout(400);
     }
-    return this;
+    throw new Error(`[${this.name}] home() 复位超时(${timeout}ms)；末态 phase=${last?.phase} role=${last?.role} moves=${last?.moveCount} winner=${last?.winner}`);
   }
 
   /** 进对战大厅（P2P 页）。浏览器端点已直达；壳端点走「菜单 → P2P 对战」真实点击。 */

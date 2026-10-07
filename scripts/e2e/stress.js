@@ -72,12 +72,28 @@ async function backToGame(ep) {
   }
 }
 
-/** JS 堆占用（MB）；非 Chromium 返回 null。 */
+/** 给 evaluate 兜超时：渲染主线程被占死时 evaluate 永不返回（Playwright 的 evaluate
+ *  没有超时参数），而快速连点阶段的设计目的恰恰是诱发卡死——不与定时器赛跑，
+ *  页面真卡死时脚本会挂死而非判负（node 不退出、无 FAIL、退出码语义丢失）。
+ *  输了赛跑一方的 rejection 必须先接住，否则健康路径上会炸 unhandled rejection。 */
+function withTimeout(p, ms, label) {
+  let timer;
+  const boom = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${label}（${ms / 1000}s 无响应）`)), ms); });
+  boom.catch(() => {});
+  return Promise.race([p, boom]).finally(() => clearTimeout(timer));
+}
+
+/** JS 堆占用（MB）；非 Chromium 返回 null。读堆同样走 evaluate，同样要兜卡死。 */
 async function heapMB(ep) {
-  return ep.page.evaluate(() => {
+  return withTimeout(ep.page.evaluate(() => {
     const m = performance.memory;
     return m ? Math.round(m.usedJSHeapSize / 1048576) : null;
-  });
+  }), 15000, "页面疑似卡死——读堆占用");
+}
+
+/** 探活：棋盘还渲染着吗。页面真卡死时由超时判负（异常落进 main().catch 非零退出）。 */
+function probeAlive(ep, timeout = 15000) {
+  return withTimeout(ep.page.evaluate(() => !!document.querySelector(".board-wrap svg")), timeout, "页面疑似卡死——探活");
 }
 
 /** 打开胜率卡（宽窄两套卡的可见性互斥，按可见性选）。 */
@@ -93,6 +109,9 @@ async function openOdds(ep) {
 }
 
 async function main() {
+  // 全局看门狗：兜住探活点之外的挂死（120 手循环里 clickPoint/moveCount 的 evaluate
+  // 同样可能在主线程被占死后永不返回）。到点强制非零退出，保住退出码语义。
+  const watchdog = setTimeout(() => { console.error("stress 全局超时（30 分钟无进展），强制退出"); process.exit(3); }, 30 * 60 * 1000);
   const spec = process.argv[2] ?? "web";
   // 壳端点不需要 base（从当前页面推导 origin），于是 `node stress.js cdp:… 120`
   // 的第二个参数直接就是手数——按位置死抠会让 120 被当成 base，拼出 "120/local"
@@ -120,6 +139,11 @@ async function main() {
     ep = await Endpoint.browser("stress", url);
   }
   await ep.goto(target).catch(() => { /* 浏览器端点构造时已导航过，重复导航失败可忽略 */ });
+  // 被吞的导航错误必须用落地位置兜住：壳端点（android/cdp）只接管不导航，这一条
+  // 是进 /local 的**唯一**导航——静默失败会让 120 手全落在旧页面上跑（实测在 /ai
+  // 上跑出 171 手、横坐标 -37 的假失败，报错远离真实根因）。
+  const landed = ep.page.url();
+  if (landed !== target) throw new Error(`[stress] 导航后停在 ${landed}，未进入 ${target}——导航失败被忽略`);
   await ep.ready(40000);
 
   // 切到 19 路：361 个交叉点，走 120 手不会把坐标用重复（9 路只有 81 点，第一版
@@ -191,7 +215,8 @@ async function main() {
     await sleep(40);
   }
   await sleep(12000);
-  const alive = await ep.page.evaluate(() => !!document.querySelector(".board-wrap svg"));
+  // 探活必须带超时：裸 evaluate 在主线程被占死时永不返回，而诱发卡死正是这一步的目的
+  const alive = await probeAlive(ep);
   check("快速连点后页面未崩溃", alive);
 
   const heap1 = await heapMB(ep);
@@ -203,6 +228,7 @@ async function main() {
 
   console.log(`\n${placed} 手用时 ${elapsed.toFixed(1)}s\n${passed} passed, ${failed} failed`);
   await ep.close();
+  clearTimeout(watchdog);
   process.exit(failed ? 1 : 0);
 }
 
