@@ -131,11 +131,11 @@ export interface InitOutput {
     readonly wasmsession_state_debug: (a: number, b: number) => void;
     readonly wasmsession_state_json: (a: number, b: number) => void;
     readonly wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1151: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1159: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_495: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_495_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_494: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_1152: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1154: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_370: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_370_2: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_369: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;
