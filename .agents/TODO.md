@@ -3,6 +3,27 @@
 > 记忆规范见 CLAUDE.md 与 .agents/MEMORY.md。每个待办动手前先读对应记忆文件。
 > 审查报告：review/（开放）；review/archive/（2026-09-07 闭环归档）。
 
+## 2026-10-07 探查 bug 大轮（用户指令「加强测试和优化，探查bug」）
+
+- [x] 九维并行审查上一轮原生传输改动：44 发现 → **对抗验证确认 36 / 驳回 8**
+      （详见 memory/2026-10-07-bug-hunt-native-round.md）。
+- [x] 八组修复全落位（128502f/7395c13/db54a99/7ff8eb2/81d8fb2/062d169/07976f4/a5bd52c/ab51082）：
+      状态机 8 处（同源挑战 JoinChannel、观战者 Pass、sync_epoch 复位、坏回执重试、
+      观战槽误判连接、SyncState 先校验后落账、Reset size 归一化、inflate 1MB 上限）、
+      AI 4 处（komi 对齐 7.5、AnalyzeRequest 边界校验、gomoku 坐标校验、UCT_C 清除）、
+      transport-native 任务生存期 3 处 + server_mode 补测、前端会话生命周期
+      （dispose/session_drop/StrictMode adopt-guard/失败错误态）、鸿蒙存储原子写 +
+      NAPI 票号表回收 + async work 泄漏、Tauri poll 空轮询契约、E2E 判负链路 6 处。
+- [x] 回归：cargo workspace 全绿、vitest 70/70、tsc 干净；Web 基线
+      run.js 58/58、go-capture 7/7、ai.js 9/9、noserver-pair 9/9、stress 120 手 8/8。
+- [x] 产物同步（35ffdd3）：wasm 三件套、鸿蒙 .so 双 ABI、rawfile。
+- [ ] 遗留一：**transport accept_answer 的 stale-answer 子态**——「answer 有效且已应用、
+      连接未成」时第二次 answer 在 stable 态被静默吞（rollback 在 stable 不可用；
+      正解=用会话保存的原 offer 重建 peer，或失败 surface 成 Event→Notice）。设计活。
+- [ ] 遗留二：**AI 执黑时点「重开」不接第一手**（resetBoard 后 effect 不重跑），
+      需产品层拍板是否强制重跑 AI effect。
+- [ ] 遗留三：安卓/鸿蒙模拟器实测矩阵未随本轮修复重跑（桌面壳 shell-pair 已跑）。
+
 ## 2026-09-20 大轮（用户指令「全部做完 → 大规模代码审查和修复 → 换无头前端验证一切功能皆 Rust」）
 
 - [x] 架构口径订正落地：**wasm 只是 Web 端的编译目标**。桌面/Android 经 Tauri
@@ -43,8 +64,8 @@
         即 P2P 会话与规则在安卓都走原生 Rust；`__store.backend()` 为 `tauri`。
         构建经验：`tauri android build` 与模拟器**不能同时跑**（两次都因此被系统
         在内存临界时回收），**先前台单独跑构建、再起模拟器**即可通过。
-- 遗留（本轮未动）：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死在 PUCT 改动之后，
-  注释还在描述旧算法；删它要连带重建 wasm 产物与三端壳的 dist，单独立一轮更划算。
+- [x] 遗留清账：`crates/goptop-ai/src/go.rs` 的 `UCT_C` 死常量已随 2026-10-07 轮
+  （db54a99）删除，wasm 产物与三端壳资源同步重出（35ffdd3）。
 
 ## 架构合规路线（2026-09-13 用户重申总要求：Rust 承接一切功能，TS 只做 UI）
 
