@@ -1,0 +1,40 @@
+[package]
+# goptop-agent —— 「Agent 对战」的平台无关核心（权威规格 .agents/plan/2026-10-08-agent-battle.md）。
+# Agent 玩家 = 无头会话 + 决策层：会话对(pair) / 玩家席与事件物化(player) /
+# 一切皆文件(vfs) / 工具面(tools+registry) / LLM 决策循环(agent_loop) / 上下文压缩(compact)。
+# 不含 tauri / rmcp 主干：桌面壳在 src-tauri/src/agent.rs 接壳（阶段③），
+# MCP 出口走本 crate 的 `mcp` feature（阶段④，仅桌面目标编译）。
+name = "goptop-agent"
+version = "0.1.0-alpha.0"
+edition = "2024"
+rust-version = "1.85"
+description = "GoPtop agent — an LLM player over headless P2P sessions"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "goptop_agent"
+crate-type = ["rlib"]
+
+[dependencies]
+# 会话状态机的唯一命令口（UiCommand）与唯一读口（snapshot）——协议零改动复用。
+goptop-net = { version = "0.1.0-alpha.0", path = "../goptop-net" }
+# 无头会话执行器（NativeSession / Host）。web 端内置模式（阶段⑤）把循环驱动与
+# VfsStore/HttpChannel 换成 TS 钩子时，这份依赖再按 cfg 收窄；先按桌面全量给。
+goptop-transport-native = { version = "0.1.0-alpha.0", path = "../goptop-transport-native" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+# /memory 的 native 后端（rusqlite bundled ~/.goptop/agent-memory.db）。
+# bundled：不依赖系统 libsqlite3，三平台一把编。
+rusqlite = { workspace = true }
+# LLM HTTP 通道的 native 实现（阶段②三协议适配器）。骨架期只声明依赖，
+# 代码面全部藏在 HttpChannel trait 之后（见 llm/mod.rs）。
+reqwest = { workspace = true }
+# reqwest 0.13 的 `rustls-no-provider` 不带 crypto provider，必须由使用方显式装一个。
+# 选 ring：aws-lc-rs（reqwest `rustls` feature 的默认 provider）在 Windows MSVC 上
+# 要现场编 C 源、NASM/CMake 工具链要求高；ring 0.17 已在本仓 lock 里（webrtc 链路），
+# 工具链要求零增。provider 安装是进程级一次性动作，落在 native HttpChannel 里。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# HttpChannel / Compactor 的 async trait 方法要 dyn 兼容（enum 变体里存 Arc<dyn>），
+# 用仓库既有同款方案（goptop-transport-native 亦用 async-trait）。
+async-trait = "0.1"
