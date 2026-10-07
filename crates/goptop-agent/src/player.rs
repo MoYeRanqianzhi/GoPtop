@@ -11,8 +11,8 @@
 //!   身份语义：不注册、不落盘、局散即弃。
 //!
 //! 事件物化（计划「事件物化」节，零 transport 改动）：[`EmitWatch`] 每拍快照与
-//! 上一拍 diff → 同一事件流喂两个出口：**事件队列**（[`EventQueue`]，新事件待消费）
-//! + **/game/events 全量历史文件**（append-only，seq 单调）。事件种类：history 增长
+//! 上一拍 diff → 同一事件流喂两个出口——**事件队列**（[`EventQueue`]，新事件待消费）
+//! 与 **/game/events 全量历史文件**（append-only，seq 单调）。事件种类：history 增长
 //! → move/pass（附坐标）、chatLog 增长 → chat（附全文）、confirmReq 出现/消失 →
 //! request_received/request_resolved、scoring 翻真 → scoring_started、scoreResult
 //! 出现 → score_result、winner 出现 → game_over。
@@ -615,18 +615,31 @@ fn ack_event_from_notice(text: &str) -> Option<GameEvent> {
     Some(GameEvent::RequestResolved { seq: 0, kind: kind.into(), approved })
 }
 
-/// watch → 队列的物化泵：每拍 diff 并把新事件推进队列。
+/// 事件基线：spawn 前由调用方在**本任务**同步取（[`EmitWatch::latest`] 一拍现状），
+/// 随参数传给 [`run_event_pump`]。基线取定先于泵任务起跑——晚起的泵不可能把基线
+/// 之后的事件当存量吞掉（旧实现泵内自取基线 + 调用方 sleep 屏障，是死等固定时长，
+/// 负载下泵首拍晚到必 flaky）。
 ///
-/// 独立 tokio 任务跑（调用方 `tokio::spawn`）；首拍只记基线不产事件（快照是全量的，
-/// 首拍把存量聊天/落子当事件重发一遍是噪声）。Agent 局解散 = watch 的 sender 随
+/// seq==0（还没任何一拍）回 None：首拍也只当基线（快照是全量的，首拍把存量聊天/
+/// 落子当事件重发一遍是噪声）。
+#[must_use]
+pub fn event_baseline(watch: &EmitWatch) -> Option<serde_json::Value> {
+    let (seq, text) = watch.latest();
+    (seq != 0).then(|| parse_snap(&text))
+}
+
+/// watch → 队列的物化泵：每拍 diff 并把新事件推进队列。基线经
+/// [`event_baseline`] 在 spawn 前取定后由 `prev` 传入。
+///
+/// 独立 tokio 任务跑（调用方 `tokio::spawn`）；Agent 局解散 = watch 的 sender 随
 /// [`HookHost`] drop，`changed()` 回 Err 后本函数返回、任务自然退出——**不需要也不允许
 /// 外部强杀**（强杀会把 Arc 留给别处，泄漏路径见 transport 的停机标志讨论）。
-pub async fn run_event_pump(mut watch: EmitWatch, queue: Arc<EventQueue>) {
-    // 基线取当前值：seq==0 说明还没任何一拍（空初值）→ prev 记 None，下一拍也只当
-    // 基线；否则以现状为 prev——泵启动前的存量一律不重发。diff 的 start_seq 每拍
-    // 现取（队列推进到哪就接着编哪），拍与拍之间 seq 连续无空洞。
-    let latest = watch.latest();
-    let mut prev = (latest.0 != 0).then(|| parse_snap(&latest.1));
+pub async fn run_event_pump(
+    mut watch: EmitWatch,
+    queue: Arc<EventQueue>,
+    mut prev: Option<serde_json::Value>,
+) {
+    // diff 的 start_seq 每拍现取（队列推进到哪就接着编哪），拍与拍之间 seq 连续无空洞。
     loop {
         let (_seq, text) = match watch.changed().await {
             Ok(frame) => frame,
@@ -927,9 +940,11 @@ mod tests {
     async fn 事件泵_watch每拍diff进队列_局散即退() {
         let (host, watch) = HookHost::wrap(Arc::new(HeadlessHost::default()));
         let queue = Arc::new(EventQueue::new());
-        let handle = tokio::spawn(run_event_pump(EmitWatch::new(watch.clone_rx()), queue.clone()));
-        // 让泵先取基线（此刻 seq==0 → prev=None，第一拍也只当基线）
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 基线在 spawn 前取定（此刻 seq==0 → None，第一拍也只当基线）——不需要
+        // sleep 等「泵先起」，晚起的泵也吞不掉基线之后的事件。
+        let baseline = event_baseline(&watch);
+        let handle =
+            tokio::spawn(run_event_pump(EmitWatch::new(watch.clone_rx()), queue.clone(), baseline));
         host.emit(r#"{"chatLog":[{"name":"小明","text":"你好"}]}"#);
         tokio::time::sleep(Duration::from_millis(50)).await;
         host.emit(r#"{"chatLog":[{"name":"小明","text":"你好"},{"name":"Agent","text":"请多指教"}]}"#);

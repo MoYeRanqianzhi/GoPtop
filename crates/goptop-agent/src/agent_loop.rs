@@ -28,14 +28,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::compact::{compacted_messages, estimate_tokens, Compactor, KEEP_RECENT_TOKENS, SummaryCompactor};
+use crate::compact::{compacted_messages, used_tokens, Compactor, KEEP_RECENT_TOKENS, SummaryCompactor};
 use crate::llm::{
     Block, ChatRequest, LlmClient, LlmConfig, LlmError, Msg, Role, StopReason, ToolCall, ToolSpec,
 };
 use crate::player::GameEvent;
-use crate::registry::{self, ToolCtx, ToolError};
+use crate::registry::{self, SubagentRunner, ToolCtx, ToolError};
 
 /// LLM 调用硬预算默认值（五退出条件之一；计划拍板 240——一局五子棋的思考余量
 /// 绰绰有余，同时兜住失控循环的成本上限，计划 R2）。
@@ -159,6 +160,13 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
     let mut transients: u32 = 0;
     // 超窗兜底只重试一次：ContextWindowExceeded → 强制压缩 → 同一轮重发。
     let mut emergency_compacted = false;
+    // 生效上限（计划 compact 节）：初值=用户配置；超窗错误体解析出模型实限后取
+    // min(用户上限, 模型实限)——此后触发线判定（含正常轮）都用生效上限。
+    let mut ctx_limit = u64::from(cfg.ctx_limit);
+    // 最近一次 provider usage 基线（触发线计量的主量，见 compact.rs 的
+    // used_tokens）：(prompt tokens, 请求时的 history 长度)——其后入史的消息
+    // 落回 chars/4 估算；压缩换血后基线作废（maybe_compact 重置）。
+    let mut usage_mark: Option<(u64, usize)> = None;
     // 最近一次压缩产出的摘要（增量压缩的 previousSummary 来源；压缩后历史被换血，
     // 旧摘要不能再从 history 里反查，只能随身携带）。
     let mut prev_summary: Option<String> = None;
@@ -177,12 +185,21 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
         }
 
         // compact 挂点：触发线判定 + 摘要换血（compact.rs 的参数语义在循环侧落点）。
-        if let Err(e) =
-            maybe_compact(&mut history, &llm, &cfg, &mut stats, &mut prev_summary, false).await
+        if let Err(e) = maybe_compact(
+            &mut history,
+            &llm,
+            ctx_limit,
+            &mut stats,
+            &mut prev_summary,
+            &mut usage_mark,
+            false,
+        )
+        .await
         {
             return LoopOutcome { stop: LoopStop::Fatal(e.message().to_string()), stats };
         }
 
+        let sent_len = history.len();
         let req = ChatRequest {
             system: system.clone(),
             messages: history.clone(),
@@ -193,17 +210,24 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
         let resp = match llm.chat(req).await {
             Ok(r) => {
                 transients = 0;
+                // usage 基线：prompt 侧三个字段都是模型真实读过的上下文
+                // （output 不计——它以 assistant 消息的身份重入史，由估算段接手）。
+                usage_mark = Some((
+                    r.usage.input_tokens + r.usage.cache_read_tokens + r.usage.cache_write_tokens,
+                    sent_len,
+                ));
                 r
             }
             // 退出条件 4：Fatal（连接/配置损坏）。
             Err(LlmError::Fatal(m)) => {
                 return LoopOutcome { stop: LoopStop::Fatal(m), stats };
             }
-            Err(LlmError::ContextWindowExceeded) => {
+            Err(LlmError::ContextWindowExceeded { model_limit }) => {
                 // 超窗兜底（计划 compact 节）：生效上限取 min(用户上限, 模型实限)
-                // → 强制压缩 → 重试一次 → 再失败 Fatal。模型实限未知（错误体只有
-                // 特征没有数字），强制压缩以「保留尾段=最近的合法切点」执行——
-                // 换血幅度最大且不拆工具对；同窗重试一次仍超窗就 Fatal，不空转。
+                // → 强制压缩 → 重试一次 → 再失败 Fatal。模型实限从错误体解析
+                // （llm::parse_model_limit；解析不出=None，按用户上限照旧兜底）。
+                // 强制压缩以「保留尾段=最近的合法切点」执行——换血幅度最大且不拆
+                // 工具对；同窗重试一次仍超窗就 Fatal，不空转。
                 if emergency_compacted {
                     return LoopOutcome {
                         stop: LoopStop::Fatal(
@@ -212,9 +236,20 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
                         stats,
                     };
                 }
+                if let Some(limit) = model_limit {
+                    ctx_limit = ctx_limit.min(limit);
+                }
                 emergency_compacted = true;
-                if let Err(e) =
-                    maybe_compact(&mut history, &llm, &cfg, &mut stats, &mut prev_summary, true).await
+                if let Err(e) = maybe_compact(
+                    &mut history,
+                    &llm,
+                    ctx_limit,
+                    &mut stats,
+                    &mut prev_summary,
+                    &mut usage_mark,
+                    true,
+                )
+                .await
                 {
                     return LoopOutcome { stop: LoopStop::Fatal(e.message().to_string()), stats };
                 }
@@ -278,11 +313,7 @@ limit, so its arguments may be truncated. Re-issue the tool call with complete a
                     if is_resign_submit(call) {
                         resigned = true;
                     }
-                    blocks.push(Block::ToolResult {
-                        call_id: call.id.clone(),
-                        content: v.to_string(),
-                        is_error: false,
-                    });
+                    push_tool_result(&mut blocks, call, v, llm.supports_image_result());
                 }
                 Err(ToolError::RespondToModel(m)) => blocks.push(Block::ToolResult {
                     call_id: call.id.clone(),
@@ -429,26 +460,29 @@ async fn auto_confirm_score(ctx: &ToolCtx) -> Result<Value, ToolError> {
 
 /// compact 挂点 —— 触发线判定与摘要换血（契约见 [`crate::compact`]）。
 ///
-/// 流程：`estimate_tokens(history)` 过触发线（`used > ctx_limit − RESERVE_TOKENS`）
-/// → `cut_point` 定保留尾段（绝不拆 assistant 工具调用与 tool_result 对）→
-/// `summarize`（独立一次 LLM 请求，不计入 `max_llm_calls`——压缩是维护动作不是
-/// 模型的一次思考）→ history 重排为 `[user: 摘要] + retainedTail`、计数 +1。
-/// `prev_summary` 随身携带：有旧摘要走增量更新（对手风格观察不换血）。
+/// 流程：`used_tokens(history, usage_mark)` 过触发线（`used > ctx_limit −
+/// RESERVE_TOKENS`；provider usage 为主 + 其后消息估算）→ `cut_point` 定保留尾段
+/// （绝不拆 assistant 工具调用与 tool_result 对）→ `summarize`（独立一次 LLM
+/// 请求，不计入 `max_llm_calls`——压缩是维护动作不是模型的一次思考）→ history
+/// 重排为 `[user: 摘要] + retainedTail`、计数 +1。`prev_summary` 随身携带：有旧
+/// 摘要走增量更新（对手风格观察不换血）。
 ///
 /// 非 force 且切点为 0 时放弃：切 0 =「摘要空集 + 全量保留」，多花一次摘要请求
 /// 还让上下文更长，违背压缩本意（触发线此后每轮都过，但判定本身零成本）。
 /// `force`（超窗兜底）无视收益必须真减量：保留尾段收到「最近的合法切点」
-/// （keep=1 token），结构一定变小。
+/// （keep=1 token），结构一定变小。压缩换血后 `usage_mark` 重置——旧基线的
+/// 覆盖下标对新史作废，下一轮真实响应到账后重建。
 async fn maybe_compact(
     history: &mut Vec<Msg>,
     llm: &Arc<LlmClient>,
-    cfg: &LoopConfig,
+    ctx_limit: u64,
     stats: &mut LoopStats,
     prev_summary: &mut Option<String>,
+    usage_mark: &mut Option<(u64, usize)>,
     force: bool,
 ) -> Result<(), LlmError> {
-    let compactor = SummaryCompactor { llm: Arc::clone(llm), ctx_limit: u64::from(cfg.ctx_limit) };
-    if !force && !compactor.should_compact(estimate_tokens(history)) {
+    let compactor = SummaryCompactor { llm: Arc::clone(llm), ctx_limit };
+    if !force && !compactor.should_compact(used_tokens(history, *usage_mark)) {
         return Ok(());
     }
     let cut = compactor.cut_point(history, if force { 1 } else { KEEP_RECENT_TOKENS });
@@ -458,6 +492,170 @@ async fn maybe_compact(
     let summary = compactor.summarize(history, prev_summary.as_deref()).await?;
     *history = compacted_messages(history, &summary, cut);
     *prev_summary = Some(summary);
+    *usage_mark = None;
     stats.compactions += 1;
     Ok(())
+}
+
+/// 工具回执 → 结果块（承载能力矩阵的循环侧落点，计划）：图像回执按协议能力
+/// 分派——支持视觉（Anthropic 原生 image block；Mock 同形）：文本回执剥掉
+/// base64（上下文只留元信息，PNG 体积不进 chars/4 估算），图像以 [`Block::Image`]
+/// 随行；不支持（OpenAI 两协议工具结果纯字符串）：占位文本（权威文案）。
+/// 其余回执原样成块。
+fn push_tool_result(blocks: &mut Vec<Block>, call: &ToolCall, receipt: Value, supports_images: bool) {
+    let call_id = call.id.clone();
+    match registry::image_part(&receipt) {
+        Some((mime, data)) if supports_images => {
+            let mut slim = receipt;
+            if let Some(obj) = slim.as_object_mut() {
+                obj.remove("image");
+                obj.insert("note".into(), Value::String("PNG attached as an image block".into()));
+            }
+            blocks.push(Block::ToolResult { call_id, content: slim.to_string(), is_error: false });
+            blocks.push(Block::Image { mime, data_base64: data });
+        }
+        Some(_) => blocks.push(Block::ToolResult {
+            call_id,
+            content: crate::vfs::syn_image_placeholder().to_string(),
+            is_error: false,
+        }),
+        None => {
+            blocks.push(Block::ToolResult { call_id, content: receipt.to_string(), is_error: false });
+        }
+    }
+}
+
+/* ---------------- delegate 子代理：真实的「同 LLM 独立上下文小循环」 ---------------- */
+
+/// 子代理的独立小预算默认值（计划「工具清单」delegate 行：独立小预算
+/// maxLlmCalls）。独立于父循环的 [`DEFAULT_MAX_LLM_CALLS`]——深思是额外开销，
+/// 小预算封顶；几次 read/grep 外加收束足够一次「候选点评估」。
+pub const SUBAGENT_MAX_LLM_CALLS: u32 = 12;
+
+/// 子代理单轮回复的输出预算（与主循环默认 maxOutputTokens 同量级；结论不需要长文）。
+const SUBAGENT_MAX_OUTPUT_TOKENS: u32 = 1024;
+
+/// 子代理的系统提示词：只读分析员——读得到整局文件、动不了任何东西，结论以
+/// 纯文本收束（零工具调用的那一轮即最终结论）。
+const SUBAGENT_SYSTEM: &str = "You are a read-only analysis subagent for an LLM board-game \
+player. The virtual filesystem /game/* holds the live game (read /index first if needed). \
+Investigate the given task with the `read` and `grep` tools, think, then reply with your \
+final conclusion as PLAIN TEXT — that text is delivered to the parent agent as the \
+delegate result. You cannot act: no moves, no chat, no writes, no delegation.";
+
+/// 深度 1 的执行口白名单：子循环的 LLM 工具面只有这两个（清单里没有 delegate，
+/// 结构上无从嵌套）；执行口再拦一道——模型越权点名 write/submit/delegate 等
+/// 一律**不执行**、回错误文本让它改道（不依赖模型守约）。
+const SUBAGENT_TOOLS: [&str; 2] = ["read", "grep"];
+
+/// delegate 的真实执行体（计划「工具清单」delegate 行 + 测试计划「启用后 Mock
+/// 子循环回结论、深度 1 不嵌套」）：**同 LLM**、**独立上下文**（从任务文本空史
+/// 起跑，深思不污染主上下文）、**只读工具面**（read/grep）、**深度 1 不嵌套**、
+/// **独立小预算**。装配层（AgentHub）在 `subagent_enabled` 时把本结构注入
+/// [`ToolCtx::subagent`]；未注入时 delegate 回装配缺口说明（registry）。
+pub struct SubagentLoop {
+    /// 与父代理同一个 LLM 客户端（同协议同模型——「深思」是同脑另开一间房）。
+    pub llm: Arc<LlmClient>,
+    /// 与父代理共享的工具上下文——read/grep 看同一局棋、同一 /memory。
+    pub tools: ToolCtx,
+    /// 独立小预算（LLM 调用次数；打满即以 Err 回父代理）。
+    pub max_llm_calls: u32,
+}
+
+impl SubagentLoop {
+    /// 默认预算装配。
+    #[must_use]
+    pub fn new(llm: Arc<LlmClient>, tools: ToolCtx) -> Self {
+        Self { llm, tools, max_llm_calls: SUBAGENT_MAX_LLM_CALLS }
+    }
+
+    /// 子循环的工具面：只有 read/grep 的协议定义（深度 1 的结构保证——清单里
+    /// 没有 delegate，模型连嵌套入口都看不到）。
+    fn tool_specs() -> Vec<ToolSpec> {
+        SUBAGENT_TOOLS
+            .iter()
+            .map(|&name| crate::tools::by_name(name).expect("白名单里的工具必然在册"))
+            .map(|def| ToolSpec {
+                name: def.name.to_owned(),
+                description: def.description.to_owned(),
+                input_schema: serde_json::from_str(def.input_schema)
+                    .expect("ToolDef.input_schema 是编译期常量，坏 JSON 属于骨架 bug，立即炸出"),
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl SubagentRunner for SubagentLoop {
+    async fn run(&self, task: String) -> Result<String, String> {
+        // 独立上下文：history 从任务文本起跑，与父代理的对话史零共享。
+        let mut history = vec![Msg {
+            role: Role::User,
+            content: vec![Block::Text { text: task }],
+        }];
+        let tool_specs = Self::tool_specs();
+        for _ in 0..self.max_llm_calls {
+            let req = ChatRequest {
+                system: SUBAGENT_SYSTEM.to_string(),
+                messages: history.clone(),
+                tools: tool_specs.clone(),
+                max_output_tokens: SUBAGENT_MAX_OUTPUT_TOKENS,
+            };
+            let resp = self.llm.chat(req).await.map_err(|e| e.message().to_string())?;
+            // 零工具调用 = 结论：最终文本原样回父代理。子代理没有「行动」语义
+            // （read-only），不需要主循环那套 TextOnly 提醒的续命纪律。
+            if resp.tool_calls.is_empty() {
+                return Ok(if resp.content.is_empty() {
+                    "(no conclusion text)".to_string()
+                } else {
+                    resp.content
+                });
+            }
+            let mut assistant_blocks: Vec<Block> = Vec::new();
+            if !resp.content.is_empty() {
+                assistant_blocks.push(Block::Text { text: resp.content.clone() });
+            }
+            for call in &resp.tool_calls {
+                assistant_blocks.push(Block::ToolCall { call: call.clone() });
+            }
+            history.push(Msg { role: Role::Assistant, content: assistant_blocks });
+
+            // 工具执行：白名单外拒绝执行（深度 1 的执行口），回执成对入史。
+            let mut blocks: Vec<Block> = Vec::new();
+            for call in &resp.tool_calls {
+                if !SUBAGENT_TOOLS.contains(&call.name.as_str()) {
+                    blocks.push(Block::ToolResult {
+                        call_id: call.id.clone(),
+                        content: format!(
+                            "tool \"{}\" is not available to the subagent (read/grep only — \
+                             depth 1, no actions, no nesting).",
+                            call.name
+                        ),
+                        is_error: true,
+                    });
+                    continue;
+                }
+                match registry::execute(&call.name, &call.arguments, &self.tools).await {
+                    Ok(v) => blocks.push(Block::ToolResult {
+                        call_id: call.id.clone(),
+                        content: v.to_string(),
+                        is_error: false,
+                    }),
+                    Err(ToolError::RespondToModel(m)) => blocks.push(Block::ToolResult {
+                        call_id: call.id.clone(),
+                        content: m,
+                        is_error: true,
+                    }),
+                    // 子代理视角的环境损坏按失败文本回父代理——父代理该知道原因
+                    // 并继续（registry 的 delegate 契约），不是把整局打成 Fatal。
+                    Err(ToolError::Fatal(m)) => return Err(m),
+                }
+            }
+            history.push(Msg { role: Role::User, content: blocks });
+        }
+        Err(format!(
+            "subagent budget exhausted after {max} LLM calls without a final conclusion",
+            max = self.max_llm_calls
+        ))
+    }
 }

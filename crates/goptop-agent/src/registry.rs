@@ -242,7 +242,22 @@ async fn execute_read(
         }));
     }
 
-    let content = read_full_text(path, ctx)?;
+    let resolved = vfs::resolve(path).map_err(respond)?;
+    // 图像变体（/game/board/image.png、/game/history/<n>/image.png）：二进制不进
+    // 文本读口——合成 PNG 后以 base64 附在回执的 image 字段。能力判定在消费侧：
+    // 内置循环按 [`crate::llm::LlmClient::supports_image_result`] 分派（image block
+    // 或占位文本），MCP 出口按同字段装 `type:"image"`。
+    if vfs::is_image_file(&resolved) {
+        let snap = ctx.player.snapshot();
+        let (mime, bytes) =
+            vfs::read_image(&resolved, &snap, staged_move_of(ctx)).map_err(respond)?;
+        return Ok(serde_json::json!({
+            "ok": true, "path": path,
+            "image": { "mime": mime, "data_base64": base64_of(&bytes) },
+        }));
+    }
+
+    let content = read_text_of(&resolved, ctx)?;
     let (paged, total) = page(&content, offset, limit);
     Ok(serde_json::json!({
         "ok": true, "path": path, "total_lines": total, "content": paged,
@@ -250,9 +265,8 @@ async fn execute_read(
 }
 
 /// 全文取数（read 工具的严格版：任何失败都要回模型，带恢复线索）。
-fn read_full_text(path: &str, ctx: &ToolCtx) -> Result<String, ToolError> {
-    let resolved = vfs::resolve(path).map_err(respond)?;
-    match &resolved {
+fn read_text_of(resolved: &Resolved, ctx: &ToolCtx) -> Result<String, ToolError> {
+    match resolved {
         Resolved::Index => Ok(vfs::syn_index()),
         Resolved::Memory(rel) => {
             let key = store::normalize_path(rel).map_err(respond)?;
@@ -268,9 +282,26 @@ fn read_full_text(path: &str, ctx: &ToolCtx) -> Result<String, ToolError> {
         Resolved::Game(_) => {
             let snap = ctx.player.snapshot();
             let staged = staged_move_of(ctx);
-            vfs::read_dynamic(&resolved, &snap, staged, &ctx.events).map_err(respond)
+            vfs::read_dynamic(resolved, &snap, staged, &ctx.events).map_err(respond)
         }
     }
+}
+
+/// 图像回执的取数口：read 命中图像变体时，回执带 `image{mime,data_base64}`。
+/// 内置循环按协议能力分派（支持视觉 → 文本回执剥掉 base64 + 原生 image block；
+/// 不支持 → [`crate::vfs::syn_image_placeholder`] 占位文本）；MCP 出口按同字段
+/// 装 `type:"image"`——同一份回执喂三种协议，判定只写在这一处消费侧。
+#[must_use]
+pub fn image_part(receipt: &serde_json::Value) -> Option<(String, String)> {
+    let mime = receipt["image"]["mime"].as_str()?.to_string();
+    let data = receipt["image"]["data_base64"].as_str()?.to_string();
+    Some((mime, data))
+}
+
+/// PNG 字节 → base64 文本（图像回执的线上形态；标准字母表含填充）。
+fn base64_of(data: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 /* ---------------- write ---------------- */
@@ -415,9 +446,10 @@ fn apply_edit(
     }
     let occurrences = content.matches(old).count();
     match occurrences {
-        0 => Err(format!(
+        0 => Err(
             "old_string not found in the file (0 occurrences). Read the file and copy the exact text, including whitespace."
-        )),
+                .to_string(),
+        ),
         n if n > 1 && !replace_all => Err(format!(
             "old_string matches {n} times — not unique. Add surrounding lines to make it unique, or set replace_all=true."
         )),

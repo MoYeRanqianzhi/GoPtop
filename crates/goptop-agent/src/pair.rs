@@ -10,7 +10,7 @@
 //! 结果（lobby.rs 的构造恰好实现谁邀请谁执黑），所以：
 //! - 我执黑（默认）= A' 先 `CreateInvite`，B 以其链接 Boot 入局；
 //! - 我执白 = 反向——B（无头会话）先 `CreateInvite`，A' 携 B 的链接经 Boot 创建
-//!  （`session_new` 的 url 参数就是为这条路留的）。
+//!   （`session_new` 的 url 参数就是为这条路留的）。
 //!
 //! **单局互斥的前提**：进程内 BC hub 全局无局号（bc.rs 头注自证缺口），同一时刻
 //! 只允许一个 Agent 局；拦截面（拒绝主会话开局类命令）在 src-tauri 的 AgentHub，
@@ -239,8 +239,12 @@ async fn pump_until(a: &NativePlayer, b: &NativePlayer, pred: impl Fn() -> bool,
 
 #[cfg(test)]
 mod tests {
+    // SERIAL 锁必须横跨整个用例的 await（串行化的本意）——与 loop_headless.rs /
+    // headless.rs 的既有纪律同款，不是「锁忘放」。
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
-    use crate::player::{EventQueue, GameEvent, run_event_pump};
+    use crate::player::{EventQueue, GameEvent, event_baseline, run_event_pump};
     use goptop_transport_native::HeadlessHost;
     use serde_json::{Value, json};
 
@@ -296,10 +300,15 @@ mod tests {
         );
         assert!(paired.agent_watch.latest().0 > 0, "B 的 emit 应已推 watch");
 
-        // 事件泵端到端：先起泵取基线，再把整局驱动起来
+        // 事件泵端到端：基线在 spawn 前于本任务同步取定，再把整局驱动起来——
+        // 晚起的泵也吞不掉基线之后的事件（固定 sleep 屏障是死等，负载下必 flaky）。
         let queue = Arc::new(EventQueue::new());
-        tokio::spawn(run_event_pump(EmitWatch::new(paired.agent_watch.clone_rx()), queue.clone()));
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        let baseline = event_baseline(&paired.agent_watch);
+        tokio::spawn(run_event_pump(
+            EmitWatch::new(paired.agent_watch.clone_rx()),
+            queue.clone(),
+            baseline,
+        ));
 
         // 人落子 → B 收到；事件物化出 move
         f.cmd(UiCommand::Place { x: 7, y: 7 });

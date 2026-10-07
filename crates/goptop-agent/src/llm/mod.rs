@@ -179,8 +179,10 @@ pub enum LlmError {
     /// 401/403/模型不存在/连接配置坏——循环终止进 error 态。
     Fatal(String),
     /// 错误特征 context_length_exceeded——紧急压缩（生效上限取 min(用户上限,
-    /// 模型实限)）后重试一次，再失败才 Fatal。
-    ContextWindowExceeded,
+    /// `model_limit`)）后重试一次，再失败才 Fatal。`model_limit` 是错误体里能
+    /// 解析出的模型实限（各家文案数字位置不定，解析不出= None，循环按用户上限
+    /// 照旧兜底——特征串命中即紧急压缩，数字缺失不拦路）。
+    ContextWindowExceeded { model_limit: Option<u64> },
     /// 429/5xx 退避重试 2 次后仍失败——循环里连续 3 轮 Transient → error 态。
     Transient(String),
 }
@@ -191,8 +193,8 @@ impl LlmError {
     pub fn message(&self) -> &str {
         match self {
             LlmError::Fatal(m) | LlmError::Transient(m) => m,
-            // 无载荷变体：文本只用于状态展示，措辞与 compact 路径的判定字段对齐。
-            LlmError::ContextWindowExceeded => "context window exceeded",
+            // 无载荷文本：措辞与 compact 路径的判定字段对齐。
+            LlmError::ContextWindowExceeded { .. } => "context window exceeded",
         }
     }
 }
@@ -216,23 +218,40 @@ pub trait HttpChannel: Send + Sync {
     ) -> Result<(u16, String), String>;
 }
 
-/// Mock 剧本：按序弹出预置响应。
+/// Mock 剧本的一步：预置响应，或预置错误（超窗兜底等错误路径的确定性驱动——
+/// 真适配器的超窗分类已有协议测试，循环侧的重试链用 Mock 错误步驱动）。
+#[derive(Clone, Debug)]
+pub enum MockStep {
+    /// 按序弹出的正常响应。
+    Reply(ChatResponse),
+    /// 按序弹出的错误（原样回给调用方）。
+    Error(LlmError),
+}
+
+/// Mock 剧本：按序弹出预置响应（或错误步）。
 ///
 /// 弹尽即 Fatal（`mock script exhausted`）——测试剧本少写一步是测试 bug，
 /// 静默循环会把它藏成「偶发卡死」。`Mutex` 而非 `&mut`：剧本被 enum 内持有，
 /// `chat(&self)` 的借用面要求内部可变性。
 #[derive(Default)]
 pub struct MockScript {
-    script: std::sync::Mutex<Vec<ChatResponse>>,
+    script: std::sync::Mutex<Vec<MockStep>>,
     /// 收到的请求留档（[`Self::recorded`] 取）——循环注入了什么、工具面给了什么，
     /// 测试断言的是这些原文而不是黑盒副作用。
     requests: std::sync::Mutex<Vec<ChatRequest>>,
 }
 
 impl MockScript {
+    /// 纯响应剧本（[`MockStep::Reply`] 的便捷形态；错误步走 [`Self::new_steps`]）。
     #[must_use]
     pub fn new(script: Vec<ChatResponse>) -> Self {
-        Self { script: std::sync::Mutex::new(script), requests: std::sync::Mutex::new(Vec::new()) }
+        Self::new_steps(script.into_iter().map(MockStep::Reply).collect())
+    }
+
+    /// 混合剧本（响应 + 错误步）。
+    #[must_use]
+    pub fn new_steps(steps: Vec<MockStep>) -> Self {
+        Self { script: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()) }
     }
 
     /// 剩余步数（测试断言「剧本恰好用完」用——用不尽说明循环提前退出或漏调）。
@@ -331,12 +350,13 @@ pub(crate) async fn post_with_retry(
 }
 
 /// 非重试类错误的分类（429/5xx 已在退避层消化）：
-/// 400 且错误体带超窗特征 → [`LlmError::ContextWindowExceeded`]（compact 路径入口）；
+/// 400 且错误体带超窗特征 → [`LlmError::ContextWindowExceeded`]（compact 路径入口，
+/// 带错误体里能解析出的模型实限）；
 /// 其余（含 401/403/404——key 无效、模型或路径不存在）→ [`LlmError::Fatal`]：
 /// 配置或请求形态损坏，静默重试只会烧钱不解决问题。
 pub(crate) fn classify_status(status: u16, body: &str) -> LlmError {
     if status == 400 && is_context_overflow(body) {
-        return LlmError::ContextWindowExceeded;
+        return LlmError::ContextWindowExceeded { model_limit: parse_model_limit(body) };
     }
     LlmError::Fatal(format!("HTTP {status}: {}", excerpt(body)))
 }
@@ -352,6 +372,55 @@ pub(crate) fn is_context_overflow(body: &str) -> bool {
         "maximum context length",
     ];
     MARKERS.iter().any(|m| body.contains(m))
+}
+
+/// 超窗错误体里的模型实限（计划 compact 节「生效上限取 min(用户上限, 模型实限)」
+/// 的取数口）。各家数字位置不定，按已知文案逐个锚点取：
+/// - Anthropic：`"prompt is too long: 213462 tokens > 200000 maximum"` → 200000；
+/// - OpenAI：`"This model's maximum context length is 8192 tokens"` → 8192。
+///
+/// 锚点都不在场（特征串来自其他措辞）→ None——特征命中已足够触发紧急压缩，
+/// 数字缺失只让生效上限退回用户配置值。
+pub(crate) fn parse_model_limit(body: &str) -> Option<u64> {
+    digits_after(body, " tokens > ").or_else(|| digits_after(body, "maximum context length is "))
+}
+
+/// 锚点后的第一段连续数字（找不到锚点或锚点后无数字 → None）。
+fn digits_after(body: &str, marker: &str) -> Option<u64> {
+    let rest = &body[body.find(marker)? + marker.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Anthropic 超窗文案：取 `>` 后的实限数字（不是前面的 prompt 计数）。
+    #[test]
+    fn parse_model_limit_anthropic_takes_right_side() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error",
+            "message":"prompt is too long: 213462 tokens > 200000 maximum"}}"#;
+        assert_eq!(parse_model_limit(body), Some(200_000));
+    }
+
+    /// OpenAI 超窗文案：maximum context length is N tokens；锚点缺失（只有特征串）
+    /// 回 None，数字缺失不拦紧急压缩。
+    #[test]
+    fn parse_model_limit_openai_and_missing() {
+        let body = r#"{"error":{"message":"This model's maximum context length is 8192 tokens. However, you requested 9000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+        assert_eq!(parse_model_limit(body), Some(8_192));
+        assert_eq!(parse_model_limit(r#"{"error":{"code":"context_length_exceeded"}}"#), None);
+    }
+
+    /// 特征命中即超窗；`>` 右侧的实限数字进 payload（循环取 min 用）。
+    #[test]
+    fn classify_overflow_carries_model_limit() {
+        let err = classify_status(400, "prompt is too long: 100 tokens > 50 maximum");
+        assert!(matches!(&err, LlmError::ContextWindowExceeded { model_limit: Some(50) }), "{err:?}");
+        let err = classify_status(401, "invalid x-api-key");
+        assert!(matches!(err, LlmError::Fatal(_)));
+    }
 }
 
 /// 错误体截断（进 agent_status.error 的文本；错误体可能是整页 HTML）。

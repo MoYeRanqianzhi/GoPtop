@@ -298,13 +298,18 @@ impl VfsStore for NativeStore {
 
     fn usage(&self, ns: &str) -> Result<u64, String> {
         self.with_conn(|conn| {
-            let used: i64 = conn
-                .query_row(
-                    "SELECT bytes_used FROM meta WHERE ns = ?1",
-                    rusqlite::params![ns],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
+            let used: i64 = match conn.query_row(
+                "SELECT bytes_used FROM meta WHERE ns = ?1",
+                rusqlite::params![ns],
+                |row| row.get(0),
+            ) {
+                Ok(v) => v,
+                // 无该 ns 行 = 首写前的正常空态（usage 0 语义成立）；
+                // 其余（库损坏/IO 故障）按存储层故障上抛，绝不吞成 Ok(0)——
+                // 配额前置查拿到虚假的 0 用量会放行本该拒绝的写入。
+                Err(rusqlite::Error::QueryReturnedNoRows) => 0,
+                Err(e) => return Err(sql_err(e)),
+            };
             Ok(used as u64)
         })
     }
@@ -407,6 +412,21 @@ mod tests {
             .map(|p| store.read("builtin", &p).unwrap().unwrap().len() as u64)
             .sum();
         assert_eq!(store.usage("builtin").unwrap(), sum);
+        // 未写过的 ns：空态回 Ok(0)（QueryReturnedNoRows 是正常首写前场景）。
+        assert_eq!(store.usage("mcp").unwrap(), 0);
+    }
+
+    /// 真实存储层故障必须 Err 上抛，不得吞成 Ok(0)——配额前置查拿到虚假的
+    /// 0 用量会放行本该拒绝的写入（错误不吞教规的实证钉）。
+    #[test]
+    fn usage_存储故障上抛而非吞成零() {
+        let path = temp_db();
+        let store = NativeStore::open(&path).unwrap();
+        // meta 表整个消失 = 库损坏级故障（不是「无该 ns 行」的空态）。
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE meta", []).unwrap();
+        let err = store.usage("builtin").unwrap_err();
+        assert!(err.starts_with("memory store error"), "故障要带存储层错误前缀: {err}");
     }
 
     #[test]

@@ -20,10 +20,11 @@ fn temp_db() -> std::path::PathBuf {
 }
 
 /// 搭一个工具面 ctx：会话停在 home 相位（记忆语义不依赖对局），免配对成本。
+/// 会话用装饰宿主（与 pair() 的 B 席同形）：HookHost（watch sender 唯一持有者）
+/// 随会话活在 ctx.player 里——watch 的接收端整局可 changed()。
 fn ctx() -> ToolCtx {
     let h: Arc<dyn Host> = Arc::new(HeadlessHost::default());
     let (hook, watch) = HookHost::wrap(h);
-    let _ = hook; // watch 的 sender 持有者；活到 ctx 结束即可
     ToolCtx {
         player: Arc::new(goptop_agent::player::NativePlayer::new(Arc::new(NativeSession::new(
             goptop_transport_native::SessionConfig {
@@ -33,7 +34,7 @@ fn ctx() -> ToolCtx {
                 kind: "gomoku".into(),
                 size: 15,
             },
-            Arc::new(HeadlessHost::default()),
+            hook,
             "http://localhost/p2p",
         )))),
         watch,

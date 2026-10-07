@@ -23,17 +23,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use goptop_agent::agent_loop::{LoopConfig, LoopDeps, LoopStop, run};
+use goptop_agent::agent_loop::{LoopConfig, LoopDeps, LoopStop, SubagentLoop, run};
 use goptop_agent::llm::{
-    Block, ChatRequest, ChatResponse, LlmClient, LlmConfig, MockScript, Protocol, StopReason,
-    ToolCall, Usage,
+    Block, ChatRequest, ChatResponse, LlmClient, LlmConfig, LlmError, MockScript, MockStep,
+    Protocol, StopReason, ToolCall, Usage,
 };
 use goptop_agent::pair::{PairConfig, SeatColor, pair};
 use goptop_agent::player::{EventQueue, EmitWatch, GameEvent, NativePlayer, PlayerHandle, run_event_pump};
 use goptop_agent::prompt::{PromptCfg, build_system_prompt};
-use goptop_agent::registry::{ToolCtx, ToolError, execute};
+use goptop_agent::registry::{SubagentRunner, ToolCtx, ToolError, execute};
 use goptop_agent::store::NativeStore;
-use goptop_agent::vfs::Staging;
+use goptop_agent::vfs::{InFile, Staging};
 use goptop_agent::Driver;
 use goptop_net::session::UiCommand;
 use goptop_transport_native::{HeadlessHost, Host, NativeSession};
@@ -139,13 +139,18 @@ async fn rig(kind: &str, size: u16, my_color: SeatColor) -> Rig {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });
-    // 事件物化泵：先起（取基线），再驱动对局——基线前的存量不重发是既定语义。
-    // HookHost 绑队列：协商 Ack 只出提示条不改快照（B 作为请求方被拒的唯一载体），
-    // 由 notice 拦截物化进同一队列（seq 与 diff 泵单锁统一分配）。
+    // 事件物化泵：基线在 spawn 前于本任务同步取定（event_baseline）——泵任务晚起
+    // 也吞不掉基线之后的事件（「基线前的存量不重发」由参数语义保证，不靠固定
+    // sleep 屏障死等）。HookHost 绑队列：协商 Ack 只出提示条不改快照（B 作为请求
+    // 方被拒的唯一载体），由 notice 拦截物化进同一队列（seq 与 diff 泵单锁统一分配）。
     let queue = Arc::new(EventQueue::new());
     paired.agent_hook.bind_events(&queue);
-    tokio::spawn(run_event_pump(EmitWatch::new(paired.agent_watch.clone_rx()), queue.clone()));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let baseline = goptop_agent::player::event_baseline(&paired.agent_watch);
+    tokio::spawn(run_event_pump(
+        EmitWatch::new(paired.agent_watch.clone_rx()),
+        queue.clone(),
+        baseline,
+    ));
 
     let ctx = ToolCtx {
         player: Arc::new(paired.agent),
@@ -161,10 +166,54 @@ async fn rig(kind: &str, size: u16, my_color: SeatColor) -> Rig {
     Rig { front, ctx, queue }
 }
 
-/// 起循环：Mock 剧本 + 内置装配，后台跑到五退出条件之一。
-fn spawn_loop(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str) -> (Arc<AtomicBool>, tokio::task::JoinHandle<LoopStop>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let deps = LoopDeps {
+/// 免配对的工具面台子（home 相位会话）：delegate / compact 等不依赖对局现场的
+/// 用例用——配对是昂贵夹具（ICE 等待以秒计），这些语义只需要一个能 snapshot 的席。
+/// 会话用装饰宿主（与 pair() 的 B 席同形）：HookHost（watch sender 唯一持有者）
+/// 随会话活在 ctx.player 里，watch 的接收端整局可 changed()。
+fn home_ctx() -> ToolCtx {
+    let (hook, watch) = goptop_agent::player::HookHost::wrap(host());
+    ToolCtx {
+        player: Arc::new(NativePlayer::new(Arc::new(NativeSession::new(
+            goptop_transport_native::SessionConfig {
+                name: "测试".into(),
+                server_mode: false,
+                share_origin: "http://localhost".into(),
+                kind: "gomoku".into(),
+                size: 15,
+            },
+            hook,
+            "http://localhost/p2p",
+        )))),
+        watch,
+        events: Arc::new(EventQueue::new()),
+        staging: Arc::new(Staging::new()),
+        memory: Arc::new(NativeStore::open(&temp_db()).unwrap()),
+        memory_ns: "builtin",
+        driver: Driver::Builtin,
+        subagent_enabled: false,
+        subagent: None,
+    }
+}
+
+/// ToolCtx 的共享克隆（字段全是 Arc/句柄）——子代理与父代理看同一局、同一暂存区。
+fn clone_ctx(c: &ToolCtx) -> ToolCtx {
+    ToolCtx {
+        player: Arc::clone(&c.player),
+        watch: EmitWatch::new(c.watch.clone_rx()),
+        events: Arc::clone(&c.events),
+        staging: Arc::clone(&c.staging),
+        memory: Arc::clone(&c.memory),
+        memory_ns: c.memory_ns,
+        driver: c.driver,
+        subagent_enabled: c.subagent_enabled,
+        subagent: c.subagent.clone(),
+    }
+}
+
+/// LoopDeps 装配（spawn_loop 与 compact 用例共用；compact 用例要拿 LoopOutcome
+/// 的 stats，自己 await run()）。
+fn build_deps(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str, cfg: LoopConfig) -> LoopDeps {
+    LoopDeps {
         llm: Arc::new(LlmClient::Mock(Arc::clone(&script))),
         llm_cfg: LlmConfig {
             protocol: Protocol::Anthropic,
@@ -173,9 +222,9 @@ fn spawn_loop(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str) -> (Arc<Ato
             max_output_tokens: 1024,
             reply_lang: None,
         },
-        cfg: LoopConfig::default(),
+        cfg,
         tools: ctx,
-        stop: Arc::clone(&stop),
+        stop: Arc::new(AtomicBool::new(false)),
         system: build_system_prompt(&PromptCfg {
             agent_name: "Agent".into(),
             my_color: my_color.into(),
@@ -185,7 +234,13 @@ fn spawn_loop(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str) -> (Arc<Ato
             driver: Driver::Builtin,
             subagent_enabled: false,
         }),
-    };
+    }
+}
+
+/// 起循环：Mock 剧本 + 内置装配，后台跑到五退出条件之一。
+fn spawn_loop(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str) -> (Arc<AtomicBool>, tokio::task::JoinHandle<LoopStop>) {
+    let deps = build_deps(ctx, script, my_color, LoopConfig::default());
+    let stop = Arc::clone(&deps.stop);
     let handle = tokio::spawn(async move { run(deps).await.stop });
     (stop, handle)
 }
@@ -509,7 +564,9 @@ async fn resign_循环终止两端一致() {
     // 循环剧本只有一步：write in/resign + submit → terminate（退出条件 2）。
     let script = Arc::new(MockScript::new(vec![ws("/game/in/resign", "这局我撑不住了，认输。")]));
     let (_stop, handle) = spawn_loop(rig.ctx, Arc::clone(&script), "white");
-    let outcome = tokio::time::timeout(Duration::from_secs(60), handle)
+    // 120s 与五连用例同预算：配对类用例的传播耗时随整机负载波动（并行用例多时
+    // 60s 曾被击穿），预算给足、判定仍靠退出条件本身。
+    let outcome = tokio::time::timeout(Duration::from_secs(120), handle)
         .await
         .expect("认输应收束")
         .expect("循环任务不 panic");
@@ -583,16 +640,25 @@ async fn 文件面_合成与翻页与拒绝() {
     let pretty = read("/game/board/pretty").await.expect("pretty 可读")["content"].as_str().unwrap().to_string();
     assert!(pretty.contains('┼') && pretty.contains('●') && pretty.contains('◍'), "pretty 框线+子：{pretty}");
 
-    // image.png 文本读口拒绝（占位文本逐字）。
-    let err = read("/game/board/image.png").await.unwrap_err();
-    assert_eq!(err.message(), goptop_agent::vfs::syn_image_placeholder());
+    // image.png：Mock 按协议矩阵走最富路径——read 回执带 base64 PNG（占位文案
+    // 只属于不支持视觉的协议；逐字基线见计划「格式样例」节，此处按字面锚定）。
+    let img = read("/game/board/image.png").await.expect("image 可读");
+    assert_eq!(img["ok"], json!(true));
+    assert_eq!(img["image"]["mime"], json!("image/png"));
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        img["image"]["data_base64"].as_str().expect("回执带 base64"),
+    )
+    .expect("base64 合法");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "解开即 PNG 签名");
 
     // /game/history：JSONL 行形。
     let hist = read("/game/history").await.expect("history 可读")["content"].as_str().unwrap().to_string();
     assert_eq!(hist.lines().count(), 1);
     assert_eq!(hist.trim(), r#"{"n":1,"by":"black","x":7,"y":7}"#);
 
-    // /game/history/<n> 各变体。
+    // /game/history/<n> 五变体（/index 逐字承诺 same five variants——条条路径
+    // 经 read 工具可达，不是只有 JSON 直调库函数）。
     let h1: Value = serde_json::from_str(
         read("/game/history/1").await.expect("history/1 可读")["content"].as_str().unwrap(),
     )
@@ -600,17 +666,26 @@ async fn 文件面_合成与翻页与拒绝() {
     assert_eq!(h1["stones"]["black"], json!([[7, 7]]));
     assert_eq!(h1["after_move"], json!(1));
     let h1g: Value = serde_json::from_str(
-        &goptop_agent::vfs::syn_history_n(&snap, 1, goptop_agent::vfs::HistoryVariant::Grid)
-            .expect("grid 变体"),
+        read("/game/history/1/grid").await.expect("history/1/grid 可读")["content"].as_str().unwrap(),
     )
     .expect("grid 变体是 JSON");
     assert_eq!(h1g["grid"][7][7], json!("black"));
-    let h1a = goptop_agent::vfs::syn_history_n(&snap, 1, goptop_agent::vfs::HistoryVariant::Ascii).unwrap();
-    assert!(h1a.contains('X'));
-    let h1p = goptop_agent::vfs::syn_history_n(&snap, 1, goptop_agent::vfs::HistoryVariant::Pretty).unwrap();
-    assert!(h1p.contains('●'));
+    let h1a = read("/game/history/1/ascii").await.expect("ascii 变体可读")["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(h1a.contains('X'), "{h1a}");
+    let h1p = read("/game/history/1/pretty").await.expect("pretty 变体可读")["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(h1p.contains('●'), "{h1p}");
+    let h1i = read("/game/history/1/image.png").await.expect("history 图像变体可读");
+    assert_eq!(h1i["image"]["mime"], json!("image/png"), "history/<n> 也有图像变体");
     let err = read("/game/history/5").await.unwrap_err();
     assert!(err.message().contains("out of range"), "越界 history/<n>：{err:?}");
+    let err = read("/game/history/1/jpeg").await.unwrap_err();
+    assert!(err.message().contains("unknown history variant"), "未知变体：{err:?}");
 
     // grep：history 命中指定手数；board 文件里搜得到暂存。
     let hits = act(ctx, "grep", json!({ "pattern": r#""x":7,"y":7"#, "path": "/game/history" }))
@@ -762,35 +837,12 @@ async fn go_双pass计分到score_result() {
     );
 }
 
-/* ---------------- delegate：默认关 / 开启后子循环结论回父 ---------------- */
+/* ---------------- delegate：默认关 / 真实子循环（结论回父、深度 1 不嵌套） ---------------- */
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delegate_开关与子循环结论() {
-    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+#[tokio::test]
+async fn delegate_开关与越权拦截() {
     // 免配对：delegate 的语义不依赖对局（home 相位的会话即可搭 ctx）。
-    let (hook, watch) = goptop_agent::player::HookHost::wrap(host());
-    let _ = hook; // watch 的 sender 持有者；留活到测试结束即可
-    let ctx = ToolCtx {
-        player: Arc::new(NativePlayer::new(Arc::new(NativeSession::new(
-            goptop_transport_native::SessionConfig {
-                name: "测试".into(),
-                server_mode: false,
-                share_origin: "http://localhost".into(),
-                kind: "gomoku".into(),
-                size: 15,
-            },
-            host(),
-            "http://localhost/p2p",
-        )))),
-        watch,
-        events: Arc::new(EventQueue::new()),
-        staging: Arc::new(Staging::new()),
-        memory: Arc::new(NativeStore::open(&temp_db()).unwrap()),
-        memory_ns: "builtin",
-        driver: Driver::Builtin,
-        subagent_enabled: false,
-        subagent: None,
-    };
+    let ctx = home_ctx();
 
     // 默认关：工具不在清单（tools_for 已有单测），执行口的越权拦截也要在。
     let err = act(&ctx, "delegate", json!({ "task": "想一下" })).await.unwrap_err();
@@ -803,7 +855,7 @@ async fn delegate_开关与子循环结论() {
     let err = act(&on, "delegate", json!({ "task": "想一下" })).await.unwrap_err();
     assert!(err.message().contains("no subagent runner"), "未装配 runner 的说明：{err:?}");
 
-    // 装配 Mock 子循环：结论原样回父代理。
+    // 装配 Mock runner：结论原样回父代理（registry 的 delegate 接线）。
     struct FakeSub;
     use async_trait::async_trait;
     #[async_trait]
@@ -828,6 +880,82 @@ async fn delegate_开关与子循环结论() {
     on.subagent = Some(Arc::new(FailingSub));
     let err = act(&on, "delegate", json!({ "task": "评估候选点" })).await.unwrap_err();
     assert!(matches!(err, ToolError::RespondToModel(_)), "子循环失败是业务错误：{err:?}");
+}
+
+/// 真实子循环（SubagentLoop，计划测试项「启用后 Mock 子循环回结论、深度 1 不嵌套」）：
+/// 同 LLM（Mock）、独立上下文（从任务空史起跑）、只读工具面；模型越权点名 write
+/// 被执行口拒绝且不落任何副作用——深度 1 不靠模型守约。
+#[tokio::test]
+async fn delegate_真实子循环_结论回父且深度1不嵌套() {
+    let ctx = home_ctx();
+    let sub_script = Arc::new(MockScript::new_steps(vec![
+        // 第 1 轮：模型守约，read /game/status。
+        MockStep::Reply(tool_step(vec![("read", json!({ "path": "/game/status" }))])),
+        // 第 2 轮：越权点名 write（深度 1 的执行口必须拒、绝不能执行）。
+        MockStep::Reply(tool_step(vec![(
+            "write",
+            json!({ "path": "/game/in/move", "content": "7,7" }),
+        )])),
+        // 第 3 轮：收束结论（零工具调用 = 最终文本）。
+        MockStep::Reply(pure_text("结论：黑方 row0 有三连威胁，B 点最优。")),
+    ]));
+    let subagent = Arc::new(SubagentLoop::new(
+        Arc::new(LlmClient::Mock(Arc::clone(&sub_script))),
+        clone_ctx(&ctx),
+    ));
+    let mut on = clone_ctx(&ctx);
+    on.subagent_enabled = true;
+    on.subagent = Some(subagent);
+
+    let out = act(&on, "delegate", json!({ "task": "评估候选点" })).await.expect("delegate 成功");
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["conclusion"], json!("结论：黑方 row0 有三连威胁，B 点最优。"), "子循环结论回父");
+
+    // 深度 1 的证据（子循环留档的请求原文）：三轮请求的工具面都只有 read/grep
+    // ——没有 delegate（结构上无从嵌套）、没有 write/submit。
+    let recorded = sub_script.recorded();
+    assert_eq!(recorded.len(), 3, "三步剧本恰好走完：{}", recorded.len());
+    for req in &recorded {
+        let names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read", "grep"], "子循环工具面只读：{names:?}");
+    }
+    // 独立上下文的起点：第 1 轮请求只有任务文本一条 user 消息，且带子代理系统提示词。
+    assert_eq!(recorded[0].messages.len(), 1, "从任务文本空史起跑");
+    assert!(
+        recorded[0].system.contains("read-only analysis subagent"),
+        "子代理有自己的系统提示词：{}",
+        recorded[0].system
+    );
+    // 越权 write 被拒：错误文本回填进第 3 轮请求的消息史。
+    let rejected = recorded[2]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            Block::ToolResult { content, is_error: true, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .any(|c| c.contains("not available to the subagent"));
+    assert!(rejected, "越权点名要被拒（错误文本入史）：{:?}", recorded[2].messages);
+
+    // 副作用零落地：越权 write 没有进暂存区、没有落子（同一个 Arc 共享可证）。
+    assert_eq!(ctx.staging.peek(InFile::Move), None, "越权 write 不得入暂存区");
+    assert_eq!(ctx.player.snapshot()["moveCount"], json!(0), "越权 write 不得落子");
+}
+
+/// 独立小预算：打满即以 Err 回父代理（不占父循环预算，也不静默续跑）。
+#[tokio::test]
+async fn delegate_子代理预算打满回错() {
+    let ctx = home_ctx();
+    let sub_script = Arc::new(MockScript::new(vec![
+        tool_step(vec![("read", json!({ "path": "/game/status" }))]),
+        tool_step(vec![("grep", json!({ "pattern": "to_move", "path": "/game/status" }))]),
+    ]));
+    let mut runner = SubagentLoop::new(Arc::new(LlmClient::Mock(Arc::clone(&sub_script))), clone_ctx(&ctx));
+    runner.max_llm_calls = 1; // 独立预算压到 1：第一轮工具调用后必须收手
+    let err = runner.run("深思".into()).await.unwrap_err();
+    assert!(err.contains("budget exhausted"), "{err}");
+    assert_eq!(sub_script.recorded().len(), 1, "预算=1 次调用后不得再调 LLM");
 }
 
 /* ---------------- 纯文字轮不终止 ---------------- */
@@ -923,4 +1051,113 @@ async fn 事件自动推送_无需查询工具() {
     );
     // 会话未停（Stopped ≠ 局散）。
     assert_eq!(agent.snapshot()["phase"], json!("playing"));
+}
+
+/* ---------------- compact：循环侧接线与超窗兜底 ---------------- */
+
+/// compact 挂点在循环里的接线（计划测试项「usage 计量」的循环形）：provider
+/// usage 为主 + 其后消息估算的触发线在**循环内**真实触发压缩——第 3 步上报
+/// input_tokens=50_000（纯 chars/4 估算的旧计量在这里只有 ≈30k，够不到触发线
+/// 43616）。home 相位会话没有可 resign 的活局，循环以 max_llm_calls 预算收束。
+/// 摘要请求是独立一次 LLM 调用、不带工具面；压缩后的请求以
+/// <compaction-summary> 摘要消息开头。
+#[tokio::test]
+async fn compact_循环接线_usage触发与摘要换血() {
+    let ctx = home_ctx();
+    let big = "x".repeat(120_000); // ≈30k tokens：把可切空间撑过 KEEP_RECENT(20k)
+    let script = Arc::new(MockScript::new(vec![
+        pure_text("我在想。"),
+        ws("/game/in/chat", "先打个招呼。"),
+        ChatResponse {
+            content: big,
+            tool_calls: vec![],
+            stop: StopReason::EndTurn,
+            usage: Usage { input_tokens: 50_000, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 },
+        },
+        pure_text("## Game state\n(gomoku 15x15, 对局摘要)"), // summarize 的独立请求
+        pure_text("压缩换血后我接着看局面。"), // 压缩后的第一轮（预算内最后一轮）
+    ]));
+    // ctx_limit=60_000 → 触发线 43616 < usage 50000：压缩发生本身即「provider
+    // usage 参与判定」的直接证据；max_llm_calls=4 只数主循环调用（摘要不计）。
+    let deps = build_deps(
+        ctx,
+        Arc::clone(&script),
+        "white",
+        LoopConfig { max_llm_calls: 4, ctx_limit: 60_000 },
+    );
+    let outcome = tokio::time::timeout(Duration::from_secs(60), run(deps))
+        .await
+        .expect("循环应收束");
+    assert!(matches!(outcome.stop, LoopStop::BudgetExhausted), "{outcome:?}");
+    assert_eq!(outcome.stats.compactions, 1, "usage 触发线应真实触发一次压缩：{outcome:?}");
+
+    // 请求序：0/1/2 正常轮 → 3 摘要请求（1 条消息、无工具）→ 4 压缩后的第一轮。
+    let recorded = script.recorded();
+    assert_eq!(recorded.len(), 5, "四主调用+一次摘要：{}", recorded.len());
+    let summary_req = &recorded[3];
+    assert_eq!(summary_req.messages.len(), 1, "摘要请求只有一条 user 消息");
+    assert!(summary_req.tools.is_empty(), "摘要模型不得携带工具面");
+    let convo = last_user_text(summary_req);
+    assert!(convo.contains("<conversation>") && convo.contains("conversation to summarize"), "{convo}");
+    // 压缩换血：压缩前 5 条 → 压缩后 6 条（摘要消息替换了前 2 条 + 大行史仍在尾段）。
+    assert_eq!(recorded[2].messages.len(), 5, "压缩前的正常轮");
+    let after = &recorded[4];
+    assert_eq!(after.messages.len(), 6, "压缩后：摘要 + 保留尾段");
+    let head = match &after.messages[0].content[0] {
+        Block::Text { text } => text,
+        other => panic!("首条应是文本块，got {other:?}"),
+    };
+    assert!(head.contains("<compaction-summary>"), "压缩后结构以摘要消息开头：{head}");
+}
+
+/// 超窗兜底链（计划 compact 节）：ContextWindowExceeded → 强制压缩（摘要请求）
+/// → 同轮重试一次（压缩后的请求以摘要消息开头）→ 预算内收束；错误体解析出的
+/// 模型实限生效（生效上限 = min(用户上限, 模型实限)，50_000 < 176_000）。
+#[tokio::test]
+async fn compact_超窗兜底_强制压缩后同轮重试() {
+    let ctx = home_ctx();
+    let script = Arc::new(MockScript::new_steps(vec![
+        MockStep::Error(LlmError::ContextWindowExceeded { model_limit: Some(50_000) }),
+        MockStep::Reply(pure_text("## Game state\n(紧急压缩摘要)")), // summarize
+        MockStep::Reply(pure_text("压缩后这轮我重新读局面。")), // 重试轮
+    ]));
+    let deps = build_deps(ctx, Arc::clone(&script), "white", LoopConfig { max_llm_calls: 2, ..LoopConfig::default() });
+    let outcome = tokio::time::timeout(Duration::from_secs(60), run(deps))
+        .await
+        .expect("循环应收束");
+    assert!(matches!(outcome.stop, LoopStop::BudgetExhausted), "压缩后重试应走到正常轮：{outcome:?}");
+    assert_eq!(outcome.stats.compactions, 1, "超窗兜底的强制压缩");
+
+    // 请求序：0 初次请求（超窗）→ 1 摘要请求 → 2 重试轮（以摘要消息开头）。
+    let recorded = script.recorded();
+    assert_eq!(recorded.len(), 3, "初次+摘要+重试：{}", recorded.len());
+    assert_eq!(recorded[1].messages.len(), 1, "摘要请求单消息");
+    let head = match &recorded[2].messages[0].content[0] {
+        Block::Text { text } => text,
+        other => panic!("重试轮首条应是摘要消息，got {other:?}"),
+    };
+    assert!(head.contains("<compaction-summary>"), "强制压缩已换血：{head}");
+}
+
+/// 重试一次仍超窗 → Fatal（兜底链的终点，不空转烧钱）。
+#[tokio::test]
+async fn compact_超窗兜底_再失败fatal() {
+    let ctx = home_ctx();
+    let script = Arc::new(MockScript::new_steps(vec![
+        MockStep::Error(LlmError::ContextWindowExceeded { model_limit: None }),
+        MockStep::Reply(pure_text("(紧急压缩摘要)")),
+        MockStep::Error(LlmError::ContextWindowExceeded { model_limit: None }),
+    ]));
+    let deps = build_deps(ctx, Arc::clone(&script), "white", LoopConfig::default());
+    let outcome = tokio::time::timeout(Duration::from_secs(60), run(deps))
+        .await
+        .expect("循环应收束");
+    match outcome.stop {
+        LoopStop::Fatal(m) => {
+            assert_eq!(m, "context window exceeded even after emergency compaction");
+        }
+        other => panic!("二次超窗应 Fatal：{other:?}"),
+    }
+    // 三次调用：初次、摘要、重试——再失败即收，没有第四次。
+    assert_eq!(script.recorded().len(), 3);
 }

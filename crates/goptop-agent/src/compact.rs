@@ -8,7 +8,9 @@
 //!   pi compaction.ts:151）。
 //!
 //! 计量：**provider usage 为主**（三协议 usage 已归一，[`crate::llm::Usage`]）+
-//! 其后消息 chars/4 估算（[`estimate_tokens`]）——粗估只喂触发线判断，误差无害。
+//! 其后消息 chars/4 估算（[`used_tokens`]——循环在每轮请求后记录 usage 基线，
+//! 基线之后入史的消息才落回估算；首请求前全量估算兜底）。粗估只喂触发线判断，
+//! 误差无害。
 //!
 //! 切点纪律：**只在 user 消息处切，绝不拆 assistant 工具调用与 tool_result 对**——
 //! 拆开的对回给协议就是坏请求（Anthropic 的 tool_use 无配对 tool_result 直接 4xx）。
@@ -66,6 +68,24 @@ fn estimate_msg_tokens(msg: &Msg) -> u64 {
 #[must_use]
 pub fn estimate_tokens(messages: &[Msg]) -> u64 {
     messages.iter().map(estimate_msg_tokens).sum()
+}
+
+/// 触发线计量：**provider usage 为主 + 其后消息估算**（计划 compact 节逐字）。
+///
+/// `usage_mark = (base, covered)`：最近一次响应上报的 prompt tokens（input +
+/// cache_read + cache_write——三者都是模型真实读过的上下文）覆盖到 history 前
+/// `covered` 条；其后再入史的消息（assistant 回复、工具回执、事件注入）没有
+/// provider 计量，按 chars/4 估算接在 base 之后。无 usage 可用（首请求前的
+/// 判定，或压缩换血后旧基线作废）→ 全量估算兜底；`covered` 超过现有长度
+/// （理论上只在换血后出现，防御）→ 同样退回全量估算。
+#[must_use]
+pub fn used_tokens(messages: &[Msg], usage_mark: Option<(u64, usize)>) -> u64 {
+    match usage_mark {
+        Some((base, covered)) if covered <= messages.len() => {
+            base.saturating_add(estimate_tokens(&messages[covered..]))
+        }
+        _ => estimate_tokens(messages),
+    }
 }
 
 /// 切点候选是否合法：user 消息**且不携带工具结果**。统一消息形态沿 Anthropic 语义
@@ -488,6 +508,27 @@ mod tests {
 
         let small = SummaryCompactor { llm: mock_client(), ctx_limit: 8_192 };
         assert!(small.should_compact(1), "8k 上限 < RESERVE：差值饱和为 0，恒判压缩");
+    }
+
+    /// 触发线计量（计划测试项「usage 计量」的混合形）：provider usage 为主，
+    /// 其后消息 chars/4 接账；无 usage / 基线越界退回全量估算。
+    #[test]
+    fn used_tokens_usage_first_then_estimate() {
+        // 已覆盖 2 条（provider 报了 1000），其后一条 40 chars 文本 → 1000 + 10。
+        let msgs = [
+            text_msg(Role::User, "covered by usage"),
+            text_msg(Role::Assistant, "covered too"),
+            text_msg(Role::User, &"x".repeat(40)),
+        ];
+        assert_eq!(used_tokens(&msgs, Some((1_000, 2))), 1_010, "usage 为主 + 其后估算");
+
+        // usage 为 0 也照用（某些端点 usage 缺省 0 是合法基线，不是「无 usage」）。
+        assert_eq!(used_tokens(&msgs, Some((0, 3))), 0, "覆盖到末尾 = 其后无消息可估");
+
+        // 无 usage（首请求前 / 压缩换血后基线作废）→ 全量估算。
+        assert_eq!(used_tokens(&msgs, None), estimate_tokens(&msgs));
+        // 基线越界（换血后旧 covered 比新史还长）→ 同样退回全量估算。
+        assert_eq!(used_tokens(&msgs, Some((1_000, 99))), estimate_tokens(&msgs));
     }
 
     /// 测试用客户端桩：本文件的测试只走纯函数路径（cut_point/请求装配/结构装配），

@@ -359,6 +359,9 @@ mod tests {
 
         let overflow = Stub::start(vec![(400, r#"{"error":{"message":"This model's maximum context length is 8192 tokens","code":"context_length_exceeded"}}"#.to_string())]);
         let err = client(overflow.base_url.clone()).await.chat(sample_request()).await.expect_err("超窗应 ContextWindowExceeded");
-        assert!(matches!(err, LlmError::ContextWindowExceeded), "实际：{err:?}");
+        assert!(
+            matches!(&err, LlmError::ContextWindowExceeded { model_limit: Some(8_192) }),
+            "错误体里的模型实限要被解析出：{err:?}"
+        );
     }
 }

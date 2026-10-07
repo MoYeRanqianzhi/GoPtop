@@ -341,7 +341,10 @@ mod tests {
 
         let overflow = Stub::start(vec![(400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213462 tokens > 200000 maximum"}}"#.to_string())]);
         let err = client(overflow.base_url.clone()).await.chat(sample_request()).await.expect_err("超窗应 ContextWindowExceeded");
-        assert!(matches!(err, LlmError::ContextWindowExceeded), "实际：{err:?}");
+        assert!(
+            matches!(&err, LlmError::ContextWindowExceeded { model_limit: Some(200_000) }),
+            "超窗错误要带上错误体里的模型实限：{err:?}"
+        );
     }
 
     /// 429/5xx 退避 2 次后仍失败 → Transient；期间恢复 → 成功。

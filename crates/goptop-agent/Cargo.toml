@@ -45,3 +45,6 @@ async-trait = "0.1"
 # png 0.17 已在 lock 里（tauri-codegen 链路的传递依赖），按「不添依赖是纪律」的
 # 同款取舍（registry 的 mini_regex 先例）直接挂已锁定的 png，零新增 lock 条目。
 png = "0.17"
+# 图像回执的 base64（承载能力矩阵：Anthropic tool_result 原生 image block）。
+# base64 0.22 已在 lock 里（reqwest/rustls 链路的传递依赖），同款取舍零新增条目。
+base64 = "0.22"

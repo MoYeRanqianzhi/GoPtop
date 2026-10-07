@@ -1,8 +1,9 @@
 //! Mock 剧本桩 —— 无头测试与无 key 演示的确定性「模型」。
 //!
-//! 语义极简：按序弹出预置 [`ChatResponse`]，请求内容一概不读（剧本在测试里写死，
-//! 断言的是循环消费剧本的次序，不是模型对提示词的理解）。弹尽即
-//! [`LlmError::Fatal`]：剧本少写一步是测试 bug，静默会让它伪装成「偶发卡死」。
+//! 语义极简：按序弹出预置 [`ChatResponse`]（或预置 [`LlmError`]——超窗兜底等
+//! 错误路径的确定性驱动），请求内容一概不读（剧本在测试里写死，断言的是循环
+//! 消费剧本的次序，不是模型对提示词的理解）。弹尽即 [`LlmError::Fatal`]：
+//! 剧本少写一步是测试 bug，静默会让它伪装成「偶发卡死」。
 
 use super::{ChatRequest, ChatResponse, LlmError, MockScript};
 
@@ -18,7 +19,10 @@ pub(crate) async fn chat(script: &MockScript, req: ChatRequest) -> Result<ChatRe
     if guard.is_empty() {
         return Err(LlmError::Fatal("mock script exhausted".to_string()));
     }
-    Ok(guard.remove(0))
+    match guard.remove(0) {
+        super::MockStep::Reply(r) => Ok(r),
+        super::MockStep::Error(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

@@ -359,7 +359,10 @@ mod tests {
 
         let overflow = Stub::start(vec![(400, r#"{"error":{"code":"context_length_exceeded","message":"Requested token count exceeds the context window"}}"#.to_string())]);
         let err = client(overflow.base_url.clone()).await.chat(sample_request()).await.expect_err("超窗应 ContextWindowExceeded");
-        assert!(matches!(err, LlmError::ContextWindowExceeded), "实际：{err:?}");
+        assert!(
+            matches!(&err, LlmError::ContextWindowExceeded { model_limit: None }),
+            "该文案解析不出实限数字 → None（特征命中已足够触发紧急压缩）：{err:?}"
+        );
 
         let failed = Stub::start(vec![(200, r#"{"status":"failed","error":{"code":"server_error","message":"generation failed"}}"#.to_string())]);
         let err = client(failed.base_url.clone()).await.chat(sample_request()).await.expect_err("status=failed 应 Transient");

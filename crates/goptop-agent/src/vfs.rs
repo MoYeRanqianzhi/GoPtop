@@ -111,25 +111,50 @@ pub enum GameFile {
     Rules,
     /// `/game/history` JSONL 落子历史（`{"n":1,"by":"black","x":7,"y":7}`，pass 记 `"pass":true`）。
     History,
-    /// `/game/history/<n>` 第 n 手后的局面（与 board 同款五变体）。
-    HistoryN(u32),
+    /// `/game/history/<n>` 第 n 手后的局面（与 board 同款五变体，变体走路径后缀：
+    /// `/game/history/<n>/grid|ascii|pretty|image.png`，缺省=JSON）。
+    HistoryN(u32, HistoryVariant),
     /// `/game/chat` 聊天记录全文（散文逐行，含自己发的）。
     Chat,
     /// `/game/events` 全量事件历史 JSONL（seq 单调；与事件队列同源两出口）。
     Events,
 }
 
-/// `/game/history/<n>` 的文本变体（PNG 走 [`syn_board_png`]，不混进文本合成器）。
+/// `/game/history/<n>` 的变体（与 board 同款五变体——计划 `/index` 基线逐字承诺
+/// "same five variants"，路径后缀即变体名，缺省 = JSON）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistoryVariant {
     /// 稀疏 JSON（同 [`GameFile::Board`] 形态，stones 为该手数时的局面）。
     Json,
-    /// 全量 grid JSON。
+    /// 全量 grid JSON（`/game/history/<n>/grid`）。
     Grid,
-    /// ASCII。
+    /// ASCII（`/game/history/<n>/ascii`）。
     Ascii,
-    /// 制表符 pretty。
+    /// 制表符 pretty（`/game/history/<n>/pretty`）。
     Pretty,
+    /// PNG 栅格（`/game/history/<n>/image.png`；二进制不进文本读口，走
+    /// [`read_image`]——承载能力矩阵与 board 的 image.png 同一条）。
+    Png,
+}
+
+impl HistoryVariant {
+    /// 路径后缀 → 变体（`grid`/`ascii`/`pretty`/`image.png`；其余回 Err——
+    /// 错误文案列全合法后缀，模型照它改写即可）。
+    ///
+    /// # Errors
+    /// 后缀不是四个合法变体名之一。
+    pub fn from_suffix(s: &str) -> Result<Self, String> {
+        match s {
+            "grid" => Ok(Self::Grid),
+            "ascii" => Ok(Self::Ascii),
+            "pretty" => Ok(Self::Pretty),
+            "image.png" => Ok(Self::Png),
+            _ => Err(format!(
+                "unknown history variant {s:?}. Variants after /game/history/<n>: \
+                 /grid, /ascii, /pretty, /image.png (bare /game/history/<n> = JSON)."
+            )),
+        }
+    }
 }
 
 /// 路径解析结果：一个路径到底落到哪棵子树的哪个文件。
@@ -191,9 +216,18 @@ pub fn resolve(path: &str) -> Result<Resolved, String> {
             "chat" => GameFile::Chat,
             "events" => GameFile::Events,
             _ => {
-                if let Some(n) = rest.strip_prefix("history/") {
-                    let n: u32 = n.parse().map_err(|_| {
-                        format!("invalid history move number {n:?} in {path}. Use /game/history/<n> with n from 1 to the current move count (read /game/status), or plain /game/history for the list.")
+                if let Some(rest_n) = rest.strip_prefix("history/") {
+                    // `history/<n>`（缺省 JSON）或 `history/<n>/<variant>`——/index 与
+                    // 工具描述承诺的五变体必须条条路径可达，变体名非法在此拒。
+                    let (n_str, variant) = match rest_n.split_once('/') {
+                        None => (rest_n, HistoryVariant::Json),
+                        Some((n, suffix)) => (
+                            n,
+                            HistoryVariant::from_suffix(suffix).map_err(|e| format!("{e} (in {path})"))?,
+                        ),
+                    };
+                    let n: u32 = n_str.parse().map_err(|_| {
+                        format!("invalid history move number {n_str:?} in {path}. Use /game/history/<n> with n from 1 to the current move count (read /game/status), or plain /game/history for the list.")
                     })?;
                     if n == 0 {
                         return Err(
@@ -201,7 +235,7 @@ pub fn resolve(path: &str) -> Result<Resolved, String> {
                                 .to_string(),
                         );
                     }
-                    GameFile::HistoryN(n)
+                    GameFile::HistoryN(n, variant)
                 } else {
                     return Err(unknown_path(path));
                 }
@@ -319,14 +353,18 @@ pub fn syn_status(snap: &serde_json::Value, staged: Option<StagedMove>) -> Strin
 pub fn syn_board(snap: &serde_json::Value, staged: Option<StagedMove>) -> String {
     let grid = grid_of(snap, staged);
     let (blacks, whites) = stones_of(&grid);
-    // last_move 的 by 按手序反推（快照 lastMove 只有坐标）。
-    let last_move = match snap["lastMove"].as_object() {
-        Some(c) => {
-            let by = color_of_ply(snap["moveCount"].as_u64().unwrap_or(0) as usize);
-            serde_json::json!({ "by": by, "x": c["x"], "y": c["y"] }).to_string()
-        }
-        None => "null".to_string(),
-    };
+    // last_move 与快照 lastMove 同语义（最后一颗**落子**：向前找最近坐标，见
+    // goptop-net session/mod.rs 的 lastMove 组装）。by 不按总手数反推——moveCount
+    // 含 pass（围棋黑落→白落→黑停一手收尾时 moveCount=3），序数反推会把白子标成
+    // 黑方所落；改按「该落子自己的序数」反推，坐标与行棋方同源一致。
+    let last_move = snap["history"]
+        .as_array()
+        .and_then(|h| h.iter().enumerate().rev().find(|(_, e)| !e.is_string()))
+        .map(|(i, e)| {
+            let by = color_of_ply(i + 1);
+            serde_json::json!({ "by": by, "x": e["x"], "y": e["y"] }).to_string()
+        })
+        .unwrap_or_else(|| "null".to_string());
     let staged_move = match staged {
         Some(c) => serde_json::json!({ "x": c.x, "y": c.y }).to_string(),
         None => "null".to_string(),
@@ -455,10 +493,14 @@ fn pretty_of(grid: &[Vec<String>]) -> String {
 ///
 /// **承载能力矩阵**（计划）：Anthropic tool_result 原生 image block 可；
 /// MCP `CallToolResult type:"image"` 可；OpenAI 两协议工具结果纯字符串不可
-/// → 占位符文本（由 registry 按协议能力回，见 [`syn_image_placeholder`]）。
+/// → 占位符文本（由循环按协议能力分派，见 [`syn_image_placeholder`]）。
 #[must_use]
 pub fn syn_board_png(snap: &serde_json::Value, staged: Option<StagedMove>) -> Vec<u8> {
-    let grid = grid_of(snap, staged);
+    png_of_grid(&grid_of(snap, staged))
+}
+
+/// PNG 渲染本体（board 与 history/<n> 共用）：格矩阵 → PNG 字节。
+fn png_of_grid(grid: &[Vec<String>]) -> Vec<u8> {
     let n = grid.len() as u32;
     if n == 0 {
         return Vec::new();
@@ -607,14 +649,13 @@ pub fn syn_history(snap: &serde_json::Value) -> String {
     out
 }
 
-/// `/game/history/<n>`：第 n 手后的局面，变体与 board 同款。
-///
-/// 实现路数：重放 history 前 n 手到空盘（围棋提子/禁着经规则引擎，不能手搓棋盘
-/// 数组——提子后的盘面手搓必错），再按变体渲染。n 越界（0 或 > 总手数）回 Err。
+/// `/game/history/<n>` 的局面重放：history 前 n 手过真规则引擎到空盘（围棋提子/
+/// 禁着经核心层判定，不能手搓棋盘数组——提子后的盘面手搓必错），产出格矩阵。
+/// n 越界（0 或 > 总手数）回 Err。
 ///
 /// # Errors
-/// n 非法（越界/为 0）；棋种与 history 不匹配（理论不可达，防御到错误文案）。
-pub fn syn_history_n(snap: &serde_json::Value, n: u32, variant: HistoryVariant) -> Result<String, String> {
+/// n 非法（越界/为 0）；快照无 history（非活局）。
+fn history_grid(snap: &serde_json::Value, n: u32) -> Result<Vec<Vec<String>>, String> {
     let history = snap["history"].as_array().ok_or_else(|| {
         format!("no game history in the current snapshot — /game/history/{n} needs a live game.")
     })?;
@@ -625,9 +666,8 @@ pub fn syn_history_n(snap: &serde_json::Value, n: u32, variant: HistoryVariant) 
             history.len().max(1)
         ));
     }
-    // 重放走真规则引擎：围棋的提子/劫禁着由核心层判定，手搓数组在提子局面必错
-    //（合成器骨架注释钉死的实现路数）。kind+size 经 make_engine_kind 与会话同一
-    // 条守卫（非法组合回退默认，与真人主页选棋种同款）。
+    // 重放走真规则引擎：kind+size 经 make_engine_kind 与会话同一条守卫（非法组合
+    // 回退默认，与真人主页选棋种同款）。
     let kind_str = snap["kind"].as_str().unwrap_or("gomoku");
     let size = snap["size"].as_u64().unwrap_or(15) as u16;
     let mut engine = goptop_core::game::GameState::new(goptop_net::session::make_engine_kind(kind_str, size));
@@ -662,12 +702,24 @@ pub fn syn_history_n(snap: &serde_json::Value, n: u32, variant: HistoryVariant) 
     if !engine_ok {
         grid.clear();
     }
+    Ok(grid)
+}
+
+/// `/game/history/<n>`：第 n 手后的局面，文本变体（Json/Grid/Ascii/Pretty）。
+/// PNG 是二进制、不进文本读口——走 [`syn_history_png`]（registry 的 read 在
+/// 文本读口之前分流图像变体）。
+///
+/// # Errors
+/// n 非法（越界/为 0，透传自 [`history_grid`]）；PNG 变体误入（指向图像读口）。
+pub fn syn_history_n(snap: &serde_json::Value, n: u32, variant: HistoryVariant) -> Result<String, String> {
+    let grid = history_grid(snap, n)?;
     // 局面子视图借用会话级快照的 kind/size（JSON 头字段与 board 同款）。
     let head = serde_json::json!({ "kind": snap["kind"], "size": snap["size"] });
     match variant {
         HistoryVariant::Json => {
             let (blacks, whites) = stones_of(&grid);
-            let last = history[n as usize - 1].clone();
+            // 第 n 手的落子条目（快照 history 的第 n-1 项；越界已在 history_grid 拒）。
+            let last = snap["history"][n as usize - 1].clone();
             let last_move = if last.is_string() {
                 serde_json::json!({ "by": color_of_ply(n as usize), "pass": true }).to_string()
             } else {
@@ -687,7 +739,21 @@ pub fn syn_history_n(snap: &serde_json::Value, n: u32, variant: HistoryVariant) 
         )),
         HistoryVariant::Ascii => Ok(ascii_of(&head, &grid)),
         HistoryVariant::Pretty => Ok(pretty_of(&grid)),
+        // PNG 是二进制：文本读口给不出——指向同路径的图像读口与文本替代品。
+        HistoryVariant::Png => Err(format!(
+            "/game/history/{n}/image.png is a binary PNG — capable protocols receive it as an \
+             image block; read /game/history/{n}/ascii for the text rendering."
+        )),
     }
+}
+
+/// `/game/history/<n>/image.png`：第 n 手后局面的 PNG 栅格（与 board 的图像变体
+/// 同一渲染本体 [`png_of_grid`]）。
+///
+/// # Errors
+/// n 非法（透传自 [`history_grid`]）。
+pub fn syn_history_png(snap: &serde_json::Value, n: u32) -> Result<Vec<u8>, String> {
+    history_grid(snap, n).map(|g| png_of_grid(&g))
 }
 
 /// `/game/chat`：聊天记录散文逐行（`名字: 文本`；含自己发的）。
@@ -741,14 +807,15 @@ Persistent memory (survives across games):
     .to_string()
 }
 
-/// 动态文件的统一读口：按解析结果分派到合成器。
+/// 动态文件的统一读口：按解析结果分派到合成器（**文本变体**）。
 ///
 /// 只吃 `/game` 的合成文件——in/ 暂存槽在 registry 的 read/grep 里先行分流
 /// （read 回显暂存内容/空槽职责说明），到不了这里：`resolve` 对槽路径本就不产
 /// [`Resolved`]（骨架的「in/ 也走这里」契约与 Resolved 无槽变体自相矛盾，集成期
 /// 把矛盾收敛到 registry 一侧——暂存读取只有「回显原文」一种形态，两处实现反而
-/// 会漂移）。`/game/board/image.png` 在文本读口拒绝，回 [`syn_image_placeholder`]
-/// ——图像只经协议适配器走 [`syn_board_png`]。
+/// 会漂移）。图像变体（board/image.png、history/<n>/image.png）是二进制，由
+/// registry 的 read 在本函数之前分流走 [`read_image`]；文本读口若仍收到图像
+/// 变体（grep 已跳过、直接调用才会发生），回占位文本指向 ascii。
 ///
 /// # Errors
 /// HistoryN 越界（[`syn_history_n`] 透传）；未知路径（[`resolve`] 透传）。
@@ -771,10 +838,41 @@ pub fn read_dynamic(
         GameFile::BoardImage => return Err(syn_image_placeholder().to_string()),
         GameFile::Rules => syn_rules(snap),
         GameFile::History => syn_history(snap),
-        GameFile::HistoryN(n) => syn_history_n(snap, *n, HistoryVariant::Json)?,
+        GameFile::HistoryN(n, variant) => syn_history_n(snap, *n, *variant)?,
         GameFile::Chat => syn_chat(snap),
         GameFile::Events => syn_events(queue),
     })
+}
+
+/// 解析结果是否为图像变体（二进制，registry 的 read 必须在文本读口之前分流）。
+#[must_use]
+pub fn is_image_file(r: &Resolved) -> bool {
+    matches!(
+        r,
+        Resolved::Game(GameFile::BoardImage)
+            | Resolved::Game(GameFile::HistoryN(_, HistoryVariant::Png))
+    )
+}
+
+/// 图像变体的合成读口：回 `(mime, PNG 字节)`。非图像路径回 Err（调用方先经
+/// [`is_image_file`] 分流，此处 Err 只护误用）。
+///
+/// # Errors
+/// HistoryN 越界（[`syn_history_png`] 透传）；非图像路径。
+pub fn read_image(
+    r: &Resolved,
+    snap: &serde_json::Value,
+    staged: Option<StagedMove>,
+) -> Result<(String, Vec<u8>), String> {
+    match r {
+        Resolved::Game(GameFile::BoardImage) => {
+            Ok(("image/png".to_string(), syn_board_png(snap, staged)))
+        }
+        Resolved::Game(GameFile::HistoryN(n, HistoryVariant::Png)) => {
+            syn_history_png(snap, *n).map(|b| ("image/png".to_string(), b))
+        }
+        _ => Err("not an image file — read_image only serves image variants.".into()),
+    }
 }
 
 /* ---------------- in/ 暂存区与 submit 分发 ---------------- */
@@ -1131,4 +1229,97 @@ fn check_my_turn(snap: &serde_json::Value) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 围棋快照：kind=go size=9、board 全空、moveCount 按 history 现算
+    ///（last_move 的断言只关心 history 推色，盘面字段给到合成器不炸即可）。
+    fn go_snap(history: serde_json::Value) -> serde_json::Value {
+        let row: Vec<serde_json::Value> = (0..9).map(|_| json!("empty")).collect();
+        let board: Vec<Vec<serde_json::Value>> = (0..9).map(|_| row.clone()).collect();
+        json!({
+            "kind": "go", "size": 9, "myColor": "white", "toMove": "black",
+            "moveCount": history.as_array().map_or(0, |h| h.len()),
+            "winner": null, "history": history, "board": board, "chatLog": [],
+        })
+    }
+
+    /// /game/board 的 last_move：坐标与行棋方同源于「最后一颗落子」（快照
+    /// lastMove 的既有语义）。围棋黑落→白落→黑 pass 收尾时 moveCount 含 pass，
+    /// 按总手数反推会把白子标成黑方所落——此用例钉住回归。
+    #[test]
+    fn board_last_move_向前找最近落子_pass不误导行棋方() {
+        let snap = go_snap(json!([{ "x": 0, "y": 0 }, { "x": 1, "y": 1 }, "pass"]));
+        let board: serde_json::Value =
+            serde_json::from_str(&syn_board(&snap, None)).expect("board 是 JSON");
+        assert_eq!(
+            board["last_move"],
+            json!({ "by": "white", "x": 1, "y": 1 }),
+            "by 按落子自己的序数反推（第 2 手=白），不受尾部 pass 影响"
+        );
+
+        // 单手正常局：黑。只有 pass 的畸形史：null（不虚构坐标）。
+        let one = go_snap(json!([{ "x": 4, "y": 4 }]));
+        let board: serde_json::Value =
+            serde_json::from_str(&syn_board(&one, None)).expect("board 是 JSON");
+        assert_eq!(board["last_move"], json!({ "by": "black", "x": 4, "y": 4 }));
+        let passes = go_snap(json!(["pass"]));
+        let board: serde_json::Value =
+            serde_json::from_str(&syn_board(&passes, None)).expect("board 是 JSON");
+        assert_eq!(board["last_move"], json!(null));
+    }
+
+    /// /game/history/<n> 的五变体路径全部可解析（/index 逐字承诺 "same five
+    /// variants"：缺省 JSON + grid/ascii/pretty/image.png 后缀）。
+    #[test]
+    fn resolve_history变体后缀() {
+        assert_eq!(
+            resolve("/game/history/3"),
+            Ok(Resolved::Game(GameFile::HistoryN(3, HistoryVariant::Json)))
+        );
+        for (suffix, want) in [
+            ("grid", HistoryVariant::Grid),
+            ("ascii", HistoryVariant::Ascii),
+            ("pretty", HistoryVariant::Pretty),
+            ("image.png", HistoryVariant::Png),
+        ] {
+            assert_eq!(
+                resolve(&format!("/game/history/3/{suffix}")),
+                Ok(Resolved::Game(GameFile::HistoryN(3, want))),
+                "{suffix} 后缀应可达"
+            );
+        }
+        // 非法后缀与非法手数仍拒（文案带路径上下文与合法清单）。
+        let err = resolve("/game/history/3/jpeg").unwrap_err();
+        assert!(err.contains("unknown history variant") && err.contains("/game/history/3/jpeg"), "{err}");
+        assert!(resolve("/game/history/abc").unwrap_err().contains("invalid history move number"));
+        assert!(resolve("/game/history/0").unwrap_err().contains("history starts at move 1"));
+    }
+
+    /// history/<n> 的文本变体经真引擎重放：第 2 手后的局面含黑白各一子；
+    /// Png 变体在文本读口给不出（指向图像读口/ascii）。
+    #[test]
+    fn history_n变体渲染() {
+        let snap = go_snap(json!([{ "x": 0, "y": 0 }, { "x": 1, "y": 1 }, "pass"]));
+        let json_v = syn_history_n(&snap, 2, HistoryVariant::Json).expect("json 变体");
+        assert!(json_v.contains(r#""after_move":2"#) && json_v.contains(r#""last_move":{"by":"white","x":1,"y":1}"#), "{json_v}");
+        let ascii = syn_history_n(&snap, 2, HistoryVariant::Ascii).expect("ascii 变体");
+        assert!(ascii.contains("X") && ascii.contains("O"), "{ascii}");
+        let pretty = syn_history_n(&snap, 2, HistoryVariant::Pretty).expect("pretty 变体");
+        assert!(pretty.contains('●') && pretty.contains('○'), "{pretty}");
+        assert!(syn_history_n(&snap, 2, HistoryVariant::Png).is_err(), "PNG 不在文本读口");
+        // 图像读口：PNG 魔数在场（与 board 的图像变体同一渲染本体）。
+        let resolved = resolve("/game/history/2/image.png").expect("图像路径可解析");
+        assert!(is_image_file(&resolved));
+        let (_, bytes) = read_image(&resolved, &snap, None).expect("PNG 可合成");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "PNG 签名逐字节");
+        // 越界 n 在两条读口同拒。
+        assert!(syn_history_n(&snap, 9, HistoryVariant::Json).unwrap_err().contains("out of range"));
+        let resolved9 = resolve("/game/history/9/image.png").unwrap();
+        assert!(read_image(&resolved9, &snap, None).unwrap_err().contains("out of range"));
+    }
 }
