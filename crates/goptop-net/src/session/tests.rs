@@ -709,3 +709,367 @@ fn ui_command_json_round_trip() {
     // 未知标签必须报错，不能静默吞掉（否则前端拼错命令名 = 无声无息）
     assert!(serde_json::from_str::<UiCommand>(r#"{"noSuchCmd":null}"#).is_err());
 }
+
+/* ---------------- 回归：受理挑战切 channel / sync_epoch 复位 ---------------- */
+
+/// 同源挑战受理后必须切到受邀者的 game channel（两人同一 channel）。
+/// 回归：accept_challenge_with 采纳了受邀者 gameId 却不发 JoinChannel（TS 参考实现
+/// 在同位置有 transport.join，迁移时漏掉），双方 Hello/SyncRequest 互相不可达，
+/// peer_connected 恒 false、can_place 拒绝一切落子，全程无报错。手动受理与 pwd 自动
+/// 受理共用同一函数，两条入口都锁。
+#[test]
+fn challenge_accept_joins_the_invitee_channel() {
+    let c = ctx(1000);
+    // 手动受理路径：主页收到挑战 → 弹窗确认。
+    let mut a = mk("a", false);
+    reduce(
+        &mut a,
+        Event::Presence(PresenceEvt::Challenge {
+            from: "u-b".into(),
+            from_name: "乙".into(),
+            pwd: None,
+            kind: "gomoku".into(),
+            size: 15,
+            game_id: "g-b".into(),
+            rtc_ans: None,
+        }),
+        &c,
+    );
+    assert!(a.incoming.is_some(), "主页收到挑战应弹窗待确认");
+    let fx = reduce(&mut a, Event::Ui(UiCommand::AcceptChallenge), &c);
+    assert_eq!(a.game_id.as_deref(), Some("g-b"), "受理即采纳受邀者的 gameId");
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::JoinChannel(g) if g == "g-b")),
+        "受理后必须切到受邀者的 game channel；实际 effects={:?}",
+        fx.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
+    );
+    // pwd 自动受理路径（等待中的邀请者收到带本局钥匙的挑战）。
+    let mut w = mk("w", false);
+    reduce(&mut w, Event::Ui(UiCommand::CreateInvite), &c);
+    let pwd = w.pwd.clone().unwrap();
+    let fx = reduce(
+        &mut w,
+        Event::Presence(PresenceEvt::Challenge {
+            from: "u-c".into(),
+            from_name: "丙".into(),
+            pwd: Some(pwd),
+            kind: "gomoku".into(),
+            size: 15,
+            game_id: "g-c".into(),
+            rtc_ans: None,
+        }),
+        &c,
+    );
+    assert_eq!(w.phase, Phase::Playing, "钥匙对的挑战应自动受理");
+    assert!(fx.iter().any(|e| matches!(e, Effect::JoinChannel(g) if g == "g-c")));
+    // 受理也是新对局入口：带悔棋史的会话（旧纪元）受理后必须归零，
+    // 否则会把新对手（epoch 0）的开局快照按 `sv < epoch` 静默全部丢弃。
+    let mut old = mk("old", false);
+    old.sync_epoch = 5;
+    reduce(
+        &mut old,
+        Event::Presence(PresenceEvt::Challenge {
+            from: "u-d".into(),
+            from_name: "丁".into(),
+            pwd: None,
+            kind: "gomoku".into(),
+            size: 15,
+            game_id: "g-d".into(),
+            rtc_ans: None,
+        }),
+        &c,
+    );
+    reduce(&mut old, Event::Ui(UiCommand::AcceptChallenge), &c);
+    assert_eq!(old.sync_epoch, 0, "受理挑战是新局入口，epoch 必须归零");
+}
+
+/// sync_epoch 跨局必须复位：会话在同一标签页/原生宿主里跨局存活，上一局悔棋攒下的
+/// 纪元会把下一局新对手（epoch 0）发来的快照按 `sv < epoch` 静默全部丢弃——漏手补
+/// 同步与观战开局同步双双失效且无任何提示。复位放在每个新对局/观战入口，
+/// **不放 reset_board_for**（局内重开必须继续 +1，且线上 Reset 消息处理器与之共用）。
+#[test]
+fn sync_epoch_resets_at_new_game_entries() {
+    let mut a = mk("a", true);
+    let mut b = mk("b", true);
+    let c = ctx(1000);
+    // —— 第 1 局：A/B 协商悔棋成功，纪元各 +1 ——
+    reduce(&mut a, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: Some("O".into()), answer_plain: None, offer_enc: None, answer_enc: None }, &c);
+    let pwd = a.pwd.clone().unwrap();
+    reduce(&mut a, Event::Server(ServerEvt::Signal { from: "u-b".into(), kind: "join".into(), payload: serde_json::json!({ "pwd": pwd, "name": "乙" }) }), &c);
+    reduce(&mut b, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }), &c);
+    reduce(&mut b, Event::Server(ServerEvt::Signal { from: "u-a".into(), kind: "offer".into(), payload: serde_json::json!({ "name": "甲", "kind": "gomoku", "size": 15, "gameId": "g-1", "offer": "O" }) }), &c);
+    a.phase = Phase::Playing;
+    a.opponent = Some("u-b".into());
+    a.peer_connected = true;
+    b.phase = Phase::Playing;
+    b.opponent = Some("u-a".into());
+    b.peer_connected = true;
+    // A 落一手（悔棋请求的 history 非空守卫才放行）。
+    let fx = reduce(&mut a, Event::Ui(UiCommand::Place { x: 7, y: 7 }), &c);
+    if let Some(m) = find_broadcast(&fx) {
+        reduce(&mut b, Event::Net(m), &c);
+    }
+    // B 请求悔棋 → A 同意 → 双方各自应用、纪元 +1。
+    let fx = reduce(&mut b, Event::Ui(UiCommand::RequestUndo), &c);
+    if let Some(m) = find_broadcast(&fx) {
+        reduce(&mut a, Event::Net(m), &c);
+    }
+    let fx = reduce(&mut a, Event::Ui(UiCommand::ConfirmApprove), &c);
+    if let Some(m) = find_broadcast(&fx) {
+        reduce(&mut b, Event::Net(m), &c);
+    }
+    assert_eq!(a.sync_epoch, 1, "悔棋后纪元 +1");
+    assert_eq!(b.sync_epoch, 1);
+    // —— 回主页开第 2 局：新对局入口必须归零 ——
+    reduce(&mut a, Event::Ui(UiCommand::BackHome), &c);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    assert_eq!(a.sync_epoch, 0, "新局入口不复位，旧纪元会拒收新对手的低 sv 快照");
+    // —— 第 2 局对全新会话 N（epoch=0）：A 漏掉 N 的那手，靠快照补同步 ——
+    // （直连 IO 不在本层：对局态与连接就绪照既有用例惯例直接摆出。）
+    a.phase = Phase::Playing;
+    a.peer_connected = true;
+    let mut n = mk("n", true);
+    n.phase = Phase::Playing;
+    n.role = Role::Invitee;
+    n.my_color = "white".into();
+    n.peer_connected = true;
+    // A(黑) 落一手送达 N。
+    let fx = reduce(&mut a, Event::Ui(UiCommand::Place { x: 7, y: 7 }), &c);
+    if let Some(m) = find_broadcast(&fx) {
+        reduce(&mut n, Event::Net(m), &c);
+    }
+    // N(白) 落一手但对 A 隐去（模拟漏手，不发广播给 A）。
+    reduce(&mut n, Event::Ui(UiCommand::Place { x: 8, y: 8 }), &c);
+    // A 发 SyncRequest，N 回全量快照（sv=0）。
+    let fx = reduce(&mut a, Event::Timer("hello-delay"), &c);
+    for e in fx {
+        if let Effect::Broadcast(m) = e {
+            if matches!(m.kind, MsgKind::SyncRequest) {
+                let reply = reduce(&mut n, Event::Net(m), &c);
+                if let Some(snap) = find_broadcast(&reply) {
+                    assert!(matches!(snap.kind, MsgKind::SyncState { sv: Some(0), .. }));
+                    reduce(&mut a, Event::Net(snap), &c);
+                }
+            }
+        }
+    }
+    assert_eq!(a.history.len(), 2, "新对手的 sv=0 快照必须被采纳（修复前被旧纪元静默丢弃）");
+    assert_eq!(a.board[8][8], "white", "漏掉的那手经快照补齐");
+    // —— 观战变体：曾当对局者并悔过棋的会话进观战，开局快照必须被采纳 ——
+    let mut sp = mk("sp", false);
+    sp.sync_epoch = 3;
+    reduce(&mut sp, Event::Boot { href: "https://x.dev/watch/g-9".into() }, &c);
+    assert_eq!(sp.role, Role::Spectator);
+    assert_eq!(sp.sync_epoch, 0, "观战入局入口必须归零");
+    let mut board = vec![vec!["empty".to_string(); 9]; 9];
+    board[3][3] = "black".into();
+    board[4][4] = "white".into();
+    let snap = GameMsg::new(
+        1,
+        "peer-h",
+        "u-h",
+        MsgKind::SyncState {
+            sv: Some(0),
+            board,
+            to_move: "black".into(),
+            winner: None,
+            history: vec![
+                crate::protocol::HistoryEntry::Place(CoordT { x: 3, y: 3 }),
+                crate::protocol::HistoryEntry::Place(CoordT { x: 4, y: 4 }),
+            ],
+            last_move: Some(CoordT { x: 4, y: 4 }),
+            kind: "go".into(),
+            size: 9,
+        },
+    );
+    reduce(&mut sp, Event::Net(snap), &c);
+    assert_eq!(sp.board[3][3], "black", "房主的开局快照必须被采纳");
+    assert_eq!(sp.history.len(), 2);
+}
+
+/* ---------------- 回归：观战者应用 Pass / 观战槽连接灯 ---------------- */
+
+/// 观战者必须像对局者一样应用 Move{Pass}：围棋双 Pass 是每局必然到达的一手，
+/// 被角色守卫丢掉的话 to_move 永不翻转、终局计分永远进不去，观战从此冻结。
+/// 回归：Pass 分支曾多加 `|| role == Spectator`（历史 TS 只按 by!==toMove 守卫）。
+#[test]
+fn spectator_applies_pass_moves_like_place() {
+    let mut s = mk("s", false);
+    let c = ctx(1000);
+    s.role = Role::Spectator;
+    s.phase = Phase::Playing;
+    s.peer_connected = true;
+    s.engine = goptop_core::game::GameState::new(goptop_core::game::GameKind::Go { size: 9 });
+    sync_mirror_from_engine(&mut s);
+    // 黑停一手：观战者照常应用，to_move 翻转。
+    reduce(&mut s, Event::Net(GameMsg::new(1, "peer-a", "u-a", MsgKind::Move { move_: MoveT::Pass, by: "black".into() })), &c);
+    assert_eq!(s.to_move, "white", "观战者的 Pass 也必须翻转行棋方");
+    assert_eq!(s.history.len(), 1);
+    // 白停一手 → 双 Pass 终局：观战者同样进计分态。
+    reduce(&mut s, Event::Net(GameMsg::new(2, "peer-a", "u-a", MsgKind::Move { move_: MoveT::Pass, by: "white".into() })), &c);
+    assert!(s.scoring, "双 Pass 后观战者应进终局计分态");
+    assert_eq!(s.to_move, "black", "两手都应用、轮转两次");
+    assert!(s.pending_moves.is_empty());
+    // 中盘序列锁：停一手之后的落子照常轮转补应用（乱序暂存机制不得被本修复破坏）。
+    let mut g = mk("g", false);
+    g.role = Role::Spectator;
+    g.phase = Phase::Playing;
+    g.peer_connected = true;
+    g.engine = goptop_core::game::GameState::new(goptop_core::game::GameKind::Go { size: 9 });
+    sync_mirror_from_engine(&mut g);
+    reduce(&mut g, Event::Net(GameMsg::new(1, "peer-a", "u-a", MsgKind::Move { move_: MoveT::Pass, by: "black".into() })), &c);
+    reduce(&mut g, Event::Net(GameMsg::new(2, "peer-a", "u-a", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 2, y: 3 } }, by: "white".into() })), &c);
+    reduce(&mut g, Event::Net(GameMsg::new(3, "peer-a", "u-a", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 5, y: 6 } }, by: "black".into() })), &c);
+    assert_eq!(g.board[3][2], "white", "board 按 [y][x] 索引");
+    assert_eq!(g.board[6][5], "black");
+    assert!(g.pending_moves.is_empty());
+    assert_eq!(g.to_move, "white", "停一手加两手落子共三手，轮回白");
+}
+
+/// 连接状态灯只跟对手（player）连接走：观战槽 open 不得清 conn_lost、不得置
+/// peer_connected——否则对手失联后观战者一重连，红灯翻绿「已连接」，对局者继续把
+/// 落子广播进只剩观战者的通道，全程无报错。与 gone 分支的 is_player 过滤对称。
+#[test]
+fn spectator_slot_open_does_not_mark_opponent_connected() {
+    let c = ctx(1000);
+    // (1) 对局中：对手连接断开亮红灯后，观战槽 open 不得洗白。
+    let mut a = mk("a", false);
+    a.role = Role::Inviter;
+    a.phase = Phase::Playing;
+    a.peer_connected = true;
+    a.rtc_peers.push(PeerSlot { tag: "main".into(), player: true, spectator: false, opened: true, offer_ready: true, offer_plain: None, awaiting_peer: None });
+    a.rtc_peers.push(PeerSlot { tag: "spec-live-0".into(), player: false, spectator: true, opened: false, offer_ready: true, offer_plain: None, awaiting_peer: None });
+    reduce(&mut a, Event::PeerState { tag: "main".into(), opened: false, closed: true, failed: false }, &c);
+    assert!(a.conn_lost, "对手连接断开应亮「已中断」");
+    reduce(&mut a, Event::PeerState { tag: "spec-live-0".into(), opened: true, closed: false, failed: false }, &c);
+    assert!(a.conn_lost, "观战槽 open 不得把对手失联洗回「已连接」");
+    // (2) 等待中的房主只受理了观战回执：观战槽 open 不是「对手已连接」，
+    // phase 也不得被带进对局（否则棋盘对一手都没同步的局放行落子）。
+    let mut w = mk("w", false);
+    w.role = Role::Inviter;
+    w.phase = Phase::Waiting;
+    w.rtc_peers.push(PeerSlot { tag: "spec-live-0".into(), player: false, spectator: true, opened: false, offer_ready: true, offer_plain: None, awaiting_peer: None });
+    reduce(&mut w, Event::PeerState { tag: "spec-live-0".into(), opened: true, closed: false, failed: false }, &c);
+    assert!(!w.peer_connected, "观战槽 open 不是「对手已连接」");
+    assert_eq!(w.phase, Phase::Waiting);
+}
+
+/* ---------------- 回归：坏回执后同钥匙重试 ---------------- */
+
+/// 坏回执受理后同钥匙的重试必须仍被受理：进对局被刻意推迟到 PeerState open
+///（「坏回执保持 waiting 可重试」），受理就清 pwd 的话，waiting 配 None 钥匙，
+/// 第二次回执会命中「回执钥匙与本局不符」被拒、同源自动受理同样被拒——重试设计
+/// 自相矛盾。钥匙改到进对局那一刻消费（与受邀方 enter_playing_as_invitee 对齐）。
+#[test]
+fn bad_receipt_keeps_pwd_so_same_key_retry_is_accepted() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    reduce(&mut a, Event::Ui(UiCommand::CreateInvite), &c);
+    reduce(&mut a, Event::RtcReady { tag: "main".into(), offer_plain: None, answer_plain: None, offer_enc: Some("G1INVITE".into()), answer_enc: None }, &c);
+    let pwd = a.pwd.clone().unwrap();
+    // 第一份回执：钥匙正确、answer 是死载荷（对端 PC 已关，ICE 永远不通——
+    // transport 侧静默失败，状态机只看到「已受理」）。
+    let bad = AnswerIntent {
+        inviter_id: a.user_id.clone(),
+        pwd: pwd.clone(),
+        rtc_ans: "G1dead-answer".into(),
+        spectator: false,
+        game_id: Some("g-b".into()),
+        kind: Some("gomoku".into()),
+        size: Some(15),
+    };
+    let fx = reduce(&mut a, Event::Ui(UiCommand::AcceptReceipt(Box::new(bad))), &c);
+    assert!(fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { .. })), "第一份回执应被受理并交给 transport");
+    assert_eq!(a.phase, Phase::Waiting, "进对局留给直连 open（坏回执保持等待可重试）");
+    assert!(a.pwd.is_some(), "受理不得当场清钥匙——否则重试窗口焊死");
+    // 第二份回执：同一把钥匙的正确 answer。修复前被「回执钥匙与本局不符」打回。
+    let ans2 = crate::codec::encode(r#"{"s":"SDP-B2","t":"answer","r":"player"}"#, &pwd).unwrap();
+    let good = AnswerIntent {
+        inviter_id: a.user_id.clone(),
+        pwd: pwd.clone(),
+        rtc_ans: ans2.clone(),
+        spectator: false,
+        game_id: Some("g-b".into()),
+        kind: Some("gomoku".into()),
+        size: Some(15),
+    };
+    let fx = reduce(&mut a, Event::Ui(UiCommand::AcceptReceipt(Box::new(good))), &c);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::AcceptAnswer { answer, pwd: Some(p), .. } if answer == &ans2 && p == &pwd)),
+        "同钥匙重试必须被受理；实际 effects={:?}",
+        fx.iter().map(|e| format!("{e:?}").chars().take(40).collect::<String>()).collect::<Vec<_>>()
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("本局不符"))));
+    assert!(a.pwd.is_some(), "重试受理后钥匙仍在，等进对局才消费");
+    // 直连 open → 进对局，钥匙此刻才失效。
+    let fx = reduce(&mut a, Event::PeerState { tag: "main".into(), opened: true, closed: false, failed: false }, &c);
+    assert_eq!(a.phase, Phase::Playing);
+    assert!(a.peer_connected);
+    assert!(a.pwd.is_none(), "钥匙只在进对局那一刻消费");
+}
+
+/* ---------------- 回归：线上快照/Reset 的尺寸防御 ---------------- */
+
+/// 远端 SyncState 的 ragged 棋盘必须整体拒绝（先校验后落账）：镜像曾被先整块入库
+/// 再校验，校验失败只 early-return，镜像已被污染——随后 apply_move/can_place 的
+/// `board[y][x]` 越界 panic，release panic="abort" 直接进程闪退。
+#[test]
+fn ragged_sync_state_is_rejected_without_polluting_the_mirror() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    a.phase = Phase::Playing;
+    a.role = Role::Inviter;
+    a.my_color = "black".into();
+    a.peer_connected = true;
+    // ragged：15 行但第 0 行只有 1 个元素；sv 抬高绕过双键守卫，to_move 改成对端色。
+    let mut board = vec![vec!["empty".to_string(); 15]; 15];
+    board[0] = vec!["black".to_string()];
+    let dirty = GameMsg::new(1, "peer-b", "u-b", MsgKind::SyncState { sv: Some(9999), board, to_move: "white".into(), winner: None, history: vec![], last_move: None, kind: "gomoku".into(), size: 15 });
+    let fx = reduce(&mut a, Event::Net(dirty), &c);
+    assert!(fx.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("已忽略"))), "脏快照须提示并忽略");
+    // 镜像零突变：修复前 board[0] 已被污染成长度 1，随后任何 [0][x] 索引即越界。
+    assert_eq!(a.board.len(), 15);
+    assert!(a.board.iter().all(|r| r.len() == 15), "镜像不得被 ragged 快照污染");
+    assert_eq!(a.board[0][0], "empty");
+    assert_eq!(a.to_move, "black");
+    assert!(a.winner.is_none() && a.history.is_empty());
+    // 后续落子（本地点击 + 远端 Move）都不得 panic，局面照常推进。
+    reduce(&mut a, Event::Ui(UiCommand::Place { x: 5, y: 0 }), &c);
+    reduce(&mut a, Event::Net(GameMsg::new(2, "peer-b", "u-b", MsgKind::Move { move_: MoveT::Place { coord: CoordT { x: 6, y: 0 } }, by: "white".into() })), &c);
+    assert_eq!(a.board[0][5], "black", "board 按 [y][x] 索引");
+    assert_eq!(a.board[0][6], "white");
+    // 异尺寸方形快照（9×9 对 15 路局）：整体拒绝、引擎不换、镜像仍 15×15。
+    let small = GameMsg::new(3, "peer-b", "u-b", MsgKind::SyncState { sv: Some(10000), board: vec![vec!["empty".to_string(); 9]; 9], to_move: "black".into(), winner: None, history: vec![], last_move: None, kind: "gomoku".into(), size: 9 });
+    let fx = reduce(&mut a, Event::Net(small), &c);
+    assert!(fx.iter().any(|e| matches!(e, Effect::Notice(Some(t), _) if t.contains("已忽略"))));
+    assert_eq!(a.kind, "gomoku");
+    assert_eq!(a.size, 15);
+    assert_eq!(a.board.len(), 15);
+    assert_eq!(a.engine.kind.size(), 15);
+}
+
+/// 线上 Reset 消息的 size 必须归一化后才进 empty_board：该消息无 phase/role 守卫、
+/// 不去重、size 是无校验的 u16——65535 直通曾打出 4e9 个 String 的分配 → OOM abort，
+/// 一条 ~70 字节消息在任意 phase 打死任一端，可重复。归一化同时保持 (kind,size) 与
+/// 引擎一致：("go",15) 曾留下 self.size=15 而引擎是 Go{19} 的错位。
+#[test]
+fn reset_net_message_normalizes_hostile_kind_size() {
+    let mut a = mk("a", false);
+    let c = ctx(1000);
+    a.phase = Phase::Playing;
+    a.peer_connected = true;
+    // 修复前下一行直接 abort 测试进程（分配失败）——缺陷的可执行证明。
+    reduce(&mut a, Event::Net(GameMsg::new(1, "peer-b", "u-b", MsgKind::Reset { kind: "gomoku".into(), size: 65535 })), &c);
+    assert_eq!(a.size, 15);
+    assert_eq!(a.board.len(), 15);
+    assert_eq!(a.board[0].len(), 15);
+    assert_eq!(a.engine.kind.size(), 15);
+    // 非法组合按棋类回默认尺寸（对齐 pick_kind 的原子修正）。
+    reduce(&mut a, Event::Net(GameMsg::new(2, "peer-b", "u-b", MsgKind::Reset { kind: "go".into(), size: 15 })), &c);
+    assert_eq!(a.kind, "go");
+    assert_eq!(a.size, 19, "(kind,size) 必须与引擎一致，不得留下 go/15 的错位");
+    assert_eq!(a.board.len(), 19);
+    assert_eq!(a.engine.kind.size(), 19);
+}

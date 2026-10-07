@@ -209,6 +209,11 @@ impl Session {
     }
 
     /// 应用远端全量快照（(sv, history.len) 双键守卫：合法回退靠 sv，旧快照靠双键）。
+    ///
+    /// **先校验后落账**：线上 board 是 Vec<Vec<Color>>，反序列化对维度零约束——ragged
+    /// 盘（行数够但行内长短不齐）若先整块入库再校验，镜像就被污染，随后 apply_move/
+    /// can_place 的 `board[y][x]` 直接越界 panic（release panic="abort"，进程级闪退）。
+    /// 因此形状校验前置于一切状态变更，adopt 失败也零突变。
     fn apply_sync_state(&mut self, msg: &GameMsg) -> Vec<Effect> {
         let MsgKind::SyncState { sv, board, to_move, winner, history, last_move, kind, size } = &msg.kind else {
             return Vec::new();
@@ -217,17 +222,24 @@ impl Session {
         if sv < self.sync_epoch || (sv == self.sync_epoch && history.len() < self.history.len()) {
             return Vec::new();
         }
-        if *kind != self.kind || *size != self.size {
-            self.engine = goptop_core::game::GameState::new(make_engine_kind(kind, *size));
-            self.kind = kind.clone();
-            self.size = *size;
+        // 形状基准用快照声明归一化后的引擎尺寸（core GameKind 尺寸域），不是旧 self.size。
+        let k = make_engine_kind(kind, *size);
+        let n = k.size();
+        if board.len() != n || board.iter().any(|r| r.len() != n) {
+            // 形状非法：整体拒绝，连换引擎都不做（零突变）。
+            return vec![Effect::Notice(Some("收到的对局快照异常，已忽略".into()), Some(3000)), Effect::Emit];
         }
-        self.board = board.clone();
-        self.to_move = to_move.clone();
-        self.winner = winner.clone();
-        self.history = history.clone();
-        self.last_move = *last_move;
+        // kind/size 与归一化声明不符才换引擎；self.kind/size 一并取归一化值，
+        // 保持 (kind,size)/引擎/镜像三者一致。
+        let norm_kind = kind_name(&k);
+        let norm_size = n as SizeT;
+        if norm_kind != self.kind || norm_size != self.size {
+            self.engine = goptop_core::game::GameState::new(k);
+            self.kind = norm_kind.to_string();
+            self.size = norm_size;
+        }
         // wasm 引擎同步采纳快照：后续落子/悔棋的规则判定基于它。
+        // 采纳先于镜像写入：只有引擎真收下这份快照，镜像字段才跟着动。
         let board_json = serde_json::to_string(&board).unwrap_or_else(|_| "[]".into());
         let winner_str = winner.clone().unwrap_or_else(|| "null".into());
         let history_json = serde_json::to_string(history).unwrap_or_else(|_| "[]".into());
@@ -236,6 +248,11 @@ impl Session {
             // 远端脏快照（重放矛盾）：拒绝并提示——绝不带病采纳。
             return vec![Effect::Notice(Some("收到的对局快照异常，已忽略".into()), Some(3000)), Effect::Emit];
         }
+        self.board = board.clone();
+        self.to_move = to_move.clone();
+        self.winner = winner.clone();
+        self.history = history.clone();
+        self.last_move = *last_move;
         self.scoring = self.engine.scoring;
         vec![Effect::Emit]
     }
@@ -294,7 +311,12 @@ impl Session {
                     return Vec::new();
                 }
                 let n = self.board.len() as u16;
-                if coord.x >= n || coord.y >= n || self.board[coord.y as usize][coord.x as usize] != "empty" {
+                // .get 双保险（同 toggle_dead）：镜像按理恒为方阵（apply_sync_state 先校验
+                // 后落账），但这里越界即 panic=abort，是进程内最后防线。
+                if coord.x >= n
+                    || coord.y >= n
+                    || self.board.get(coord.y as usize).and_then(|r| r.get(coord.x as usize)).map(String::as_str) != Some("empty")
+                {
                     return Vec::new();
                 }
                 match self.engine.try_play(Move::Place(Coord::new(coord.x as u8, coord.y as u8))) {
@@ -308,7 +330,9 @@ impl Session {
                 }
             }
             MoveT::Pass => {
-                if by != self.to_move || self.role == Role::Spectator {
+                // 只按行棋方守卫（与 Place 分支对齐）：围棋双 Pass 是每局必然到达的一手，
+                // 观战者若因角色丢弃 Pass，to_move 永不翻转、终局计分永远进不去，观战冻结。
+                if by != self.to_move {
                     return Vec::new();
                 }
                 if self.engine.try_play(Move::Pass).is_ok() {
@@ -388,7 +412,8 @@ fn can_place(s: &Session, x: u16, y: u16) -> bool {
         return false;
     }
     let n = s.board.len() as u16;
-    if x >= n || y >= n || s.board[y as usize][x as usize] != "empty" {
+    // .get 双保险（同 apply_move）：镜像必须方阵，越界即拒绝而不是 panic。
+    if x >= n || y >= n || s.board.get(y as usize).and_then(|r| r.get(x as usize)).map(String::as_str) != Some("empty") {
         return false;
     }
     if !s.peer_connected && !s.relay_available() {

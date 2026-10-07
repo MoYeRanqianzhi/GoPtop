@@ -78,6 +78,10 @@ impl Session {
         let name = self.display_name();
         if link.spec {
             self.role = Role::Spectator;
+            // 观战入局也是新对局入口：sync_epoch 归零（理由同 join_as_spectator_local）。
+            // 只动观战者自己的会话：守卫是按会话记账的，复位对端（房主）的纪元既帮不到
+            // 观战者，还会让对局中已 +1 的房主发出 sv=0 快照被仍持旧纪元的对手拒收。
+            self.sync_epoch = 0;
             self.my_host = Some(link.target.clone());
             vec![
                 Effect::Nav("/p2p".into()),

@@ -726,5 +726,11 @@ pub fn make_engine_kind(kind: &str, size: SizeT) -> GameKind {
     }
 }
 
+/// GameKind → 线上 kind 字符串（make_engine_kind 的逆）：尺寸合法域由 core 的
+/// GameKind::is_valid 唯一定义，这里不做第二份白名单。
+pub(crate) fn kind_name(k: &GameKind) -> &'static str {
+    if matches!(k, GameKind::Go { .. }) { "go" } else { "gomoku" }
+}
+
 /// 快照模块（UI 渲染契约）——见 snapshot.rs。
 pub use snapshot::ScoreResult;

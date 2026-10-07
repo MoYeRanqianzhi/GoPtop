@@ -80,11 +80,17 @@ impl Session {
     }
 
     /// 重置棋盘到指定规则（换局/对局开始共用；sv 不动——调用点均在换局后）。
+    ///
+    /// (kind,size) 先经 make_engine_kind 归一化、归一化结果是唯一尺寸来源：本函数的
+    /// 调用点全是线上入口（Reset 消息 / 挑战 presence / 邀请链接参数），size 是无校验的
+    /// u16——65535 直通 empty_board 就是 4e9 个 String 的分配，失败即 abort（整端进程死）。
+    /// 同时消掉旧实现的错位：("go",15) 曾留下 self.size=15 而引擎是 Go{19}。
     pub(crate) fn reset_board_for(&mut self, kind: &str, size: SizeT) -> Vec<Effect> {
-        self.kind = kind.to_string();
-        self.size = size;
-        self.engine = goptop_core::game::GameState::new(make_engine_kind(kind, size));
-        let (board, _) = empty_board(size);
+        let k = make_engine_kind(kind, size);
+        self.kind = kind_name(&k).to_string();
+        self.size = k.size() as SizeT;
+        self.engine = goptop_core::game::GameState::new(k);
+        let (board, _) = empty_board(self.size);
         self.board = board;
         self.to_move = "black".into();
         self.winner = None;
@@ -219,6 +225,9 @@ pub(crate) fn create_invite(s: &mut Session, ctx: &ReduceCtx) -> Vec<Effect> {
     s.spec_url = None;
     s.spec_pwd = Some(crate::identity::gen_pwd(ctx.rand[2]));
     s.spectate_enabled = true;
+    // 新对局入口：sync_epoch 归零（会话跨局存活——同一标签页/原生宿主按页常驻），
+    // 否则上一局悔棋/重开攒下的纪元会拒收新对手的低 sv 快照。
+    s.sync_epoch = 0;
     let mut fx = s.reset_board_for(&s.kind.clone(), s.size);
     fx.push(Effect::JoinChannel(g.clone()));
     s.inviter_main = Some("main".into());
@@ -271,6 +280,8 @@ pub(crate) fn accept_invite(s: &mut Session, ctx: &ReduceCtx, inviter_id: &str, 
     s.close_all_rtc();
     let g = crate::identity::gen_game_id(ctx.now_ms, ctx.rand[0]);
     s.game_id = Some(g.clone());
+    // 新对局入口：sync_epoch 归零（理由同 create_invite——低 sv 快照不得被旧纪元拒收）。
+    s.sync_epoch = 0;
     s.role = Role::Invitee;
     s.my_color = "white".into();
     s.peer_connected = false;
@@ -426,8 +437,16 @@ fn accept_challenge_with(s: &mut Session, ctx: &ReduceCtx, from: &str, kind: &st
     }
     s.close_all_rtc();
     s.game_id = Some(invitee_game_id.to_string());
+    // **必须切到受邀者的 game channel（两人同一 channel）**：受理即采纳受邀者的
+    // gameId，继续留在自己的旧 channel（或主页根本没进过 channel）上，双方的
+    // Hello/SyncRequest 互相不可达，peer_connected 恒 false、can_place 拒绝一切
+    // 落子，全程无报错。与 accept_receipt 的 JoinChannel（受邀者 channel）对齐。
+    fx.push(Effect::JoinChannel(invitee_game_id.to_string()));
     s.role = Role::Inviter;
     s.phase = Phase::Playing;
+    // 新对局入口：sync_epoch 归零。上一局悔棋/重开攒下的纪元若带进新局，apply_sync_state
+    // 的 `sv < epoch` 守卫会把新对手（epoch 0）发来的开局快照静默全部丢弃。
+    s.sync_epoch = 0;
     s.my_color = "black".into();
     s.peer_connected = false;
     // **受理后必须重新登记 main 槽位**：上面 `close_all_rtc()` 把 rtc_peers 清空了，
@@ -493,6 +512,9 @@ pub(crate) fn enter_playing_as_invitee(s: &mut Session) -> Vec<Effect> {
 pub(crate) fn join_as_spectator_local(s: &mut Session, g: &str) -> Vec<Effect> {
     s.close_all_rtc();
     s.game_id = Some(g.to_string());
+    // 观战入局也是新对局入口：入局后第一件事就是 SyncRequest 要开局快照（sv=0），
+    // 旧纪元在会话里（曾当过对局者并悔过棋）会把这份快照静默拒收，永远只见空盘。
+    s.sync_epoch = 0;
     s.role = Role::Spectator;
     s.phase = Phase::Playing;
     // 观战者没有执子颜色：占位 white 仅供 UI；消息判定一律用消息自带 by。
@@ -519,7 +541,13 @@ pub(crate) fn on_peer_state(s: &mut Session, tag: &str, opened: bool, gone: bool
     if let Some(p) = s.rtc_peers.iter_mut().find(|q| q.tag == tag) {
         if opened {
             p.opened = true;
-            s.conn_lost = false;
+            // 连接状态灯只跟对手（player）连接走：观战槽 open 既不代表对手在线，
+            // 也不能把对手失联亮出的「已中断」洗回「已连接」——与下面 gone 分支的
+            // is_player 过滤对称（peer_connected 的语义是对局者连接）。
+            let is_player = p.player;
+            if is_player {
+                s.conn_lost = false;
+            }
             // 等待中的人一收到「玩家连接已 open」就进对局，**两个角色都算**：
             // 跨设备时 presence 不可达，直连是唯一的「对手已就位」信号。
             // - 受邀者：answer 被受理后 transport 才会 open。
@@ -540,10 +568,15 @@ pub(crate) fn on_peer_state(s: &mut Session, tag: &str, opened: bool, gone: bool
                     // `enter_playing_as_invitee`——它会改 pwd、重设 watch_url，还会报
                     // 「你执白」（邀请者执黑）。
                     s.phase = Phase::Playing;
+                    // 进对局此刻才消费 pwd（两人满员）：受理回执时保留它是为了给
+                    // 「坏回执后同钥匙重试」留出重试窗口（见 accept_receipt）。
+                    s.pwd = None;
                     extra.push(Effect::Notice(Some("直连已建立，对局开始".into()), None));
                 }
             }
-            s.peer_connected = true;
+            if is_player {
+                s.peer_connected = true;
+            }
             fx.push(Effect::Emit);
             fx.extend(extra);
             return fx;
@@ -722,7 +755,11 @@ pub(crate) fn accept_receipt(s: &mut Session, ctx: &ReduceCtx, r: &AnswerIntent)
         fx.push(Effect::JoinChannel(gid.clone()));
         s.watch_url = Some(links::watch_to_url(&s.share_origin, &gid));
     }
-    s.pwd = None; // pwd 失效：两人满员
+    // pwd **不在这里清**：进对局被刻意推迟到 PeerState open（见上），answer 应用失败在
+    // 状态机里不可见（transport 静默丢弃）——受理即清钥匙的话，waiting 态配 None pwd，
+    // 同钥匙的第二次回执会命中「回执钥匙与本局不符」被拒、同源自动受理同样被拒，
+    // 重试窗口就此焊死。钥匙改由 on_peer_state 进对局那一刻消费（与受邀方的
+    // enter_playing_as_invitee 清 pwd 对齐）；取消等待走 do_back_home 清理。
     s.invite_url = None;
     s.incoming = None;
     // 回执里的 kind/size 不回写本端局面：两端建盘用的是同一链接参数，本端规则在 create_invite
@@ -756,6 +793,8 @@ pub(crate) fn accept_spec_offer_serverless(s: &mut Session, ctx: &ReduceCtx, hos
     s.phase = Phase::Playing;
     s.my_color = "white".into();
     s.my_host = Some(host_id);
+    // 观战入局也是新对局入口：sync_epoch 归零（理由同 join_as_spectator_local）。
+    s.sync_epoch = 0;
     s.spec_pwd = spec_pwd;
     s.spec_answer = None;
     vec![

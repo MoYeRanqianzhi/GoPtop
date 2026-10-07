@@ -64,10 +64,19 @@ fn deflate_raw(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
     e.finish().map_err(|_| CodecError::Deflate)
 }
 
+/// 解压输出上限：合法 SDP 载荷 < 8KB，1MB 已是百倍余量。deflate 压缩比可达 ~1000:1，
+/// 无上限时几 KB 的恶意 token 就能膨胀成数 GB——Rust 分配失败是 abort（不可捕获），
+/// wasm/原生宿主整个进程死。实现走 `take(MAX+1)`：解到上限即停表报错，不是先解完再比长度。
+const MAX_INFLATED: u64 = 1024 * 1024;
+
 fn inflate_raw(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
     let mut d = DeflateDecoder::new(bytes);
     let mut out = Vec::new();
-    d.read_to_end(&mut out).map_err(|_| CodecError::Inflate)?;
+    // 读 MAX+1 再判超限：恰好压线（== MAX）的合法流不会被误拒。
+    (&mut d).take(MAX_INFLATED + 1).read_to_end(&mut out).map_err(|_| CodecError::Inflate)?;
+    if out.len() as u64 > MAX_INFLATED {
+        return Err(CodecError::Inflate);
+    }
     Ok(out)
 }
 
@@ -185,6 +194,27 @@ mod tests {
         assert_eq!(b64url_decode(b64url_encode(b"any-carnal-pleasure").as_str()).unwrap(), b"any-carnal-pleasure");
         assert_eq!(b64url_decode("YWJj").unwrap(), b"abc");
         assert_eq!(b64url_decode("YQ==").unwrap(), b"a");
+    }
+
+    /// deflate 炸弹：小体积高压缩比 token 的解压必须有界。约 5KB 的全零载荷可膨胀
+    /// 4MB+（实测压缩比 ~1000:1），无上限时几 KB token 就能把宿主打到分配失败 abort
+    ///（修复前本测试会因无界展开直接炸掉测试进程——缺陷的可执行证明）。
+    #[test]
+    fn inflate_is_bounded_against_deflate_bombs() {
+        let bomb = "0".repeat(4 * 1024 * 1024);
+        let token = encode(&bomb, "k").unwrap();
+        assert!(token.len() < 8 * 1024, "炸弹 token 应只有几 KB，确属高压缩比：{}", token.len());
+        assert!(matches!(decode(&token, "k"), Err(CodecError::Inflate)), "超上限的解压必须报 Inflate");
+    }
+
+    /// 上限边界：解到上限即停（不是先解完再比长度）；恰好 MAX+1 判超限，MAX 以内
+    /// 的较大合法载荷照常往返。
+    #[test]
+    fn inflate_cap_boundary() {
+        let ok = "0".repeat(100_000);
+        assert_eq!(decode(&encode(&ok, "k").unwrap(), "k").unwrap(), ok);
+        let over = "0".repeat(MAX_INFLATED as usize + 1);
+        assert!(matches!(decode(&encode(&over, "k").unwrap(), "k"), Err(CodecError::Inflate)));
     }
 }
 
