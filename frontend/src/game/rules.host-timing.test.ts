@@ -23,6 +23,8 @@ let nextId: number;
 let ipcDelayMs: number;
 let calls: string[];
 let failNextNew: boolean;
+/** 鸿蒙假宿主用的同款失败开关（宿主对非法组合回 null，不抛异常）。 */
+let harmonyFailNextNew: boolean;
 
 beforeEach(() => {
   games = new Map();
@@ -30,6 +32,7 @@ beforeEach(() => {
   ipcDelayMs = 30;
   calls = [];
   failNextNew = false;
+  harmonyFailNextNew = false;
   (globalThis as unknown as { window: unknown }).window = {
     __TAURI_INTERNALS__: {
       invoke: async (cmd: string, args: Record<string, unknown>): Promise<Reply> => {
@@ -135,5 +138,122 @@ describe("原生后端：Rust 侧实例生命周期", () => {
     await eng.dispose();
     await sleep(ipcDelayMs * 5);
     expect(games.size).toBe(0);
+  });
+
+  it("背靠背并发 newGame 只留一局（快速连点棋种/尺寸）", async () => {
+    const eng = await engine();
+    await boot(eng, "gomoku", 15);
+    const firstId = nextId - 1;
+    void eng.newGame("go", 9);
+    void eng.newGame("go", 19);
+    await sleep(ipcDelayMs * 5);
+    // 两次并发都在对方落地前把 id 摘成 null：没有代次的话各自建局、各自不 drop，
+    // Rust 侧存活 3 局（旧局 + 两个新局），先落地者永远无人认领
+    expect(games.size, "并发建局必须只留最后一次请求的局").toBe(1);
+    expect(games.has(firstId), "启动并发前的旧局也要被 drop").toBe(false);
+    const st = (await eng.stateJson()) as { size?: number } | null;
+    expect(st?.size, "存活局必须是后一次请求的尺寸").toBe(19);
+  });
+
+  it("dispose 撞上在途 newGame 不泄漏（StrictMode 卸载时序）", async () => {
+    const eng = await engine();
+    void eng.newGame("go", 9);
+    // dispose 落地时 this.id 仍是 null（newGame 还在 IPC 往返中），无局可 drop——
+    // 在途 newGame 必须凭过期代次自弃刚建出的局，否则 dev 下每次进页漏一局
+    await eng.dispose();
+    await sleep(ipcDelayMs * 5);
+    expect(games.size).toBe(0);
+  });
+});
+
+/* ---------------- 鸿蒙后端（同步桥） ----------------
+ *
+ * HarmonyBackend 是同一份时序契约的第二份实现，且桥形态独有：同步返回、回执是
+ * 一整条 JSON 文本（单层编码：game_new 回 JSON.stringify(id)，state 文本原样）。
+ * 这里的假桥与 crates/goptop-ohos 的 dispatch 同款（无此局给 no_game 而非 null）。
+ * 注意 window 不能带 __TAURI_INTERNALS__，否则 pickBackend 会选 NativeBackend。
+ */
+describe("鸿蒙后端：同步桥的同一份时序契约", () => {
+  /** 装鸿蒙假宿主（同步分发到与 native 用例同一张 games 表）。在外层 beforeEach 之后跑，整体替换 window。 */
+  beforeEach(() => {
+    (globalThis as unknown as { window: unknown }).window = {
+      goptopHost: {
+        storeLoad: () => "{}",
+        storeSet: () => undefined,
+        storeRemove: () => undefined,
+        call: (cmd: string, argsJson: string): string => {
+          calls.push(cmd);
+          const args = JSON.parse(argsJson) as Record<string, unknown>;
+          switch (cmd) {
+            case "game_new": {
+              if (harmonyFailNextNew) {
+                harmonyFailNextNew = false;
+                return "null";
+              }
+              const kind = JSON.parse(String(args.kindJson)) as { Gomoku?: { size: number }; Go?: { size: number } };
+              const size = kind.Gomoku?.size ?? kind.Go?.size ?? 0;
+              const id = nextId++;
+              games.set(id, { size, moves: 0 });
+              return JSON.stringify(id);
+            }
+            case "game_state_json": {
+              const g = games.get(Number(args.id));
+              return g ? JSON.stringify({ size: g.size, moves: g.moves }) : "null";
+            }
+            case "game_place": {
+              const g = games.get(Number(args.id));
+              if (!g) return JSON.stringify({ ok: false, error: "no_game" });
+              g.moves += 1;
+              return JSON.stringify({ ok: true, board: [], captured: [], toMove: "white", winner: null });
+            }
+            case "game_drop":
+              games.delete(Number(args.id));
+              return "null";
+            default:
+              return "null";
+          }
+        },
+        aiPost: () => 0,
+        aiPoll: () => "",
+      },
+    };
+  });
+
+  it("开局后立刻取局面，拿到的是这一局（不是 null）", async () => {
+    const eng = await engine();
+    const st = await stateRightAfter(eng, "go", 9);
+    expect(st, "同步桥没有建局窗口，stateJson 仍必须等到 newGame 落地（booting）").not.toBeNull();
+    expect(st?.size).toBe(9);
+  });
+
+  it("切尺寸后立刻取局面，不得拿回上一局的快照", async () => {
+    const eng = await engine();
+    await boot(eng, "go", 9);
+    const st = await stateRightAfter(eng, "go", 19);
+    expect(st?.size, "取到的是上一局（尺寸不符）→ AI 照着幽灵局面选点").toBe(19);
+  });
+
+  it("game_new 失败（回 null）后不得继续用旧 id 落子", async () => {
+    const eng = await engine();
+    await boot(eng, "gomoku", 15);
+    expect((await eng.place(1, 1))?.ok, "前置：正常局应当能落子").toBe(true);
+
+    harmonyFailNextNew = true;
+    void eng.newGame("go", 9);
+    expect(await eng.stateJson(), "失败后 this.id 必须已摘成 null").toBeNull();
+    // 旧 id 若还留着，载荷会带 id、宿主回 ok:true——这里必须走 no_game
+    expect((await eng.place(2, 2))?.ok ?? false, "不得拿旧 id 落子").toBe(false);
+  });
+
+  it("背靠背并发 newGame 不泄漏（同步体无 await，不可能交错）", async () => {
+    const eng = await engine();
+    await boot(eng, "gomoku", 15);
+    void eng.newGame("go", 9);
+    void eng.newGame("go", 19);
+    await sleep(0);
+    // 桥是同步的：第一次 newGame 在第二次启动前已完整落地并 drop 旧局
+    expect(games.size).toBe(1);
+    const st = (await eng.stateJson()) as { size?: number } | null;
+    expect(st?.size).toBe(19);
   });
 });

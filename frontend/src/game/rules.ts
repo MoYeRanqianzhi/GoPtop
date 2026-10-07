@@ -115,15 +115,32 @@ class WasmBackend implements Backend {
 
 class NativeBackend implements Backend {
   private id: number | null = null;
+  /** 请求代次：newGame/dispose 各自推高；在途调用醒来时发现自己的代已过期即整体作废。 */
+  private gen = 0;
 
   async newGame(kindJson: string): Promise<boolean> {
-    const { invoke } = await import("@tauri-apps/api/core");
+    // 代次在**第一个 await 之前**取号：async 函数体跑到首个 await 为止是同步的，
+    // 这样两次 newGame 背靠背（快速连点棋种/尺寸）时后启动者必然拿到更高的代次，
+    // 先启动者醒来后凭过期代次把刚建出的局就地 drop——否则两次并发都在对方落地前
+    // 把 this.id 摘成 null、各自建局、各自不 drop，先落地的那局从此无句柄，在
+    // Rust 的 Games HashMap 里活到进程退出（StrictMode 双挂载必现）。
+    // 取号也不能晚到 import 之后：dispose 若落在 import 往返里，迟到的 ++ 会把
+    // dispose 的推高顶回去，过期判定就失效了。
+    const gen = ++this.gen;
     // 先摘掉旧实例再 await：invoke 失败会抛（command 未注册、参数名不匹配、Rust panic），
     // 若把赋值留在 await 之后，this.id 会继续指着上一局——尺寸已经不同，之后每次
     // place 都拿旧尺寸的棋盘覆盖 UI（wasm 后端此时成了 null，两端行为分叉）。
     const stale = this.id;
     this.id = null;
+    const { invoke } = await import("@tauri-apps/api/core");
     const id = await invoke<number | null>("game_new", { kindJson });
+    if (gen !== this.gen) {
+      // 过期回执：这一局没人认领，必须就地释放；启动时摘下的 stale 也仍由本调用
+      // 负责——后启动者在它 await 期间读到的 this.id 已是 null，接不到这个包袱
+      if (id !== null) void invoke("game_drop", { id });
+      if (stale !== null) void invoke("game_drop", { id: stale });
+      return this.id !== null;
+    }
     this.id = id ?? null;
     // 旧对局活在 Rust 的 HashMap 里，不显式 drop 就永久留着——切规则/尺寸每切一次留一份
     if (stale !== null) void invoke("game_drop", { id: stale });
@@ -171,6 +188,10 @@ class NativeBackend implements Backend {
   }
 
   async dispose(): Promise<void> {
+    // 先推高代次：此刻若有 newGame 在途（StrictMode 卸载时序——cleanup 跑在
+    // mount1 的 game_new 落地之前，this.id 已被摘成 null，这里无局可 drop），
+    // 它醒来后会凭过期代次自行 drop 刚建出的局
+    this.gen++;
     await this.call<void>("game_drop", {});
     this.id = null;
   }
@@ -282,6 +303,10 @@ export class RulesEngine {
    * - wasm：`this.game` 还是**上一局**（赋值在 `await loadWasm()` 之后），
    *   `stateJson()` 会取回旧局的快照（实测：9 路切 19 路时取回 size=9），
    *   AI 于是照着幽灵局面选点——不报错、不卡死，只是下错。
+   *
+   * 该窗口的回归覆盖只在 native 侧（rules.host-timing.test.ts 的伪宿主）；wasm 侧
+   * 同窗口的形态不同（旧局快照照常返回而非 null），vitest 的 node 环境加载不了
+   * wasm 工件，暂无用例钉住——动 WasmBackend.newGame 的赋值时机时只能靠真机自测。
    */
   private booting: Promise<void> = Promise.resolve();
 

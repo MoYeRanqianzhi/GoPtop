@@ -12,7 +12,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 import { emptyBoard } from "../game/board";
+import type { PlaceResult } from "../game/rules";
 import { RulesEngine } from "../game/rules";
+import type { AnalyzeResult } from "../ai/types";
 import { sharedAiClient, useWinRate } from "../ai/useWinRate";
 import { Settings } from "lucide-react";
 import { BoardPanel } from "./components";
@@ -29,6 +31,56 @@ const ODDS_BUDGET_MS = 500;
 
 const aiColorName = (c: StoneColor) => (c === "black" ? "Black" : "White");
 const other = (c: StoneColor): StoneColor => (c === "black" ? "white" : "black");
+
+/**
+ * AI 的一轮「取局面 → 分析 → 落子」。从 effect 体内抽出只为能在 vitest 的 node
+ * 环境回归（本仓无 jsdom，React 组件挂载不了）；行为与原先内联的写法逐行一致。
+ *
+ * 唯一的裁决点是 `isStale`：它同时折叠了 effect cleanup 的 cancelled 标记（依赖
+ * 变化引发的卸载）和请求代次（依赖没变但局面已被清空的重开/换边）——两条任一
+ * 命中都视为过期，过期回执连同它的收尾（thinking/error）一起整体作废。
+ */
+export async function runAiTurn(io: {
+  isStale(): boolean;
+  setThinking(v: boolean): void;
+  setAiError(msg: string | null): void;
+  getState(): Promise<unknown | null>;
+  analyze(state: unknown): Promise<AnalyzeResult>;
+  place(x: number, y: number): Promise<PlaceResult | null>;
+  onPlaced(res: Extract<PlaceResult, { ok: true }>, move: Coord): void;
+}): Promise<void> {
+  try {
+    const state = await io.getState();
+    if (io.isStale() || !state) {
+      if (!io.isStale()) io.setThinking(false);
+      return;
+    }
+    const r = await io.analyze(state);
+    if (io.isStale()) return;
+    if (!r.bestMove) {
+      // 无着可下（引擎认为终局）——不静默卡住，交给用户重开
+      io.setAiError("AI 判定无处可下，请重开一局");
+      return;
+    }
+    const [x, y] = r.bestMove;
+    const res = await io.place(x, y);
+    if (io.isStale()) return;
+    if (!res?.ok) {
+      // 引擎侧已有合法性兜底，走到这里说明兜底也失效了——必须留痕，
+      // 否则表现为"AI 不动了"，看日志才知道原因
+      io.setAiError(`AI 给出非法着法 (${x},${y})：${res?.error ?? "未知"}`);
+      return;
+    }
+    io.onPlaced(res, { x, y });
+    io.setAiError(null);
+  } catch (e: unknown) {
+    if (io.isStale()) return;
+    console.error("[ai] 分析失败", e);
+    io.setAiError(e instanceof Error ? e.message : String(e));
+  } finally {
+    if (!io.isStale()) io.setThinking(false);
+  }
+}
 
 export function AiPage(props: { kind: GameKind; size: Size }) {
   const { kind, size } = props;
@@ -51,6 +103,16 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
   const humanColor = other(aiColor);
   const budgetMs = LEVELS.find((l) => l.key === levelKey)?.budgetMs ?? 1000;
 
+  /**
+   * 请求代次：重开/换边各推高一次，旧代次的 AI 回执（含引擎落子）整体作废。
+   *
+   * 为什么 effect 的 cancelled 标志管不住：AI 执黑思考中点「重开」，toMove 本来
+   * 就是 "black"、winner 仍是 null——AI effect 的依赖一个都没变，cleanup 根本
+   * 不执行、cancelled 恒为 false，不推代次的话旧分析几秒后的回执会把旧局面的
+   * 选点落到刚清空的棋盘上（换边同样清盘，一并覆盖）。
+   */
+  const genRef = useRef(0);
+
   // 预热引擎：Web 端是 Worker 启动时自己预热，原生端要显式叫一次
   // （解压 + 反序列化 1.7MB NNUE 权重，约 56ms），否则第一步棋白等这一下。
   useEffect(() => {
@@ -71,6 +133,12 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
 
   /** 重置到"轮到人类"的初始局面。 */
   function resetBoard(nextAi: StoneColor = aiColor) {
+    genRef.current += 1;
+    // 把在途/排队的 stale 搜索连同它的回执一起清掉：Web 端 Worker 单线程按序跑，
+    // 不 terminate 的话重开后的新请求要等旧搜索全部跑完才轮到（「强」档约 3.5s）。
+    // Worker 懒重建，下次 analyze 重付初始化代价；原生端各走线程池并发、本就无
+    // 排队，这里只是空操作。
+    sharedAiClient().dispose();
     void rulesRef.current.reset();
     setBoard(emptyBoard(size));
     // 人类执黑时黑先；AI 执黑时黑先但那一步该 AI 走，effect 会自动接手
@@ -80,6 +148,9 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
     setHistory([]);
     setHover(null);
     setAiError(null);
+    // 旧分析的 finally 因代次过期会跳过收尾，thinking 必须在这里自己收回
+    //（AI 执黑时重开不改变 effect 依赖，没人会替它清）
+    setThinking(false);
     setAiColor(nextAi);
   }
 
@@ -134,49 +205,25 @@ export function AiPage(props: { kind: GameKind; size: Size }) {
       return;
     }
     let cancelled = false;
+    // 记下发起时的代次：重开/换边推高 genRef 后，本轮回执在 isStale 处整体作废
+    const gen = genRef.current;
     setThinking(true);
-    void (async () => {
-      try {
-        const state = await rulesRef.current.stateJson();
-        if (cancelled || !state) {
-          if (!cancelled) setThinking(false);
-          return;
-        }
-        const r = await sharedAiClient().analyze({
-          state,
-          myColor: aiColorName(aiColor),
-          budgetMs,
-          wantMove: true,
-        });
-        if (cancelled) return;
-        if (!r.bestMove) {
-          // 无着可下（引擎认为终局）——不静默卡住，交给用户重开
-          setAiError("AI 判定无处可下，请重开一局");
-          return;
-        }
-        const [x, y] = r.bestMove;
-        const res = await rulesRef.current.place(x, y);
-        if (cancelled) return;
-        if (!res?.ok) {
-          // 引擎侧已有合法性兜底，走到这里说明兜底也失效了——必须留痕，
-          // 否则表现为"AI 不动了"，看日志才知道原因
-          setAiError(`AI 给出非法着法 (${x},${y})：${res?.error ?? "未知"}`);
-          return;
-        }
+    void runAiTurn({
+      // cancelled 管「依赖变了引发卸载」；代次管「依赖没变但局面已被清空」
+      isStale: () => cancelled || gen !== genRef.current,
+      getState: () => rulesRef.current.stateJson(),
+      analyze: (state) => sharedAiClient().analyze({ state, myColor: aiColorName(aiColor), budgetMs, wantMove: true }),
+      place: (x, y) => rulesRef.current.place(x, y),
+      setThinking,
+      setAiError,
+      onPlaced: (res, move) => {
         setBoard(res.board);
-        setLastMove({ x, y });
-        setHistory((h) => [...h, { x, y }]);
+        setLastMove(move);
+        setHistory((h) => [...h, move]);
         if (res.winner) setWinner(res.winner);
         else setToMove(res.toMove);
-        setAiError(null);
-      } catch (e: unknown) {
-        if (cancelled) return;
-        console.error("[ai] 分析失败", e);
-        setAiError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelled) setThinking(false);
-      }
-    })();
+      },
+    });
     return () => {
       cancelled = true;
     };

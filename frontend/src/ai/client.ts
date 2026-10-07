@@ -59,7 +59,16 @@ function analyzeHarmony(reqJson: string): Promise<AnalyzeResult> {
       if (raw) {
         clearInterval(timer);
         try {
-          resolve(JSON.parse(raw) as AnalyzeResult);
+          // 鸿蒙宿主把反序列化失败/未知命令包成带内 {"error":...}（与 wasm 侧同形，
+          // 见 crates/goptop-ohos dispatch）——不检查的话错误回执会冒充 AnalyzeResult
+          // resolve 出去：胜率条写进 undefined、页面误报「无处可下」，真实错误被掩盖。
+          // Web Worker 与 Tauri 路径都转 reject，这里对齐三宿主同一对外行为。
+          const parsed = JSON.parse(raw) as AnalyzeResult | { error: string };
+          if (parsed && typeof parsed === "object" && "error" in parsed) {
+            reject(new Error(parsed.error));
+            return;
+          }
+          resolve(parsed);
         } catch (e: unknown) {
           reject(new Error(`分析回执不是合法 JSON: ${String(e)}`));
         }
