@@ -1,4 +1,4 @@
-//! 围棋 AI —— 自建 MCTS（UCT + RAVE），走子用 go_game_board（libEGo）的模式化 playout。
+//! 围棋 AI —— 自建 MCTS（PUCT + RAVE），走子用 go_game_board（libEGo）的模式化 playout。
 //!
 //! 为什么自建：没有可直接复用的方案。Rapfi/iomrascálaí 是 GPL-3.0（与本项目
 //! MIT OR Apache-2.0 不兼容）；KataGo 虽 MIT 但 Eigen 后端仅 10–20 playouts/s，
@@ -10,7 +10,7 @@
 //! # 三层结构
 //! - [`replay`]：core 的 `GameState::history` → `go_game_board::Board`。顺序敏感，
 //!   错一步提子/劫判定就全错，`replay_matches_core_board` 单测把坐标约定钉死；
-//! - [`Search`]：UCT + RAVE 树搜索。节点只存统计量，局面靠「从根盘按路径重放」恢复；
+//! - [`Search`]：PUCT + RAVE 树搜索。节点只存统计量，局面靠「从根盘按路径重放」恢复；
 //! - [`pick_move`]：把访问量最高的着法交回 core 复验（两套规则的差异兜底）。
 //!
 //! # 时间控制
@@ -28,9 +28,6 @@ use goptop_core::game::{GameState, Move};
 use web_time::Instant;
 
 use crate::AnalyzeResult;
-
-/// UCT 探索常数。奖励在 `[0, 1]`，`sqrt(2)` 是 UCB1 的理论值，也是 Fuego/Pachi 一档的取值。
-const UCT_C: f64 = 1.4142;
 
 /// RAVE 混合权重里的 `b`（Gelly & Silver 2007 的等价参数式
 /// `beta = R / (R + n + 4·b²·n·R)`）。
@@ -70,6 +67,27 @@ const MAX_PLAYOUT_MOVES: usize = 4096;
 /// 固定种子：同一个局面重放两次得到同一棵树，测试才敢断言胜率。
 const RNG_SEED: u32 = 12345;
 
+/// go_game_board 把 komi 硬编码成 6.5（私有字段，无 setter）：`stone_score =
+/// ceil(-6.5) + 黑子 - 白子 = -6 + 地域差`，`playout_winner` 判黑胜当且仅当
+/// 分数 > 0，即地域差 + 眼位差 ≥ 7。而应用权威计分是 core 的 [`KOMI`] = 7.5，
+/// 黑需 ≥ 8 才胜——直接采用 playout_winner 会让整棵搜索的胜负判定系统性偏黑
+/// 1 目，贴着 7 目边的终局会出现「胜率条判黑胜、计分判白胜」的反向。
+const LIBEGO_KOMI_INVERSE: i32 = -6;
+
+/// 应用权威计分的贴目（中国规则，加给白方），与 core 共用同一常量。不要在这里
+/// 写死第二个数值——两处一漂移，胜率与计分就会反向。
+const KOMI: f32 = goptop_core::go::KOMI;
+
+/// playout 的胜负判定：`score - ceil(-6.5)` 还原「黑地域差 + 眼位差」，严格大于
+/// core 的 [`KOMI`] 才判黑胜（7.5 贴目下即 ≥ 8，与 core 计分的判负边界一致）。
+fn komi_winner(score: i32) -> Player {
+    if f64::from(score - LIBEGO_KOMI_INVERSE) > f64::from(KOMI) {
+        Player::Black
+    } else {
+        Player::White
+    }
+}
+
 /// 模式化 playout 的 gamma 表：`Gammas::new()` 要建 2^20 × 2 个 f64（约 16MB）
 /// 并逐项判合法性，是全部固定开销里最贵的一项。
 ///
@@ -85,6 +103,14 @@ fn gammas() -> &'static Gammas {
 /// 混在一起会把对手的着法算成自己的 RAVE 样本。
 fn move_id(player: Player, v: Vertex) -> u32 {
     (player as usize * Vertex::COUNT + usize::from(v)) as u32
+}
+
+/// go_game_board 的 `Player` → core 的 `Stone`。行棋方一致性守卫要用。
+fn to_stone(player: Player) -> Stone {
+    match player {
+        Player::Black => Stone::Black,
+        Player::White => Stone::White,
+    }
 }
 
 /// 把 core 的 `history` 按落子顺序重放到 go_game_board 的棋盘上。
@@ -202,7 +228,7 @@ impl Search<'_> {
                 self.path.push(child);
                 break;
             }
-            // 无未试着手：按 UCT+RAVE 继续下潜；连子节点都没有说明是终局叶子。
+            // 无未试着手：按 PUCT+RAVE 继续下潜；连子节点都没有说明是终局叶子。
             let Some(child) = self.select(cur) else { break };
             let (mv, mover) = {
                 let n = &self.nodes[child as usize];
@@ -239,8 +265,10 @@ impl Search<'_> {
         }
 
         // pass 放在**首位**：`iterate` 用 `pop()` 从末位取未试着手，首位即最后一个
-        // 才展开。空盘/中盘时 pass 的胜率估计是纯噪声，先展开会让它白占一次
-        // 「未访问优先」的名额，短预算下甚至直接被选成访问量最高的子节点。
+        // 才展开。它必须垫底的理由随深度不同——根节点上 pass 的先验落在 Laplace
+        // 平滑的下限 1/total（模式化采样从不产出 pass，见 root_priors），PUCT 按
+        // prior·√N 排序时天然垫底；更深层先验是均匀值，未访问子得分全部相同，
+        // select 的严格 `>` 让展开顺序决定平局，不垫底 pass 就会先被展开。
         moves.insert(0, Vertex::pass());
         moves
     }
@@ -284,7 +312,8 @@ impl Search<'_> {
         if p.children.is_empty() {
             return None;
         }
-        // 有子节点的父节点必然访问过（展开那一轮的回传会 +1），max(1) 只为杜绝 ln(0)。
+        // max(1) 纯兜底：有子节点的父节点必然访问过（展开那一轮的回传会 +1）；
+        // √0 本身不炸、只会让 u 项归零，正常路径走不到。
         let sqrt_parent = (p.visits.max(1) as f64).sqrt();
         let mut best = None;
         let mut best_score = f64::NEG_INFINITY;
@@ -337,7 +366,9 @@ impl Search<'_> {
             self.played.push(id);
             self.amaf[id as usize] = true;
         }
-        self.work.playout_winner()
+        // 判定必须过 komi 对齐（见 komi_winner）：上游 playout_winner 内置 6.5 贴目，
+        // 与 core 计分的 7.5 差整整 1 目。
+        komi_winner(self.work.playout_score())
     }
 
     /// 沿本次迭代的路径回传胜负。
@@ -469,6 +500,15 @@ pub fn analyze(
     let mut root = Board::with_size(size as usize, size as usize);
     replay(&mut root, state);
     let root_player = root.act_player();
+    // 重放 history 得到的行棋方与 GameState::to_move 是同一真源的两份表示，必须
+    // 一致；一旦漂移，胜负方向整体反相而数值照样「合理」，没有任何其他迹象。
+    // 与 gomoku::analyze 的同名守卫对齐（replay 对跳过的非法手也翻手，正常路径
+    // 到不了这里）。
+    debug_assert_eq!(
+        to_stone(root_player),
+        state.to_move,
+        "重放 history 后的行棋方与 GameState::to_move 不一致"
+    );
 
     let sampler = Sampler::new(&root, gammas);
     let start = Instant::now();
@@ -563,13 +603,6 @@ mod tests {
 
     fn place(s: &mut GameState, x: u8, y: u8) {
         play(s, Move::Place(Coord::new(x, y)));
-    }
-
-    fn to_stone(player: Player) -> Stone {
-        match player {
-            Player::Black => Stone::Black,
-            Player::White => Stone::White,
-        }
     }
 
     /// 坐标约定的锁定测试：core 的 `board[y][x]` 与 `Vertex::from_coords(row, col)`
@@ -821,8 +854,7 @@ mod tests {
     /// 原先断言「落在中心 5×5」因此是**随机变红**的：12000ms（debug 下的
     /// `test_budget(1000)`）预算跑出 11777 次 playout 时首选是 (3,1)，测试就挂。
     /// 该断言测的是「playout 数恰好落在哪个区间」，不是引擎行为，已改为只断言真正
-    /// 成立的性质。首选漂移已由 PUCT 先验修掉，回归守卫见
-    /// `go9_empty_first_move_is_stable`。
+    /// 成立的性质。首选不退化的回归守卫见 `go9_empty_first_move_is_not_degenerate`。
     #[test]
     fn go9_empty_returns_a_sane_result() {
         let s = go(9);
@@ -842,18 +874,22 @@ mod tests {
         assert!(r.nodes > 100, "预算内只跑了 {} 次 playout", r.nodes);
     }
 
-    /// 空盘首选必须稳定落在中心，且不随搜索量漂移。
+    /// 空盘首选不能退化到一线（角/边端点）。
     ///
-    /// 这是 PUCT 先验的回归守卫。没有先验时，随机 playout 分辨不出空盘点位的优劣
-    /// （实测前五名的 q 挤在 0.50~0.53，标准误约 0.018），`argmax(visits)` 等于在
-    /// 噪声里取最大值——同一个种子下首选会随预算在 (6,2)/(1,5)/(5,2)/(4,4)/(2,4)/
-    /// (1,2) 之间乱跳，其中好几个在二线，用户看到的是「AI 第一手像乱下」。
+    /// 这条原先断言首选落在中心 3×3，立论是「PUCT 先验把首选收进中心」。komi 对齐
+    /// 到 core 的 7.5 后（黑方空盘 q 从约 0.52 落到约 0.45，见 [`komi_winner`]）首选
+    /// 漂到了三线 (4,6) 一带，追查发现原断言是 komi 6.5 时代的噪声产物：空盘上没有
+    /// 任何落子，gamma 采样退化成近均匀分布（实测各候选先验 0.0122~0.0159，均匀值
+    /// 0.0122；把先验整体抹成均匀后，三个预算的访问量分布逐位不变）。也就是说空盘
+    /// 首选从来不是被先验钉住的，而是被 q 的滚雪球噪声钉住——胜负阈值挪 1 目就足以
+    /// 把落点从中心 3×3 重掷到三线，以及最短预算下 (6,1)/(5,2)/(7,4) 之间的游移。
     ///
-    /// 三个预算＝三档搜索量。修复前这三次大概率给出互不相同的着法；断言取中心
-    /// 3×3 这个宽松判据，是为了别把「先验把范围收进中心」误判成「必须精确等于
-    /// 天元」——(4,4) 与 (3,4) 在 9 路空盘上都是合理开局。
+    /// 所以这条现在只守「搜索没有整体坏掉」：三个预算下的首选都不得退到一线。
+    /// 扫描序钉死首选由 `short_budget_move_is_not_scan_order` 单独兜住；先验本身的
+    /// 性质（pass 落在 Laplace 下限、归一化）由 `root_pass_prior_is_the_laplace_floor`
+    /// 钉住。
     #[test]
-    fn go9_empty_first_move_is_stable() {
+    fn go9_empty_first_move_is_not_degenerate() {
         let picks: Vec<(u8, u8)> = [200u32, 600, 1500]
             .iter()
             .map(|&ms| {
@@ -865,8 +901,8 @@ mod tests {
             .collect();
         for &(x, y) in &picks {
             assert!(
-                (3..=5).contains(&x) && (3..=5).contains(&y),
-                "9 路空盘首选跑到中心 3×3 之外（先验失效？）：{picks:?}"
+                (1..=7).contains(&x) && (1..=7).contains(&y),
+                "9 路空盘首选退化到一线（搜索坏了？）：{picks:?}"
             );
         }
     }
@@ -1187,5 +1223,78 @@ mod tests {
             probe.try_play(Move::Place(Coord::new(x, y))).is_ok(),
             "AI 给出 core 拒绝的着法 ({x},{y})"
         );
+    }
+
+    /// playout 的胜负判定必须按 core 的 KOMI=7.5，而不是 go_game_board 私有字段里
+    /// 硬编码的 6.5。
+    ///
+    /// go_game_board 的 `stone_score = ceil(-6.5) + 黑子 - 白子 = -6 + 地域差`，
+    /// `playout_winner` 判黑胜当且仅当分数 > 0（地域差 + 眼位差 ≥ 7）；core 的
+    /// 中国规则计分黑需 ≥ 8。用「黑散子、白停一手」重放出眼位差恰为 0 的盘面：
+    /// 地域差 7 时按应用计分白胜 0.5 目、差 8 才黑胜——修复前两条都按 ≥ 7 判黑，
+    /// 胜负条与计分在整条 7 目边界带上反向。
+    #[test]
+    fn playout_decision_matches_core_komi() {
+        for (margin, want) in [(7usize, Player::White), (8usize, Player::Black)] {
+            let mut s = go(9);
+            // 两条横线隔一格散开：任何空点都有同排/邻排的空邻点，四邻不可能全是
+            // 同色 → 眼位差恒 0（白方无子，白眼更无从谈起）。
+            let spots: Vec<(u8, u8)> = (0..margin)
+                .map(|i| (((i % 4) * 2) as u8, (1 + (i / 4) * 2) as u8))
+                .collect();
+            for &(x, y) in &spots {
+                place(&mut s, x, y);
+                play(&mut s, Move::Pass); // 白停一手让黑继续落
+            }
+            let mut b = Board::with_size(9, 9);
+            replay(&mut b, &s);
+
+            // 前提自检：分数必须恰好是 -6 + margin，差一分说明眼位前提塌了。
+            assert_eq!(
+                b.playout_score(),
+                LIBEGO_KOMI_INVERSE + margin as i32,
+                "前提失效：眼位差不为 0（margin={margin}）"
+            );
+            // 差 7 目时上游判据（score > 0）确实判黑——把这条 1 目的分歧钉住，
+            // 防止有人把判定「简化」回 playout_winner。
+            assert_eq!(b.playout_winner(), Player::Black, "前提失效：上游判据变了");
+            assert_eq!(komi_winner(b.playout_score()), want, "margin={margin} 判错方");
+        }
+    }
+
+    /// pass 的根先验必须严格落在 Laplace 平滑的下限：模式化采样从不产出 pass，
+    /// 它的平滑计数恒为 1，先验 = 1/total，且不高于任何候选。
+    ///
+    /// 这是 `legal_moves` 里「pass 垫底」论据的根节点半边——PUCT 按 prior·√N
+    /// 排序，pass 靠这个下限天然排到最后。哪天采样开始产出 pass，这条的等式
+    /// 就会断，垫底注释也就不再成立。
+    #[test]
+    fn root_pass_prior_is_the_laplace_floor() {
+        let root = Board::with_size(9, 9);
+        let g = gammas();
+        let n = root.empty_vertex_count();
+        let mut cands: Vec<Vertex> = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            let v = root.empty_vertex(i);
+            if root.is_legal(Player::Black, v) {
+                cands.push(v);
+            }
+        }
+        cands.insert(0, Vertex::pass()); // 与 legal_moves 同一顺序
+        let priors = root_priors(&root, g, &cands);
+
+        let pass_prior = priors[usize::from(Vertex::pass())];
+        // 样本必落在候选集内（gamma 只选合法空点、不选 pass），所以
+        // total = 采样数 + 每候选的 +1 平滑。
+        let total = f64::from(PRIOR_SAMPLES) + cands.len() as f64;
+        assert_eq!(pass_prior, 1.0 / total, "pass 先验应恰为 Laplace 下限 1/total");
+        for &c in &cands {
+            assert!(
+                priors[usize::from(c)] >= pass_prior,
+                "有候选的先验低于 pass 下限，垫底论据失效"
+            );
+        }
+        let sum: f64 = cands.iter().map(|&c| priors[usize::from(c)]).sum();
+        assert!((sum - 1.0).abs() < 1e-9, "先验应归一化：sum={sum}");
     }
 }

@@ -20,7 +20,7 @@ pub mod odds;
 pub mod wasm;
 
 use goptop_core::board::Stone;
-use goptop_core::game::{GameKind, GameState};
+use goptop_core::game::{GameKind, GameState, Move};
 use serde::{Deserialize, Serialize};
 
 /// 分析请求（wasm 边界与 Worker 消息共用；字段名走 camelCase 与前端一致）。
@@ -35,6 +35,31 @@ pub struct AnalyzeRequest {
     pub budget_ms: u32,
     /// 是否需要最佳着法（人机对战 true；纯胜率分析 false 可省下选点开销）。
     pub want_move: bool,
+}
+
+impl AnalyzeRequest {
+    /// 宿主边界校验。serde 对 GameState 零校验：`kind` 与 history 坐标都是自由值，
+    /// 而下游围棋的 `Board::with_size` 对 0/19+ 尺寸是 assert、figrid 的 zobrist
+    /// 表按 15 路索引——workspace 的 panic="abort" 会让这类 panic 跨鸿蒙 FFI /
+    /// Tauri 命令直接掀翻进程。入口先过这里，把失败变成明确的错误文案。
+    ///
+    /// # Errors
+    /// `kind` 非法（五子棋仅 15，围棋仅 9/13/19），或 history 坐标越出逻辑盘。
+    pub fn validate(&self) -> Result<(), String> {
+        let st = &self.state;
+        if !st.kind.is_valid() {
+            return Err(format!("invalid kind: {:?}（五子棋仅 15，围棋仅 9/13/19）", st.kind));
+        }
+        let size = st.kind.size() as u8;
+        for mv in &st.history {
+            if let Move::Place(c) = mv
+                && (c.x >= size || c.y >= size)
+            {
+                return Err(format!("history 坐标 ({},{}) 越出 {} 路盘", c.x, c.y, size));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 分析结果。
@@ -72,6 +97,19 @@ impl AnalyzeResult {
 /// 终局（`winner.is_some()`）与围棋计分态直接返回确定结果，不进搜索——这两个
 /// 状态下 core 已拒绝落子，再搜索既无意义也会给出误导性胜率。
 pub fn analyze(req: &AnalyzeRequest) -> AnalyzeResult {
+    // 非法请求在这里降级成中性结果而不是 panic：ohos dispatch 与 Tauri 命令拿到的
+    // 返回类型是 AnalyzeResult，表达不了错误，而 panic 跨 FFI 是整个进程 abort。
+    // 要拿到明确的错误文案走 [`AnalyzeRequest::validate`]——wasm 边界的
+    // `analyze_json` 先校验再分析，非法请求回 `{"error":...}`。
+    if req.validate().is_err() {
+        return AnalyzeResult {
+            best_move: None,
+            win_rate: 0.5,
+            depth: 0,
+            nodes: 0,
+            elapsed_ms: 0,
+        };
+    }
     let st = &req.state;
     if st.winner.is_some() || st.scoring {
         return AnalyzeResult::decided(st, req.my_color);
@@ -79,5 +117,88 @@ pub fn analyze(req: &AnalyzeRequest) -> AnalyzeResult {
     match st.kind {
         GameKind::Gomoku { size } => gomoku::analyze(st, size, req.my_color, req.budget_ms, req.want_move),
         GameKind::Go { size } => go::analyze(st, size, req.my_color, req.budget_ms, req.want_move),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use goptop_core::board::Coord;
+
+    /// 合法请求必须通过校验——守卫不能误伤正常对局（两种棋、含中盘历史）。
+    #[test]
+    fn validate_accepts_real_states() {
+        let mut go = GameState::new(GameKind::Go { size: 9 });
+        go.try_play(Move::Place(Coord::new(4, 4))).unwrap();
+        let req = AnalyzeRequest {
+            state: go,
+            my_color: Stone::White,
+            budget_ms: 100,
+            want_move: false,
+        };
+        assert_eq!(req.validate(), Ok(()));
+
+        let mut gomoku = GameState::new(GameKind::default_gomoku());
+        gomoku.try_play(Move::Place(Coord::new(7, 7))).unwrap();
+        let req = AnalyzeRequest {
+            state: gomoku,
+            my_color: Stone::Black,
+            budget_ms: 100,
+            want_move: false,
+        };
+        assert_eq!(req.validate(), Ok(()));
+    }
+
+    /// serde 对 GameState 零校验：非法 kind 与越界坐标都能原样反序列化出来，
+    /// 边界必须自己拦。围棋 `Board::with_size(25,25)` 是 assert，panic 跨 FFI
+    /// 是整个进程 abort。
+    #[test]
+    fn validate_rejects_invalid_kind_and_coords() {
+        // kind：围棋只允许 9/13/19，25 会让 with_size 直接 assert。
+        let mut v = serde_json::to_value(GameState::new(GameKind::default_go())).unwrap();
+        v["kind"] = serde_json::json!({ "Go": { "size": 25 } });
+        let st: GameState = serde_json::from_value(v).unwrap();
+        let req = AnalyzeRequest {
+            state: st,
+            my_color: Stone::Black,
+            budget_ms: 1,
+            want_move: false,
+        };
+        let err = req.validate().expect_err("围棋 size=25 必须被拒");
+        assert!(err.contains("25"), "错误文案应带上非法尺寸：{err}");
+
+        // history：坐标必须落在逻辑盘内，错误文案要能定位到具体坐标。
+        let mut v = serde_json::to_value(GameState::new(GameKind::default_gomoku())).unwrap();
+        v["history"] =
+            serde_json::json!([{ "Place": { "x": 7, "y": 7 } }, { "Place": { "x": 20, "y": 0 } }]);
+        let st: GameState = serde_json::from_value(v).unwrap();
+        let req = AnalyzeRequest {
+            state: st,
+            my_color: Stone::Black,
+            budget_ms: 1,
+            want_move: false,
+        };
+        let err = req.validate().expect_err("越界坐标必须被拒");
+        assert!(err.contains("(20,0)"), "错误文案应带上坐标：{err}");
+    }
+
+    /// 兜底语义：`analyze` 的签名表达不了错误，非法请求降级成中性结果——绝不
+    /// panic 跨 FFI，也不把半分析的数字当真值交出去。
+    #[test]
+    fn analyze_neutralizes_invalid_request() {
+        let mut v = serde_json::to_value(GameState::new(GameKind::Go { size: 9 })).unwrap();
+        v["kind"] = serde_json::json!({ "Go": { "size": 25 } });
+        let st: GameState = serde_json::from_value(v).unwrap();
+        let req = AnalyzeRequest {
+            state: st,
+            my_color: Stone::Black,
+            budget_ms: 50,
+            want_move: true,
+        };
+        assert!(req.validate().is_err());
+        let r = analyze(&req); // 修复前：Board::with_size(25,25) assert → 进程 abort
+        assert_eq!(r.best_move, None);
+        assert_eq!(r.win_rate, 0.5);
+        assert_eq!(r.nodes, 0);
     }
 }

@@ -19,6 +19,11 @@ pub fn analyze_json(req_json: &str) -> String {
         Ok(r) => r,
         Err(e) => return format!("{{\"error\":\"bad request: {e}\"}}"),
     };
+    // 反序列化不校验规则不变量（kind 尺寸、history 坐标），先过边界校验再进引擎：
+    // 非法请求回明确错误，而不是靠引擎深处的守卫悄悄降级，更不能 panic 出 Worker。
+    if let Err(e) = req.validate() {
+        return format!("{{\"error\":\"bad request: {e}\"}}");
+    }
     match serde_json::to_string(&analyze(&req)) {
         Ok(s) => s,
         Err(e) => format!("{{\"error\":\"serialize: {e}\"}}"),

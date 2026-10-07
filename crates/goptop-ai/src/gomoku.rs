@@ -74,8 +74,19 @@ fn build_board(state: &GameState) -> Board {
     for mv in &state.history {
         match mv {
             Move::Place(c) => {
-                board.make_move(to_idx(c.y as usize, c.x as usize));
-                replayed = true;
+                // 反序列化来的 history 坐标是自由 u8，而 figrid 的 make_move 会走到
+                // zobrist 表（`[u64; 225]`）的按 idx 索引——任何 to_idx ≥ 225（坐标
+                // 越出 15 路）在 release 下也是必 panic 的越界索引，panic="abort"
+                // 会跨 FFI 掀翻整个进程。与 go.rs replay 的 MAX_BOARD_SIZE 守卫
+                // 同款：1 条比较换掉一个崩溃点。
+                if (c.x as usize) < BOARD_SIZE && (c.y as usize) < BOARD_SIZE {
+                    board.make_move(to_idx(c.y as usize, c.x as usize));
+                    replayed = true;
+                } else {
+                    // 跳过落子也要翻手：make_move 内部会推进 side_to_move，漏翻的
+                    // 话后续每一手的颜色整体错位，analyze 的行棋方一致性断言也会炸。
+                    board.side_to_move = board.side_to_move.opponent();
+                }
             }
             // core 的五子棋 Pass 只翻手、不落子（UI 不暴露，协议保留以统一棋种）。
             // 这里必须同样翻 figrid 的 side_to_move，否则 Pass 之后的每一手都会
@@ -413,5 +424,79 @@ mod tests {
             "预算 {budget}ms 实际 {}ms，超过上界 {ceiling}ms",
             r.elapsed_ms
         );
+    }
+
+    /// 把 `state` 序列化成 JSON、覆写 `history`（可选 `to_move`）再反序列化回来。
+    ///
+    /// serde 对 GameState 零校验：越界坐标照样反序列化成功——这正是坐标守卫必须
+    /// 由我们自己做的证明，用 serde 注入也比手工拼 GameState 更贴近真实攻击面。
+    fn state_with_history(history: serde_json::Value, to_move: Option<&str>) -> GameState {
+        let mut v = serde_json::to_value(state_from(&[])).expect("空局可序列化");
+        v["history"] = history;
+        if let Some(tm) = to_move {
+            v["to_move"] = serde_json::json!(tm);
+        }
+        serde_json::from_value(v).expect("serde 不拦越界坐标，反序列化必须成功")
+    }
+
+    /// 敌意 history 坐标不得把原生层打成 panic。
+    ///
+    /// `{"Place":{"x":20,"y":20}}` 的 to_idx = 20*15+20 = 320，远超 figrid zobrist
+    /// 表（`[u64; 225]`）的范围——修复前 release 下是必 panic 的越界索引，
+    /// panic="abort" 会跨 FFI 掀翻整个进程。守卫必须跳过该手**且仍翻手**，否则
+    /// 后续着色整体错位、analyze 的行棋方一致性断言也会炸。
+    #[test]
+    fn hostile_history_coords_do_not_panic() {
+        let st = state_with_history(serde_json::json!([{ "Place": { "x": 20, "y": 20 } }]), None);
+        let fb = build_board(&st); // 修复前：zobrist 越界 panic
+        assert_eq!(fb.black.count_ones() + fb.white.count_ones(), 0, "越界手必须被跳过");
+        // 跳过落子仍要翻手：这手在 core 语义里已经把行棋方交给白。
+        assert_eq!(fb.side_to_move, FgStone::White, "跳过越界手后没翻手");
+
+        // 与合法手混排也不得错位：黑方的越界手夹在中间，跳过后白方仍按交替颜色落。
+        let st = state_with_history(
+            serde_json::json!([
+                { "Place": { "x": 7, "y": 7 } },
+                { "Place": { "x": 0, "y": 0 } },
+                { "Place": { "x": 20, "y": 20 } },
+                { "Place": { "x": 8, "y": 7 } }
+            ]),
+            Some("Black"),
+        );
+        let fb = build_board(&st);
+        assert!(fb.black.get(to_idx(7, 7)), "黑子应在 (7,7)");
+        assert!(fb.white.get(to_idx(0, 0)), "白子应在 (0,0)");
+        assert!(
+            fb.white.get(to_idx(7, 8)),
+            "白子应落在 core 坐标 (8,7)＝figrid row7/col8"
+        );
+        assert_eq!(fb.black.count_ones(), 1, "越界手不得留下脏子");
+        assert_eq!(fb.white.count_ones(), 2);
+    }
+
+    /// 边界用例：to_idx(y=0, x=15) = 225，恰好是 zobrist 表（`[u64; 225]`）的
+    /// 越界起点。越界索引没有静默窗口，这条钉住「刚好越界 1 格」也必须被拦。
+    #[test]
+    fn boundary_coord_225_does_not_panic() {
+        let st = state_with_history(serde_json::json!([{ "Place": { "x": 15, "y": 0 } }]), None);
+        let fb = build_board(&st); // 修复前：zobrist[225] 越界索引 panic
+        assert_eq!(fb.black.count_ones() + fb.white.count_ones(), 0, "越界手必须被跳过");
+        assert_eq!(fb.side_to_move, FgStone::White, "跳过越界手后没翻手");
+    }
+
+    /// 敌意请求端到端（经 [`crate::analyze`]）：不得 panic，胜率必须落在 [0,1]。
+    #[test]
+    fn analyze_survives_hostile_request() {
+        let st = state_with_history(
+            serde_json::json!([{ "Place": { "x": 20, "y": 20 } }]),
+            Some("White"),
+        );
+        let r = crate::analyze(&AnalyzeRequest {
+            state: st,
+            my_color: Stone::Black,
+            budget_ms: BUDGET_MS,
+            want_move: false,
+        });
+        assert!((0.0..=1.0).contains(&r.win_rate), "胜率越界：{}", r.win_rate);
     }
 }
