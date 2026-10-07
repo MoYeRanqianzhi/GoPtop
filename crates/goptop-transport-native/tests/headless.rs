@@ -11,9 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use goptop_net::session::UiCommand;
 use goptop_transport_native::{HeadlessHost, Host, NativeSession, SessionConfig};
 use serde_json::Value;
+use tokio_tungstenite::tungstenite::Message;
 
 /// 进程内广播 hub 是**全局**的（真实场景一个进程只有一个 app 实例），
 /// 所以并行跑的用例会互相收到对方的消息。用一把全局锁把用例串起来——
@@ -283,4 +285,81 @@ async fn 链接解析在_Rust() {
 
     let bad: Value = serde_json::from_str(&a.parse_link("这不是链接")).expect("应为 JSON");
     assert_eq!(bad["ok"], Value::Bool(false), "非链接文本应被拒绝");
+}
+
+/// 服务器模式生命周期：hello 上行、welcome/peers 下行消化，以及 **drop 后不再重连**。
+///
+/// 无头用例此前全是 server_mode:false——`ws::run` 的重连循环与停机判定没有任何
+/// Rust 级覆盖。旧退出条件 `rx.is_closed()` 在 server_mode 下**永远为假**（tx 就在
+/// 被任务自己抱着的 Core 里），会话释放后它会每 8s 重新敲一次门。回归点：桩端
+/// 绝不能在 drop 之后收到第二次连接（RECONNECT_MS=8s，盯 11s 够它现形）。
+#[tokio::test]
+async fn 服务器模式_drop后停止重连() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    // 本地 WS 桩：接受连接 → 收到 hello 就回 welcome + peers → 1s 后主动断开
+    //（触发客户端的 8s 重连节奏），并**持续接受**后续连接以捕捉不该发生的重连。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("绑本地端口");
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let hellos: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let accepted = accepted.clone();
+        let hellos = hellos.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let hellos = hellos.clone();
+                tokio::spawn(async move {
+                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                    let (mut sink, mut stream) = ws.split();
+                    // 客户端连上后第一条 Text 必是 hello；答完下行、留 1s 消化，
+                    // 就断开去触发它的重连路径
+                    while let Some(Ok(msg)) = stream.next().await {
+                        let Message::Text(txt) = msg else { continue };
+                        hellos.lock().unwrap().push(txt.to_string());
+                        let _ = sink.send(Message::Text(r#"{"t":"welcome"}"#.into())).await;
+                        let _ = sink.send(Message::Text(
+                            r#"{"t":"peers","users":[{"id":"u-stub","name":"桩","status":"idle","gameId":null}]}"#.into(),
+                        ))
+                        .await;
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        break; // drop sink/stream = 断开
+                    }
+                });
+            }
+        });
+    }
+
+    // 服务器模式会话，经设置存储指向桩（`NativeSession::new` 只认宿主存储里的地址）
+    let h = host();
+    h.storage_set("goptop:server-sel", Some("stub"));
+    let servers = format!(r#"[{{"id":"stub","label":"桩","url":"ws://127.0.0.1:{port}/ws"}}]"#);
+    h.storage_set("goptop:servers", Some(servers.as_str()));
+    let mut c = cfg("甲");
+    c.server_mode = true;
+    let srv = NativeSession::new(c, h.clone(), "http://localhost/");
+
+    // hello 上行 + welcome/peers 下行
+    let ok = pump_until(&srv, &srv, || s(&snap(&srv), "serverState") == "ready", 10).await;
+    assert!(ok, "10 秒内未连上桩并进入 ready：serverState={}", s(&snap(&srv), "serverState"));
+    assert!(
+        snap(&srv)["peers"].as_array().is_some_and(|p| p.len() == 1),
+        "peers 下行应进名册，实际 {:?}",
+        snap(&srv)["peers"]
+    );
+    let hello = hellos.lock().unwrap().first().cloned().unwrap_or_default();
+    assert!(hello.contains(r#""t":"hello""#) && hello.contains("甲"), "桩应先收到 hello：{hello}");
+
+    // 释放会话，然后盯 11s（> RECONNECT_MS）：绝不允许第二次连接
+    drop(srv);
+    let deadline = std::time::Instant::now() + Duration::from_secs(11);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "会话释放后不得再连：重连循环必须随停机标志退出"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

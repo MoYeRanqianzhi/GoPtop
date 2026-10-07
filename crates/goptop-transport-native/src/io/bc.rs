@@ -96,24 +96,51 @@ pub fn join(core: &SharedCore, name: &str) {
     // 订阅者，同一条广播被处理两遍——正是上面「challenge 被受理 4 次」那类故障。
     // 提前返回时多订的那个 rx 立即析构，无害。
     let mut rx = hub().subscribe();
-    let me = {
+    let (me, stop) = {
         let Ok(mut c) = core.lock() else { return };
         if c.presence.is_some() {
             return;
         }
         let me = c.session.user_id.clone();
         c.presence = Some(Bc { name: name.to_string(), me: me.clone() });
-        me
+        (me, c.stop.clone())
     };
 
     let sub = core.clone();
     tokio::spawn(async move {
-        while let Ok((from, text)) = rx.recv().await {
-            // 不回送发送者自己——对齐 BroadcastChannel 语义（见 Payload 的说明）
-            if from == me {
-                continue;
+        // 停机轮询（与后台泵同款 50ms）：旧退出条件——`recv()` 返回 Closed——在这
+        // 进程里**永远等不到**，hub 是 `'static` 的 `OnceLock` sender（见上），永不
+        // drop。不查标志的话，会话释放后本任务抱着 `Arc<Core>`（连带 RTC 连接与
+        // socket）永生，每切一次页面漏一份。
+        let mut halt = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            let got = tokio::select! {
+                _ = halt.tick() => {
+                    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    continue;
+                }
+                got = rx.recv() => got,
+            };
+            match got {
+                Ok((from, text)) => {
+                    // 不回送发送者自己——对齐 BroadcastChannel 语义（见 Payload 的说明）
+                    if from == me {
+                        continue;
+                    }
+                    presence::on_presence_text(&sub, &me, &text);
+                }
+                // Lagged 只是落后容量丢了几条，receiver **仍在订阅**、可继续 recv。
+                // 当终结处理的话，一次 256 条积压（快速连发/调度延迟）就永久静默这条
+                // 会话的 BC 链路——presence 与对局消息三路之一，且无任何自愈与提示。
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    if std::env::var("GOPTOP_TRACE_BC").is_ok() {
+                        eprintln!("[bc {me}] 落后 {n} 条已丢弃，继续消费");
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
-            presence::on_presence_text(&sub, &me, &text);
         }
     });
 }
@@ -178,5 +205,73 @@ pub mod presence {
             }
             _ => {}
         }
+    }
+}
+
+/// 生命周期与容错的回归（Arc 计数只有 crate 内够得到，故放这里而非 tests/）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use goptop_net::session::{Event, PresenceEvt};
+
+    use crate::test_support;
+
+    /// 订阅任务必须随会话停机退出并交还 Core。
+    ///
+    /// 修复前任务唯一的退出条件（`recv()` 返回 Closed）在这进程里永远不成立——
+    /// hub 的 sender 是 `'static` 的——`Arc<Core>` 永不回落，每释放一个会话漏一份。
+    #[tokio::test]
+    async fn 订阅任务随会话停机退出() {
+        let core = test_support::core("u-halt");
+        join(&core, "goptop-presence-v1");
+        assert_eq!(Arc::strong_count(&core), 2, "会话侧 + 订阅任务各持一份");
+        let stop = core.lock().unwrap().stop.clone();
+        let weak = Arc::downgrade(&core);
+        drop(core); // 模拟 NativeSession 被释放（Drop 置位同一个 stop）
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // 停机轮询 50ms 一拍，给足几拍
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            if weak.upgrade().is_none() {
+                break;
+            }
+        }
+        assert!(weak.upgrade().is_none(), "停机置位后订阅任务必须退出并交还 Core");
+    }
+
+    /// Lagged 不是终结：落后容量后继续消费，challenge 仍能进队列。
+    ///
+    /// 修复前 `while let Ok` 把首个 Lagged 当 Closed，订阅任务当场死亡；而
+    /// `join()` 因 presence 已挂不会重订，这条 BC 链路永久失聪且无提示。
+    #[tokio::test]
+    async fn lagged后订阅继续_不再失聪() {
+        let core = test_support::core("u-lag");
+        join(&core, "goptop-presence-v1");
+        // 让订阅任务先跑起来、停在 recv 上（current_thread 下 spawn 的任务只在
+        // 本任务 await 时才被调度）
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // 同步连发 260 条噪声（hub 容量 256，必然制造 Lagged）。噪声既无 `t`
+        // 也无 `kind`/`sender`，分类器整条忽略，不会污染队列。
+        for i in 0..260u64 {
+            let _ = hub().send(("other".into(), i.to_string()));
+        }
+        // 给订阅任务时间消化积压（经历 Lagged）
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // 积压之后再补一条指向本会话的 challenge：任务若已死，这里 send 的
+        // 返回值仍是 Ok（receiver 名义上还在），只有队列能作证。
+        let challenge = serde_json::json!({
+            "t": "challenge", "to": "u-lag", "from": "other", "fromName": "对手",
+            "kind": "gomoku", "size": 15, "gameId": "g-lag",
+        });
+        hub().send(("other".into(), challenge.to_string())).expect("订阅任务应仍在订阅");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let got = core.lock().unwrap().queue.iter().any(|ev| {
+            matches!(ev, Event::Presence(PresenceEvt::Challenge { .. }))
+        });
+        assert!(got, "Lagged 之后订阅必须继续：challenge 应进队列");
     }
 }

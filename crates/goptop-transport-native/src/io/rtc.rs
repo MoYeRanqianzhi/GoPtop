@@ -47,6 +47,11 @@ pub struct RtcPeer {
     /// 完成标志。**不能只靠 Notify**：`notify_waiters()` 只唤醒已注册的等待者、
     /// 不存许可，若 gathering 在 wait 之前就完成，通知会丢、只能等 8s 超时。
     gather_done: Arc<std::sync::atomic::AtomicBool>,
+    /// 事件循环的停机源（见 [`RtcPeer::close`] 的说明）。
+    halt: Arc<tokio::sync::Notify>,
+    /// 事件循环任务句柄（测试用于确认 close 后它确实退出；产品代码不碰它）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    poll: tokio::task::JoinHandle<()>,
 }
 
 impl RtcPeer {
@@ -59,6 +64,14 @@ impl RtcPeer {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        // **先叫停事件循环再关 pc**：webrtc 0.20 的 `pc.close()` 走的是驱动 abort，
+        // 既不分发 DC 的 OnClose、也不关闭 DC 的事件通道——不叫停的话，事件循环会
+        // 永远停在 `dc.poll()` 上，连同它持有的 dc Arc 一起把「任务→DC→连接→map
+        // →发送端」的引用环钉死：每次 ClosePeers / 同 tag 重建泄漏一个任务与整条
+        // 内部图（对端先关的那侧反而没事，OnClose 会正常送达）。
+        // 用 `notify_one` 而非 `notify_waiters`：它存许可，通知落在两轮事件之间
+        // 也不丢，下一轮 `select!` 立即命中退出分支。
+        self.halt.notify_one();
         let pc = self.pc.clone();
         tokio::spawn(async move {
             let _ = pc.close().await;
@@ -113,32 +126,48 @@ impl PeerConnectionEventHandler for Handler {
 
     /// 被动侧：若对端不是 negotiated DC（配置回退），仍要接住并挂上事件循环。
     async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
-        poll_channel(self.core.clone(), self.tag.clone(), dc);
+        // 该路径没有 RtcPeer 句柄可通知，给一个永不触发的停机源——行为与
+        // negotiated 路径的旧写法一致，只靠 OnClose / 通道关闭退出。
+        poll_channel(self.core.clone(), self.tag.clone(), dc, Arc::new(tokio::sync::Notify::new()));
     }
 }
 
 /// 起一个任务持续 poll 该 DataChannel 的事件（webrtc-rs 0.20 是拉模型）。
-fn poll_channel(core: SharedCore, tag: String, dc: Arc<dyn DataChannel>) {
+///
+/// `halt` 是本端 [`RtcPeer::close`] 的停机源：`select!` 两路同时等「停机信号」与
+/// 「DC 事件」，谁先到走谁。`dc.poll()` 内部是 channel recv（取消安全，消息没取走
+/// 不算消费），被停机一路抢掉不会丢事件。
+fn poll_channel(
+    core: SharedCore,
+    tag: String,
+    dc: Arc<dyn DataChannel>,
+    halt: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(ev) = dc.poll().await {
-            match ev {
-                DataChannelEvent::OnOpen => {
-                    bridge::queue(&core, Event::PeerState { tag: tag.clone(), opened: true, closed: false, failed: false });
-                }
-                DataChannelEvent::OnClose => {
-                    bridge::queue(&core, Event::PeerState { tag: tag.clone(), opened: false, closed: true, failed: false });
-                    return;
-                }
-                DataChannelEvent::OnMessage(msg) => {
-                    let txt = String::from_utf8_lossy(&msg.data);
-                    if let Ok(m) = serde_json::from_str::<goptop_net::protocol::GameMsg>(&txt) {
-                        bridge::queue(&core, Event::Net(m));
+        loop {
+            tokio::select! {
+                // 本端 close 的退出点（对端先关走下面的 OnClose 分支）
+                _ = halt.notified() => return,
+                ev = dc.poll() => match ev {
+                    Some(DataChannelEvent::OnOpen) => {
+                        bridge::queue(&core, Event::PeerState { tag: tag.clone(), opened: true, closed: false, failed: false });
                     }
-                }
-                _ => {}
+                    Some(DataChannelEvent::OnClose) => {
+                        bridge::queue(&core, Event::PeerState { tag: tag.clone(), opened: false, closed: true, failed: false });
+                        return;
+                    }
+                    Some(DataChannelEvent::OnMessage(msg)) => {
+                        let txt = String::from_utf8_lossy(&msg.data);
+                        if let Ok(m) = serde_json::from_str::<goptop_net::protocol::GameMsg>(&txt) {
+                            bridge::queue(&core, Event::Net(m));
+                        }
+                    }
+                    Some(_) => {}
+                    None => return,
+                },
             }
         }
-    });
+    })
 }
 
 /// 建连接。`inviter=true` 先建 DC 并生成 offer；false 侧等远端 offer 喂进来。
@@ -225,7 +254,8 @@ async fn build(core: &SharedCore, tag: &str) -> Result<RtcPeer, String> {
         .await
         .map_err(|e| e.to_string())?;
     if trace { eprintln!("[rtc {tag}] DC 建成"); }
-    poll_channel(core.clone(), tag.to_string(), dc.clone());
+    let halt = Arc::new(tokio::sync::Notify::new());
+    let poll = poll_channel(core.clone(), tag.to_string(), dc.clone(), halt.clone());
 
     Ok(RtcPeer {
         pc,
@@ -233,6 +263,8 @@ async fn build(core: &SharedCore, tag: &str) -> Result<RtcPeer, String> {
         closed: std::sync::atomic::AtomicBool::new(false),
         gather,
         gather_done,
+        halt,
+        poll,
     })
 }
 
@@ -520,4 +552,41 @@ fn decode_payload_with(core: &SharedCore, raw: &str, encrypted: bool, key: Optio
     };
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     Some((v["s"].as_str()?.to_string(), v["t"].as_str().unwrap_or("offer").to_string()))
+}
+
+/// close 停机语义的回归（`build`/`poll_channel` 是私有函数，只能放 crate 内）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::test_support;
+
+    /// 本端 close 必须叫停事件循环并交还 dc 的 Arc。
+    ///
+    /// 修复前循环唯一退出条件是 `dc.poll()` 返回 None（通道关闭）或 OnClose——
+    /// 而 `pc.close()` 走驱动 abort，两者都不会发生：任务永久停摆，连同它持有的
+    /// dc Arc 把整条内部引用图钉死（每次 ClosePeers / 同 tag 重建泄漏一个）。
+    /// 无需组网：单 PC + negotiated DC 即可复现，与配对无关。
+    #[tokio::test]
+    async fn close_叫停事件循环并交还_dc() {
+        let core = test_support::core("u-rtc");
+        let peer = build(&core, "t").await.expect("本地建 PC+DC（无 STUN、不组网）");
+        let dc = peer.dc.lock().await.clone().expect("negotiated DC 应已登记");
+        let with_task = Arc::strong_count(&dc);
+        assert!(with_task >= 2, "事件循环应持有 dc（实测 {with_task}）");
+
+        peer.close();
+        // 停机信号是即时的：给调度器留出跑完退出路径的时间
+        for _ in 0..40 {
+            if peer.poll.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(peer.poll.is_finished(), "close 后事件循环必须退出，否则本地关闭侧泄漏任务");
+        assert!(
+            Arc::strong_count(&dc) < with_task,
+            "任务退出后应交还 dc 的 Arc（修复前恒为 {with_task}）"
+        );
+    }
 }

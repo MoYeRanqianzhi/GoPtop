@@ -58,6 +58,14 @@ pub struct Core {
     pub presence: Option<io::bc::Bc>,
     /// 服务器 WS。
     pub ws: Option<io::ws::ServerSocket>,
+    /// 会话停机标志，与 `NativeSession::drop` 置位的是**同一个** `Arc`。
+    ///
+    /// 常驻 IO 任务（bc 订阅、ws 重连）都抱着 `Arc<Core>`，而它们的旧退出条件
+    /// ——bc 靠 `recv()` 返回 Closed、ws 靠 `rx.is_closed()`——在进程里**永远等
+    /// 不到**：hub 的 sender 是 `'static` 的、ws 的 tx 就在被任务自己抱着的这份
+    /// Core 里。于是每次会话释放（切页/重开对局）都漏一整份 Core（连带 RTC 连接
+    /// 与 socket）。有这个标志后，各任务与后台泵同一套约定：看到置位即退。
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 共享核心（IO 任务与泵之间）。
@@ -145,4 +153,45 @@ pub fn rand4() -> [u32; 4] {
         *slot = (h.finish() as u32) | 1;
     }
     out
+}
+
+/// 本 crate 单测共用的最小构造（`#[cfg(test)]` 才编译）。
+///
+/// 生命周期类断言（订阅任务/泵任务是否随会话退出）要直接数 `Arc<Core>` 的
+/// 引用计数，集成测试够不到 `NativeSession` 的私有 `core` 字段，只能放 crate 内。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// 无 IO 句柄的最小会话核：presence/ws/peers 全空，server_mode 关（不起 WS）。
+    pub fn core(user_id: &str) -> SharedCore {
+        let session = goptop_net::session::Session::new(
+            user_id.to_string(),
+            format!("p-{user_id}"),
+            "测试".to_string(),
+            None,
+            false,
+            Vec::new(),
+            "https://goptop.pages.dev".to_string(),
+        );
+        Arc::new(std::sync::Mutex::new(Core {
+            session,
+            queue: VecDeque::new(),
+            peers: Vec::new(),
+            presence: None,
+            ws: None,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }))
+    }
+
+    /// 最小会话配置（无服务器、五子棋 15 路），供 `NativeSession::new` 用。
+    pub fn config(name: &str) -> SessionConfig {
+        SessionConfig {
+            name: name.to_string(),
+            server_mode: false,
+            share_origin: "https://goptop.pages.dev".to_string(),
+            kind: "gomoku".to_string(),
+            size: 15,
+        }
+    }
 }

@@ -85,6 +85,12 @@ async fn run(core: SharedCore, url: String, mut rx: mpsc::UnboundedReceiver<Stri
         if rx.is_closed() {
             return;
         }
+        // 会话已释放的退出点：`rx.is_closed()` 在 server_mode 下**永远为假**——tx 就在
+        // 被本任务抱着的这份 Core 里，不靠 take 不可能关。停机标志（`NativeSession::drop`
+        // 置位）是唯一能等到的那条腿：断线重连的下一轮在这里退出，不再去连。
+        if core.lock().map(|c| c.stop.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(true) {
+            return;
+        }
         bridge::queue(&core, Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
 
         let ws = match tokio_tungstenite::connect_async(&url).await {

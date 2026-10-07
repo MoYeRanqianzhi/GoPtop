@@ -62,15 +62,19 @@ impl NativeSession {
         session.size = cfg.size;
         session.engine = GameState::new(goptop_net::session::make_engine_kind(&session.kind, session.size));
 
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let core: SharedCore = Arc::new(std::sync::Mutex::new(Core {
             session,
             queue: std::collections::VecDeque::new(),
             peers: Vec::new(),
             presence: None,
             ws: None,
+            // 与 self.stop 同一个 Arc：会话释放时不止后台泵，bc 订阅与 ws 重连
+            // 任务也得跟着退（它们各自的旧退出条件在这进程里等不到，见 Core.stop）。
+            stop: stop.clone(),
         }));
 
-        let me = Self { core, host, stop: Arc::new(std::sync::atomic::AtomicBool::new(false)) };
+        let me = Self { core, host, stop };
         bridge::queue(&me.core, Event::Boot { href: href.to_string() });
         crate::io::bc::start_presence(&me.core);
         if me.core.lock().map(|c| c.session.server_mode).unwrap_or(false) {
@@ -244,4 +248,37 @@ pub fn parse_answer_json(text: &str) -> String {
 /// 供桥接层复用的 `ReduceCtx` 构造。
 pub fn reduce_ctx() -> ReduceCtx {
     ReduceCtx { now_ms: now_ms(), rand: rand4() }
+}
+
+/// 会话生命周期的回归（要数私有 `core` 字段的 Arc 计数，只能放 crate 内）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{HeadlessHost, test_support};
+
+    /// `start_pump` + [`Drop`] 的完整链路：会话释放后，后台泵与 bc 订阅任务必须
+    /// 交还 `Arc<Core>`。集成测试（tests/headless.rs）从不 drop 会话，这条路径
+    /// 曾完全没有覆盖——而宿主的生命周期契约（切页/重开都靠 drop 释放）恰恰
+    /// 建在它上面。
+    #[tokio::test]
+    async fn 会话释放后_泵与订阅任务交还核心() {
+        let host: Arc<dyn Host> = Arc::new(HeadlessHost::default());
+        let s = NativeSession::new(test_support::config("甲"), host, "http://localhost/life");
+        s.start_pump();
+        let weak = Arc::downgrade(&s.core);
+        drop(s); // Drop 置位 stop（与 Core.stop 同一个 Arc）
+
+        // 后台泵 50ms 一拍、bc 订阅也是 50ms 停机轮询：给足几拍
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            if weak.upgrade().is_none() {
+                break;
+            }
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "会话释放后所有常驻任务必须退出并交还 Core，否则每切一次页面漏一份"
+        );
+    }
 }
