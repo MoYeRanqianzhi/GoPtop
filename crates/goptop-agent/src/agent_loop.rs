@@ -28,7 +28,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::compact::{compacted_messages, used_tokens, Compactor, KEEP_RECENT_TOKENS, SummaryCompactor};
@@ -388,8 +387,9 @@ by the human player). Receipt: {receipt}\n"
         }
         // 空转限速（IDLE_POLL_MS 注）：只在「无事可做、轮到对手」的等待回合歇拍
         // ——轮到我（该行动）或队列有事件（该处理）都不歇，行动路径零延迟。
+        // 歇拍走 time_compat::delay：wasm 上没有 tokio time（阶段⑤）。
         if events.is_empty() && !is_my_turn(&snap) {
-            tokio::time::sleep(std::time::Duration::from_millis(IDLE_POLL_MS)).await;
+            crate::time_compat::delay(IDLE_POLL_MS).await;
         }
     }
 }
@@ -585,7 +585,9 @@ impl SubagentLoop {
     }
 }
 
-#[async_trait]
+// ?Send 界的取舍见 llm/mod.rs HttpChannel 注（wasm 走 spawn_local，future 非 Send）。
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl SubagentRunner for SubagentLoop {
     async fn run(&self, task: String) -> Result<String, String> {
         // 独立上下文：history 从任务文本起跑，与父代理的对话史零共享。

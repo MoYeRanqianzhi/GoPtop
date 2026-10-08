@@ -2,7 +2,7 @@
 
 use super::SharedCore;
 use std::rc::Rc;
-use crate::queue_event;
+use crate::queue_event_to;
 use goptop_net::session::{Event, ServerEvt};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -44,7 +44,7 @@ impl ServerSocket {
                 let id = crate::window().set_interval_with_callback_and_timeout_and_arguments_0(ping.as_ref().unchecked_ref(), 25_000).unwrap_or(0);
                 ping.forget();
                 let _ = id;
-                queue_event(Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
+                queue_event_to(&core, Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
             });
             ws.set_onopen(Some(cb.as_ref().unchecked_ref()));
             closures.push(cb);
@@ -52,7 +52,7 @@ impl ServerSocket {
 
         // —— onmessage：welcome/peers/signal/relayed/error ——
         {
-            let _core = core.clone();
+            let core = core.clone();
             let cb = Closure::<dyn FnMut(JsValue)>::new(move |ev: JsValue| {
                 let Ok(txt) = ev.dyn_into::<web_sys::MessageEvent>() else { return };
                 let Some(data) = txt.data().as_string() else { return };
@@ -60,7 +60,7 @@ impl ServerSocket {
                 let t = v["t"].as_str().unwrap_or("").to_string();
                 match t.as_str() {
                     "welcome" => {
-                        queue_event(Event::Server(ServerEvt::State { s: "ready".into(), detail: None }));
+                        queue_event_to(&core, Event::Server(ServerEvt::State { s: "ready".into(), detail: None }));
                     }
                     "pong" => {}
                     "peers" => {
@@ -77,10 +77,10 @@ impl ServerSocket {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        queue_event(Event::Server(ServerEvt::Peers { users }));
+                        queue_event_to(&core, Event::Server(ServerEvt::Peers { users }));
                     }
                     "signal" => {
-                        queue_event(Event::Server(ServerEvt::Signal {
+                        queue_event_to(&core, Event::Server(ServerEvt::Signal {
                             from: v["from"].as_str().unwrap_or("").into(),
                             kind: v["kind"].as_str().unwrap_or("").into(),
                             payload: v["payload"].clone(),
@@ -88,11 +88,11 @@ impl ServerSocket {
                     }
                     "relayed" => {
                         if let Ok(msg) = serde_json::from_value::<goptop_net::protocol::GameMsg>(v["payload"].clone()) {
-                            queue_event(Event::Server(ServerEvt::Relayed { from: v["from"].as_str().unwrap_or("").into(), msg }));
+                            queue_event_to(&core, Event::Server(ServerEvt::Relayed { from: v["from"].as_str().unwrap_or("").into(), msg }));
                         }
                     }
                     "error" => {
-                        queue_event(Event::Server(ServerEvt::Error {
+                        queue_event_to(&core, Event::Server(ServerEvt::Error {
                             msg: v["msg"].as_str().unwrap_or("").into(),
                             code: v["code"].as_str().map(str::to_string),
                         }));
@@ -115,7 +115,7 @@ impl ServerSocket {
                 if manual {
                     return;
                 }
-                queue_event(Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
+                queue_event_to(&core, Event::Server(ServerEvt::State { s: "connecting".into(), detail: None }));
                 let core2 = core.clone();
                 let url3 = url2.clone();
                 let retry = 3u32; // retry 恒为 3 → 1000*2^3 = 8s 固定间隔；min(10_000) 上限永不生效（真退避需按连接次数递增 retry，当前无计数）

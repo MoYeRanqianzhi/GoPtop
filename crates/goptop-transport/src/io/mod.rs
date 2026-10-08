@@ -4,13 +4,12 @@ pub mod bc;
 pub mod rtc;
 pub mod ws;
 
-use crate::{queue_event, Core};
+use crate::queue_event_to;
 use goptop_net::session::{Event, PresenceEvt};
-use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 
-pub(crate) type SharedCore = Rc<RefCell<Core>>;
+pub(crate) use crate::SharedCore;
 
 /// 启动同源 presence（announce 无循环重放，只在阶段切换时发一次；effect 侧无 2s 定时器——
 /// 这里只建 channel 收件）。
@@ -26,11 +25,11 @@ pub(crate) fn start_presence(core: &SharedCore) {
                         // 收到的 announce 仅当存活信号：本层下发空名册（Peers{peers: Vec::new()}），
                         // 而状态机在非服务器模式下用整份 peers 覆盖 s.peers（lobby.rs:321）——
                         // 即当前实现等于清空名册，属已知简化；改这里前先看 lobby.rs:316。
-                        queue_event(Event::Presence(PresenceEvt::Peers { peers: Vec::new() }));
+                        queue_event_to(&core, Event::Presence(PresenceEvt::Peers { peers: Vec::new() }));
                         let _ = &me;
                     }
                     "challenge" if v["to"].as_str() == Some(me.as_str()) => {
-                        queue_event(Event::Presence(PresenceEvt::Challenge {
+                        queue_event_to(&core, Event::Presence(PresenceEvt::Challenge {
                             from: sv(&v, "from"),
                             from_name: sv(&v, "fromName"),
                             pwd: v["pwd"].as_str().map(str::to_string),
@@ -41,10 +40,10 @@ pub(crate) fn start_presence(core: &SharedCore) {
                         }));
                     }
                     "accept" if v["to"].as_str() == Some(me.as_str()) => {
-                        queue_event(Event::Presence(PresenceEvt::Accept { from: sv(&v, "from"), game_id: sv(&v, "gameId") }));
+                        queue_event_to(&core, Event::Presence(PresenceEvt::Accept { from: sv(&v, "from"), game_id: sv(&v, "gameId") }));
                     }
                     "reject" if v["to"].as_str() == Some(me.as_str()) => {
-                        queue_event(Event::Presence(PresenceEvt::Reject { from: sv(&v, "from"), game_id: sv(&v, "gameId") }));
+                        queue_event_to(&core, Event::Presence(PresenceEvt::Reject { from: sv(&v, "from"), game_id: sv(&v, "gameId") }));
                     }
                     _ => {}
                 }
@@ -93,12 +92,18 @@ pub(crate) fn selected_server_url() -> Option<String> {
 
 /// STUN 线路读取（与历史 stun.ts 键名/默认一致；迁移逻辑简化为「配置缺失即默认」）。
 pub(crate) fn load_stun_urls() -> Vec<String> {
+    load_stun_urls_from(crate::storage_get)
+}
+
+/// 同上，但取数口由调用方给：Agent 出口（feature `agent`）的 B 席经 HookHost
+/// 读（`goptop:stun` 被 HookHost 强制成 `"[]"` 才能生效），主会话读全局钩子。
+pub(crate) fn load_stun_urls_from(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     const DEFAULT_ON: &[&str] = &[
         "stun:stun.miwifi.com:3478",
         "stun:stun.chat.bilibili.com:3478",
         "stun:stun.cloudflare.com:3478",
     ];
-    match crate::storage_get("goptop:stun").and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()) {
+    match get("goptop:stun").and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()) {
         Some(v) if v.is_array() => v
             .as_array()
             .unwrap()

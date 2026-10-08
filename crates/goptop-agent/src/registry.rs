@@ -16,9 +16,9 @@
 //! （去重让匹配多项式化，仍是纯「能否匹配」语义）；病态模式的步数上限兜底。
 
 use std::sync::Arc;
+#[cfg(feature = "mcp")]
 use std::time::Duration;
 
-use async_trait::async_trait;
 use goptop_net::protocol::CoordT;
 use goptop_net::session::UiCommand;
 
@@ -39,9 +39,13 @@ pub const SUBMIT_SETTLE_MS: u64 = 400;
 const DEFAULT_READ_LIMIT: usize = 2000;
 
 /// wait_events 阻塞参数上限（计划 R4：≤120s 可续等；超限回模型让它用 120 重试）。
+/// **仅 mcp**（阶段⑤ cfg 门）：wasm 不引 tokio select/`macros`，wait_events 是
+/// MCP 桌面专属工具（内置模式事件自动推送、不做阻塞等待），整段不编译。
+#[cfg(feature = "mcp")]
 pub const WAIT_EVENTS_MAX_SECS: u64 = 120;
 
 /// wait_events 阻塞期自泵与查队的节拍（对齐 PlayerHandle::wait_until 的 50ms 一拍）。
+#[cfg(feature = "mcp")]
 const WAIT_POLL_MS: u64 = 50;
 
 /// grep 单次返回的匹配数上限（防一个宽泛 pattern 把上下文打爆；truncated 标志告知）。
@@ -86,7 +90,9 @@ fn respond(msg: impl Into<String>) -> ToolError {
 /// delegate 行）：工具面只读 read/grep、深度 1 不许再嵌套（runner 给子循环的工具清单
 /// 里没有 delegate，结构上杜绝）、独立小预算；成功回结论文本，失败回人话错误
 /// （ RespondToModel 级——子代理失败父代理该知道原因并继续，不是环境损坏）。
-#[async_trait]
+// ?Send 界的取舍见 llm/mod.rs HttpChannel 注（wasm 走 spawn_local，future 非 Send）。
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SubagentRunner: Send + Sync {
     /// 跑一个只读子循环，回最终结论文本。
     ///
@@ -183,6 +189,8 @@ pub async fn execute(
         "edit" => execute_edit(args, ctx).await,
         "grep" => execute_grep(args, ctx).await,
         "delegate" => execute_delegate(args, ctx).await,
+        // 仅 mcp（阶段⑤ cfg 门）：见 WAIT_EVENTS_MAX_SECS 注——wasm 不编译本臂。
+        #[cfg(feature = "mcp")]
         "wait_events" => execute_wait_events(args, ctx).await,
         "game_start" => execute_game_start(ctx).await,
         "game_leave" => execute_game_leave(ctx).await,
@@ -665,8 +673,9 @@ async fn execute_delegate(
     Ok(serde_json::json!({ "ok": true, "conclusion": conclusion }))
 }
 
-/* ---------------- wait_events ---------------- */
+/* ---------------- wait_events（仅 mcp；见 WAIT_EVENTS_MAX_SECS 注） ---------------- */
 
+#[cfg(feature = "mcp")]
 async fn execute_wait_events(
     args: &serde_json::Map<String, serde_json::Value>,
     ctx: &ToolCtx,
@@ -716,6 +725,7 @@ async fn execute_wait_events(
 }
 
 /// 排空事件队列并序列化成回执数组（空队列= `[]`，wait_events 的空超时语义建立于此）。
+#[cfg(feature = "mcp")]
 fn drain_events(ctx: &ToolCtx) -> serde_json::Value {
     let drained = ctx.events.drain();
     serde_json::to_value(&drained).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
@@ -756,12 +766,13 @@ async fn execute_game_leave(ctx: &ToolCtx) -> Result<serde_json::Value, ToolErro
 }
 
 /// 自泵定拍（game_leave 认输后的等待；submit 的 settle 在 dispatch_submit 内部做）。
-/// 50ms 一拍、先泵后看，与 [`PlayerHandle::wait_until`] 同一手法。
+/// 50ms 一拍、先泵后看，与 PlayerHandle 的条件等待同一手法；歇拍走
+/// [`crate::time_compat::delay`]（wasm 上没有 tokio time）。
 async fn settle(player: &dyn PlayerHandle, ms: u64) {
-    let rounds = (ms / WAIT_POLL_MS).max(1);
+    let rounds = (ms / 50).max(1);
     for _ in 0..rounds {
         player.pump();
-        tokio::time::sleep(Duration::from_millis(WAIT_POLL_MS)).await;
+        crate::time_compat::delay(50).await;
     }
     player.pump();
 }

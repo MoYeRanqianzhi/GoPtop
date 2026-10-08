@@ -1172,11 +1172,12 @@ pub async fn dispatch_submit(
 }
 
 /// submit 后的定拍：自泵若干拍再重读快照（对手同步与事件生成需要几拍传播）。
+/// 歇拍走 [`crate::time_compat::delay`]——wasm 上没有 tokio time（阶段⑤）。
 async fn settle_and_reread(player: &dyn PlayerHandle, settle_ms: u64) -> serde_json::Value {
     let rounds = (settle_ms / 50).max(1);
     for _ in 0..rounds {
         player.pump();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        crate::time_compat::delay(50).await;
     }
     player.pump();
     player.snapshot()

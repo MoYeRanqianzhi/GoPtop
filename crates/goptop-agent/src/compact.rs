@@ -24,8 +24,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::llm::{Block, ChatRequest, LlmClient, LlmError, Msg, Role};
 
 /// 触发线预留 tokens：`used > 上限 − 16_384` 即压缩（pi 默认 compaction.ts:150）。
@@ -199,7 +197,9 @@ pub fn compacted_messages(messages: &[Msg], summary: &str, cut: usize) -> Vec<Ms
 }
 
 /// 压缩器抽象（Mock 可替换，供压缩单测不花钱）。
-#[async_trait]
+// ?Send 界的取舍见 llm/mod.rs HttpChannel 注（wasm 走 spawn_local，future 非 Send）。
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Compactor: Send + Sync {
     /// 触发线判定：`used > ctx_limit − RESERVE_TOKENS`。
     #[must_use]
@@ -233,7 +233,9 @@ pub struct SummaryCompactor {
     pub ctx_limit: u64,
 }
 
-#[async_trait]
+// ?Send 界的取舍见 llm/mod.rs HttpChannel 注（wasm 走 spawn_local，future 非 Send）。
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Compactor for SummaryCompactor {
     fn should_compact(&self, used_tokens: u64) -> bool {
         // saturating：ctx_limit 被 clamp 到下限 8k < RESERVE 时差值为 0，任何非空

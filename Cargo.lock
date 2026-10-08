@@ -1998,6 +1998,7 @@ dependencies = [
  "goptop-core",
  "goptop-net",
  "goptop-transport-native",
+ "js-sys",
  "png 0.17.16",
  "reqwest",
  "rmcp",
@@ -2006,6 +2007,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -2077,7 +2081,9 @@ dependencies = [
 name = "goptop-transport"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "console_error_panic_hook",
+ "goptop-agent",
  "goptop-core",
  "goptop-net",
  "js-sys",

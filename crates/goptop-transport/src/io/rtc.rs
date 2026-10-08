@@ -5,7 +5,7 @@
 //! 等待 gathering 用轮询（100ms 步进、8s 上限）——避免 Promise/Closure 生命周期纠缠。
 
 use super::SharedCore;
-use crate::queue_event;
+use crate::queue_event_to;
 use goptop_net::session::Event;
 use std::cell::{Cell, RefCell};
 use wasm_bindgen::prelude::*;
@@ -39,7 +39,7 @@ impl RtcPeer {
 
         // ICE connectionState 变化 → open/failed 事件（disconnected 常可自愈，不报）。
         {
-            let _core2 = core.clone();
+            let core2 = core.clone();
             let tag2 = tag.clone();
             let pc2 = pc.clone();
             let cb = Closure::<dyn FnMut(JsValue)>::new(move |_ev: JsValue| {
@@ -51,7 +51,7 @@ impl RtcPeer {
                     _ => (false, false, false),
                 };
                 if opened || closed {
-                    queue_event(Event::PeerState { tag: tag2.clone(), opened, closed, failed });
+                    queue_event_to(&core2, Event::PeerState { tag: tag2.clone(), opened, closed, failed });
                 }
             });
             pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
@@ -200,7 +200,7 @@ fn attach_channel_handlers(core: &SharedCore, tag: &str, ch: &web_sys::RtcDataCh
         let core2 = core.clone();
         let tag2 = tag.to_string();
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |_ev: JsValue| {
-            queue_event(Event::PeerState { tag: tag2.clone(), opened: true, closed: false, failed: false });
+            queue_event_to(&core2, Event::PeerState { tag: tag2.clone(), opened: true, closed: false, failed: false });
             let _ = &core2;
         });
         ch.set_onopen(Some(cb.as_ref().unchecked_ref()));
@@ -210,7 +210,7 @@ fn attach_channel_handlers(core: &SharedCore, tag: &str, ch: &web_sys::RtcDataCh
         let core2 = core.clone();
         let tag2 = tag.to_string();
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |_ev: JsValue| {
-            queue_event(Event::PeerState { tag: tag2.clone(), opened: false, closed: true, failed: false });
+            queue_event_to(&core2, Event::PeerState { tag: tag2.clone(), opened: false, closed: true, failed: false });
             let _ = &core2;
         });
         ch.set_onclose(Some(cb.as_ref().unchecked_ref()));
@@ -222,7 +222,7 @@ fn attach_channel_handlers(core: &SharedCore, tag: &str, ch: &web_sys::RtcDataCh
             let Ok(evt) = ev.dyn_into::<web_sys::MessageEvent>() else { return };
             let Some(txt) = evt.data().as_string() else { return };
             if let Ok(msg) = serde_json::from_str::<goptop_net::protocol::GameMsg>(&txt) {
-                queue_event(Event::Net(msg));
+                queue_event_to(&core2, Event::Net(msg));
             }
             let _ = &core2;
         });
@@ -232,7 +232,7 @@ fn attach_channel_handlers(core: &SharedCore, tag: &str, ch: &web_sys::RtcDataCh
     // 竞态防御：本机/低延迟网络下 DC 可能在 onopen 注册完成前已 open（事件错过）。
     // 挂接完毕后按当前状态补发 open 事件（幂等：状态机 PeerSlot.opened 记账）。
     if ch.ready_state() == web_sys::RtcDataChannelState::Open {
-        queue_event(Event::PeerState { tag: tag.to_string(), opened: true, closed: false, failed: false });
+        queue_event_to(core, Event::PeerState { tag: tag.to_string(), opened: true, closed: false, failed: false });
     }
 }
 

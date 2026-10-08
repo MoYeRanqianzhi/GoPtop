@@ -2,7 +2,7 @@
 //! 存储 / 导航 / 定时器 / 剪贴板）。
 
 use crate::io::{self, bc, rtc, ws};
-use crate::{queue_event, Core};
+use crate::{queue_event_to, Core};
 use goptop_net::session::{Effect, Event};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -25,9 +25,21 @@ pub(crate) fn run_effects(core: &Rc<RefCell<Core>>, effects: Vec<Effect>) {
     }
 }
 
-fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
+/// 执行单个 Effect（pub(crate)：Agent 出口的 B 席泵要拦截 Emit/Notice/Nav 后
+/// 把其余效果落回这里——HookHost 的 watch 推送与 ack 物化在会话侧完成）。
+pub(crate) fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
     match e {
-        Effect::Emit => notify_change(),
+        Effect::Emit => {
+            // A'（feature `agent`）有自己的 on_change：变更推给它而不落全局单槽；
+            // 主会话（None）保持既有行为。
+            let on_change = core.borrow().on_change.clone();
+            match on_change {
+                Some(f) => {
+                    let _ = f.call0(&JsValue::NULL);
+                }
+                None => notify_change(),
+            }
+        }
         Effect::Notice(text, ms) => {
             // 提示条本体在快照里没有——历史上 notice 是 React 状态；这里以
             // window.goptopNotice(text, ms) 钩子透出（App 侧转 React state）。
@@ -35,6 +47,11 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             call_hook("goptopNotice", &arg);
         }
         Effect::Nav(path) => {
+            // Agent 局期间拦下 A' 的导航（B 由 Hub 的泵在会话侧拦）——幽灵会话
+            // 不该拽动主页面路由；主会话恒 false，行为零变化。
+            if core.borrow().suppress_nav {
+                return;
+            }
             // SPA 导航：pushState + popstate 事件（对齐 net/links nav）。
             let w = crate::window();
             let _ = w.history().map(|h| h.push_state_with_url(&JsValue::NULL, "", Some(&path)));
@@ -120,7 +137,7 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
                         }
                         Err(_) => (None, None),
                     };
-                    queue_event(Event::RtcReady { tag: rtc_ready_tag, offer_plain, answer_plain: None, offer_enc, answer_enc: None });
+                    queue_event_to(&core2, Event::RtcReady { tag: rtc_ready_tag, offer_plain, answer_plain: None, offer_enc, answer_enc: None });
                 }));
             }
             core.borrow_mut().peers.retain(|(t, _)| *t != tag);
@@ -147,7 +164,7 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
                             }
                             Err(_) => (None, None),
                         };
-                        queue_event(Event::RtcReady { tag: tag2, offer_plain: None, answer_plain: ans_plain, offer_enc: None, answer_enc: ans_enc });
+                        queue_event_to(&core2, Event::RtcReady { tag: tag2, offer_plain: None, answer_plain: ans_plain, offer_enc: None, answer_enc: ans_enc });
                     }));
                 }
             }
@@ -172,9 +189,10 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             if let (Some(sdp), Some(typ)) = (sdp, typ) {
                 if let Some((_, peer)) = core.borrow().peers.iter().find(|(t, _)| *t == tag) {
                     // 应用失败要回到状态机（→ 等待态提示），理由见 RtcPeer::accept_answer
+                    let core2 = core.clone();
                     let tag2 = tag.clone();
                     peer.accept_answer(&sdp, &typ, Box::new(move || {
-                        queue_event(Event::RtcApplyFailed { tag: tag2 });
+                        queue_event_to(&core2, Event::RtcApplyFailed { tag: tag2 });
                     }));
                 }
             }
@@ -193,9 +211,8 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             let name = format!("goptop-game-{gid}");
             let bc = bc::Bc::open(&name, move |data: String| {
                 if let Ok(msg) = serde_json::from_str::<goptop_net::protocol::GameMsg>(&data) {
-                    queue_event(Event::Net(msg));
+                    queue_event_to(&core2, Event::Net(msg));
                 }
-                let _ = &core2;
             });
             core.borrow_mut().game_bc = Some(Rc::new(bc));
         }
@@ -205,8 +222,9 @@ fn run_effect(core: &Rc<RefCell<Core>>, e: Effect) {
             }
         }
         Effect::Timer { id, ms } => {
+            let core2 = core.clone();
             io::set_timeout(core, ms as i32, move || {
-                queue_event(Event::Timer(id));
+                queue_event_to(&core2, Event::Timer(id));
             });
         }
         Effect::SetStorage { key, value } => crate::storage_set(&key, value.as_deref()),
@@ -247,7 +265,9 @@ fn decode_sdp(payload: &str, encrypted: bool, core: &Rc<RefCell<Core>>, key: Opt
     }
 }
 
-fn call_hook(name: &str, arg: &serde_json::Value) {
+/// 全局 JS 钩子调用（pub(crate)：Agent 出口的拦截面拒绝开局命令时也要回
+/// 提示条，与 Effect::Notice 同一条通道）。
+pub(crate) fn call_hook(name: &str, arg: &serde_json::Value) {
     if let Ok(f) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name)) {
         if f.is_function() {
             let _ = js_sys::Function::from(f).call1(&JsValue::NULL, &JsValue::from_str(&arg.to_string()));

@@ -21,23 +21,8 @@ goptop-net = { version = "0.1.0-alpha.0", path = "../goptop-net" }
 # /game/history/<n> 的局面重放要过真规则引擎（围棋提子手搓必错）：核心层是
 # goptop-net 的既有 workspace 依赖，这里直接按路径挂，不添外部包。
 goptop-core = { version = "0.1.0-alpha.0", path = "../goptop-core" }
-# 无头会话执行器（NativeSession / Host）。web 端内置模式（阶段⑤）把循环驱动与
-# VfsStore/HttpChannel 换成 TS 钩子时，这份依赖再按 cfg 收窄；先按桌面全量给。
-goptop-transport-native = { version = "0.1.0-alpha.0", path = "../goptop-transport-native" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["full"] }
-# /memory 的 native 后端（rusqlite bundled ~/.goptop/agent-memory.db）。
-# bundled：不依赖系统 libsqlite3，三平台一把编。
-rusqlite = { workspace = true }
-# LLM HTTP 通道的 native 实现（阶段②三协议适配器）。骨架期只声明依赖，
-# 代码面全部藏在 HttpChannel trait 之后（见 llm/mod.rs）。
-reqwest = { workspace = true }
-# reqwest 0.13 的 `rustls-no-provider` 不带 crypto provider，必须由使用方显式装一个。
-# 选 ring：aws-lc-rs（reqwest `rustls` feature 的默认 provider）在 Windows MSVC 上
-# 要现场编 C 源、NASM/CMake 工具链要求高；ring 0.17 已在本仓 lock 里（webrtc 链路），
-# 工具链要求零增。provider 安装是进程级一次性动作，落在 native HttpChannel 里。
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # HttpChannel / Compactor 的 async trait 方法要 dyn 兼容（enum 变体里存 Arc<dyn>），
 # 用仓库既有同款方案（goptop-transport-native 亦用 async-trait）。
 async-trait = "0.1"
@@ -48,7 +33,6 @@ png = "0.17"
 # 图像回执的 base64（承载能力矩阵：Anthropic tool_result 原生 image block）。
 # base64 0.22 已在 lock 里（reqwest/rustls 链路的传递依赖），同款取舍零新增条目。
 base64 = "0.22"
-
 # ---- MCP 出口（feature "mcp"，阶段④）----
 # 条件编译（计划「MCP 模式」节·用户拍板）：`mcp` feature 只在桌面目标启用——
 # src-tauri 按 [target.'cfg(desktop)'.dependencies] 挂 feature；安卓/鸿蒙与 wasm
@@ -61,6 +45,45 @@ rmcp = { workspace = true, optional = true, features = ["server", "transport-str
 # StreamableHttpService 是 tower Service：Router/serve/Bearer 中间件由本仓 axum 供，
 # 与 goptop-server 同一条 0.8（default-features 关掉，按需 http1/json/tokio）。
 axum = { workspace = true, optional = true }
+
+# ---- 阶段⑤（Web 内置模式）目标表切割（契约 §3.1）----
+# 桌面/移动（非 wasm32）：无头会话执行器（NativeSession/Host）、tokio 全量、
+# reqwest HTTP 通道、rusqlite 记忆库。web 目标下这些一律不编译——NativeSession
+# 的 webrtc 链会把 getrandom 拖进 wasm（其 compile_error 是 wasm 构建的第一报错）。
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# 无头会话执行器（NativeSession / Host）。web 端（阶段⑤）B 席由 goptop-transport
+# 的 agent 出口建（WebPlayer），这份依赖按 cfg 收窄到非 wasm 目标。
+goptop-transport-native = { version = "0.1.0-alpha.0", path = "../goptop-transport-native" }
+tokio = { workspace = true, features = ["full"] }
+# LLM HTTP 通道的 native 实现（阶段②三协议适配器）。骨架期只声明依赖，
+# 代码面全部藏在 HttpChannel trait 之后（见 llm/mod.rs）。
+reqwest = { workspace = true }
+# reqwest 0.13 的 `rustls-no-provider` 不带 crypto provider，必须由使用方显式装一个。
+# 选 ring：aws-lc-rs（reqwest `rustls` feature 的默认 provider）在 Windows MSVC 上
+# 要现场编 C 源、NASM/CMake 工具链要求高；ring 0.17 已在本仓 lock 里（webrtc 链路），
+# 工具链要求零增。provider 安装是进程级一次性动作，落在 native HttpChannel 里。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# /memory 的 native 后端（rusqlite bundled ~/.goptop/agent-memory.db）。
+# bundled：不依赖系统 libsqlite3，三平台一把编。
+rusqlite = { workspace = true }
+
+# wasm32（Web 端内置模式，阶段⑤）：循环驱动不经 tokio time/net（wasm 上 panic /
+# 编译失败，契约 §1），await 点全部走 [`crate::time_compat::delay`] 的
+# setTimeout Promise；watch 保留（tokio 白名单里 sync 纯 std，可被 spawn_local 驱动）。
+# tokio 不能 workspace=true——workspace 定义带 `features=["full"]`，在 wasm 直接
+# compile_error（tokio 的 feature 白名单），必须本地写窄。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["sync"] }
+wasm-bindgen = "0.2"
+js-sys = { workspace = true }
+wasm-bindgen-futures = "0.4"
+
+# web 通道（llm/web_http.rs）的 fetch 面。Headers/RequestInit/Response 只为
+# HttpChannel；Window 给钩子取数。特性随本 crate 进树后与 goptop-transport 的
+# web-sys 特性面做 feature 统一，互不冲突。
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = ["Window", "Headers", "RequestInit", "Response", "Storage", "Crypto", "console"]
 
 [features]
 # dep: 前缀（而非裸名）：optional 依赖只在被本 feature 拉起时启用，不再隐式

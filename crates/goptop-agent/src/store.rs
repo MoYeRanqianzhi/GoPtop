@@ -83,6 +83,30 @@ pub fn normalize_path(raw: &str) -> Result<String, String> {
     Ok(folded)
 }
 
+/// 写入配额判定（两后端共用——阶段⑤把 NativeStore 内联的两段检查抽到这里）：
+/// 单文件上限（[`MAX_FILE_BYTES`]）+ ns 总量上限（[`MAX_NS_BYTES`]），通过即回
+/// 本次写入后的 ns 占用（native 落 `meta.bytes_used`；web 无账户表，忽略）。
+///
+/// **净增量口径**：覆盖写按 `used - old + len` 计额（old=同路径旧内容的字节数，
+/// 无则 0），而非 `used + len`——同一文件反复编辑是记忆库的主路径，字面相加会把
+/// 「原地改写」误判成超限。错误文案与计划/工具描述同源，回人话（RespondToModel 级）。
+pub(crate) fn check_quota(ns: &str, len: usize, old: u64, used: u64) -> Result<u64, String> {
+    if len > MAX_FILE_BYTES {
+        return Err(format!(
+            "file too large: {len} bytes. The limit is {MAX_FILE_BYTES} bytes (256KB) per file — split the note into several files."
+        ));
+    }
+    let Some(after) = used.checked_sub(old).and_then(|u| u.checked_add(len as u64)) else {
+        return Err("memory store: usage accounting underflow (corrupted meta)".to_string());
+    };
+    if after > MAX_NS_BYTES as u64 {
+        return Err(format!(
+            "memory quota exceeded: this write would bring {ns} to {after} bytes (limit {MAX_NS_BYTES}). Shorten old files first — read them, then edit them smaller."
+        ));
+    }
+    Ok(after)
+}
+
 /// /memory 的存储抽象。
 ///
 /// **全部方法同步**：rusqlite 连接不跨 await（连接本身不是 Send-friendly 的 async
@@ -126,19 +150,23 @@ pub trait VfsStore: Send + Sync {
     fn usage(&self, ns: &str) -> Result<u64, String>;
 }
 
-/// native 后端：rusqlite bundled 的单文件库。
+/// native 后端：rusqlite bundled 的单文件库。**仅 native**——rusqlite 不上 wasm
+///（web 后端是 [`crate::store_web::WebStore`]，经 `window.goptopVfsCall` 同步桥）。
 ///
 /// **db 路径由调用方给，本 crate 不自己拼 `~`**：桌面是 `~/.goptop/agent-memory.db`
 /// （AgentHub 决定），测试是 `tempdir()` 里的临时文件——平台无关 crate 碰 home 目录
 /// 就会与各端的既有落盘规则（Tauri app 目录/移动端私有目录）分叉。
+#[cfg(not(target_arch = "wasm32"))]
 pub struct NativeStore {
     conn: MutexConnection,
 }
 
 /// rusqlite 连接的同步互斥包装（字段不 pub；`Connection` 本身 Send 但要独占借用，
 /// Mutex 是最小正确形态）。
+#[cfg(not(target_arch = "wasm32"))]
 struct MutexConnection(std::sync::Mutex<rusqlite::Connection>);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeStore {
     /// 打开（不存在则建库建表；父目录一并创建——首次启动时 `~/.goptop` 可能还没有）。
     ///
@@ -179,6 +207,7 @@ impl NativeStore {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl VfsStore for NativeStore {
     fn read(&self, ns: &str, path: &str) -> Result<Option<String>, String> {
         self.with_conn(|conn| {
@@ -195,11 +224,6 @@ impl VfsStore for NativeStore {
 
     fn write(&self, ns: &str, path: &str, content: &str) -> Result<(), String> {
         let len = content.len();
-        if len > MAX_FILE_BYTES {
-            return Err(format!(
-                "file too large: {len} bytes. The limit is {MAX_FILE_BYTES} bytes (256KB) per file — split the note into several files."
-            ));
-        }
         self.with_conn(|conn| {
             // 查额与写入必须同事务：并发两个 write 同时过额检、先后落库会把
             // bytes_used 记成「各自都合法、合计超限」的假账。Mutex 已串行化调用，
@@ -221,16 +245,9 @@ impl VfsStore for NativeStore {
                 )
                 .map(|s| s as u64)
                 .unwrap_or(0);
-            // 覆盖写按净增量计额（used - old + len），而非 used + len：同一文件
-            // 反复编辑是记忆库的主路径，字面相加会把「原地改写」误判成超限。
-            let Some(after) = used.checked_sub(old).and_then(|u| u.checked_add(len as u64)) else {
-                return Err("memory store: usage accounting underflow (corrupted meta)".to_string());
-            };
-            if after > MAX_NS_BYTES as u64 {
-                return Err(format!(
-                    "memory quota exceeded: this write would bring {ns} to {after} bytes (limit {MAX_NS_BYTES}). Shorten old files first — read them, then edit them smaller."
-                ));
-            }
+            // 覆盖写按净增量计额（used - old + len）：判定抽进 [`check_quota`]，
+            // 两后端（native SQL / web 钩子）共用同一份口径与文案。
+            let after = check_quota(ns, len, old, used)?;
             tx.execute(
                 "INSERT INTO files(ns, path, content, size, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(ns, path) DO UPDATE SET content = excluded.content,
@@ -316,11 +333,13 @@ impl VfsStore for NativeStore {
 }
 
 /// rusqlite 错误 → 人话文本（存储层错误没有分型消费者，统一前缀即可定位）。
+#[cfg(not(target_arch = "wasm32"))]
 fn sql_err(e: rusqlite::Error) -> String {
     format!("memory store error: {e}")
 }
 
 /// 当前 Unix 毫秒（updated_at 用；时钟回拨等异常回 0——排序字段错一位无实害）。
+#[cfg(not(target_arch = "wasm32"))]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -328,7 +347,8 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+// 测试件全在 native（rusqlite / tempdir），wasm 目标连编译都不该有。
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

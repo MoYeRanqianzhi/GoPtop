@@ -15,8 +15,15 @@
 //! **单局互斥的前提**：进程内 BC hub 全局无局号（bc.rs 头注自证缺口），同一时刻
 //! 只允许一个 Agent 局；拦截面（拒绝主会话开局类命令）在 src-tauri 的 AgentHub，
 //! 不在本 crate——本 crate 只管把一局结起来、结不起来就清理干净。
+//!
+//! **仅 native**（阶段⑤契约 §3.3）：本文件以 `NativeSession` 为硬类型，而 web 的
+//! A' 由前端持有（WasmSession.new_agent）、B 由 Hub 建——pair() 的「双向双建」
+//! 形态在 web 无对应物；web 侧配对原语在 goptop-transport 的 agent 模块镜像
+//! src-tauri 壳内做法（A' 归前端、B 由 Hub 建）。
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use goptop_net::session::UiCommand;
@@ -228,14 +235,14 @@ fn connected(p: &NativePlayer) -> bool {
 /// pair 是配对期的临时「测试夹具」，所以这里泵**两**席——PlayerHandle::wait_until 只泵
 /// 自席的纪律是对决策层说的，配对期两席都归本函数驱动。
 async fn pump_until(a: &NativePlayer, b: &NativePlayer, pred: impl Fn() -> bool, secs: u64) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
-    while std::time::Instant::now() < deadline {
+    let deadline = crate::time_compat::now_ms() + secs * 1000;
+    while crate::time_compat::now_ms() < deadline {
         a.pump();
         b.pump();
         if pred() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        crate::time_compat::delay(50).await;
     }
     a.pump();
     b.pump();

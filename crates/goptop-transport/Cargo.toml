@@ -14,6 +14,13 @@ rust-version = "1.85"
 name = "goptop_transport"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Agent 出口（阶段⑤ Web 内置模式）：把 goptop-agent（决策循环/工具面/事件物化）
+# 拉进 wasm 产物，导出 agent_* 命令面（src/agent.rs）。依赖只在 wasm32 目标下
+# 声明——native 目标本 crate 仍是纯 IO 绑定层，agent feature 空转（特性面按
+# target 解析，不开即零产物体积变化）。
+agent = ["dep:goptop-agent"]
+
 [dependencies]
 goptop-core = { path = "../goptop-core" }
 goptop-net = { path = "../goptop-net" }
@@ -23,6 +30,14 @@ wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
+# agent 出口的 LogHttp 包装要 impl goptop-agent 的 `HttpChannel`（async trait；
+# 与 goptop-agent 同一条 0.1）。
+async-trait = "0.1"
+
+# goptop-agent 以 wasm 目标专用可选依赖挂入（契约 §5.1）：防环的唯一可行方向
+# （agent 绝不反向依赖 transport——它的 js 依赖面内聚在自己 crate）。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+goptop-agent = { version = "0.1.0-alpha.0", path = "../goptop-agent", optional = true }
 
 [dependencies.web-sys]
 version = "0.3"

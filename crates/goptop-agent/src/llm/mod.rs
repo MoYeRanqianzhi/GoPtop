@@ -16,24 +16,28 @@
 //! `context_length_exceeded` → [`LlmError::ContextWindowExceeded`]（紧急压缩重试）；
 //! 429/5xx → 适配器内退避重试 2 次后回 [`LlmError::Transient`]（连续 3 轮失败→
 //! error 态，判定在循环里）。HTTP 通道走 [`HttpChannel`] trait：native=reqwest
-//! （[`NativeHttp`]）；web=TS fetch 钩子（`window.goptopAgentHttp`，阶段⑤）——
-//! 循环体与通道解耦。
+//! （`NativeHttp`）；wasm=浏览器 fetch（`WebHttpChannel`，阶段⑤）——循环体与
+//! 通道解耦。
 //!
 //! 子模块：[`mock`]（剧本桩）/ [`anthropic`] / [`openai_chat`] / [`openai_responses`]
-//! （三协议适配器）/ [`native_http`](reqwest 通道)——全部私有，外界只经
-//! [`LlmClient`] 与 [`NativeHttp`] 进出。
+//! （三协议适配器）/ [`native_http`](reqwest 通道，native)/ [`web_http`](fetch
+//! 通道，wasm)——全部私有，外界只经 [`LlmClient`] 与通道类型进出。
 
 mod anthropic;
 mod mock;
+#[cfg(not(target_arch = "wasm32"))]
 mod native_http;
 mod openai_chat;
 mod openai_responses;
+#[cfg(target_arch = "wasm32")]
+mod web_http;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
+#[cfg(not(target_arch = "wasm32"))]
 pub use native_http::NativeHttp;
+#[cfg(target_arch = "wasm32")]
+pub use web_http::WebHttpChannel;
 
 /// 协议种别（store 键 `goptop:llm-config.protocol` 的值域；snake_case 线上形态）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -204,7 +208,12 @@ impl LlmError {
 /// **通道不解释业务**：非 2xx 也原样带回状态码+体，协议适配器据状态码与错误体
 /// 分类成 [`LlmError`]——分类规则（401→Fatal 等）只写一遍，且能对着真实错误体
 /// 写测试。头由调用方给（各协议的鉴权头不同：x-api-key / Bearer）。
-#[async_trait]
+// async trait 的装箱界两端不同：native 的消费方要 tokio::spawn（future 必须
+// Send）；wasm 全部 spawn_local（JsFuture 非 Send，界必须 ?Send）。trait 对象
+// 本身的 Send+Sync 界保留——枚举变体跨线程持有 Arc<dyn HttpChannel> 的地方
+// （LlmClient）两端都在，与「future 是否 Send」正交。
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait HttpChannel: Send + Sync {
     /// POST JSON，回 `(状态码, 响应体文本)`。传输层故障（连接失败/超时）回 Err。
     ///
@@ -327,7 +336,8 @@ pub(crate) async fn post_with_retry(
 ) -> Result<(u16, String), LlmError> {
     for attempt in 0..=RETRY_BACKOFF_MS.len() {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS[attempt - 1])).await;
+            // 退避走 time_compat：wasm 上没有 tokio time（阶段⑤）。
+            crate::time_compat::delay(RETRY_BACKOFF_MS[attempt - 1]).await;
         }
         match http.post_json(url, headers, body.to_string()).await {
             // 重试类：没耗尽就退避再来，耗尽回 Transient。

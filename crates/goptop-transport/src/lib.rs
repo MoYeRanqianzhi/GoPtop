@@ -1,11 +1,15 @@
 //! goptop-transport — 平台 IO 绑定层（仅 wasm32；native 空壳）。
 //!
 //! 架构（通道泵模型，避免闭包借用环）：
-//! - IO 回调（WS onmessage / RTC 事件 / BC onmessage）只往事件通道塞 [`Event`]；
+//! - IO 回调（WS onmessage / RTC 事件 / BC onmessage）只往**所属 Core** 的事件
+//!   队列塞 [`Event`]（阶段⑤起页面可并存主会话 + Agent 对局的 A'，回调按核路由）；
 //! - `drain()`（50ms 定时泵 + 每次命令后同步调用）取空队列逐条喂
 //!   `goptop_net::reduce`，产出的 Effect 立即在本层执行（Effect::Emit 触发
-//!   JS 钩子 `window.goptopOnChange` → React 读 snapshot）；
+//!   JS 钩子 `window.goptopOnChange` → React 读 snapshot；A' 走自己的 on_change）；
 //! - 状态机与 IO 层零相互借用，共享经通道，wasm 单线程下无锁。
+//!
+//! feature `agent`（阶段⑤ Web 内置模式）：拉入 goptop-agent，经 [`agent`]
+//! 模块导出 `agent_*` 命令面与 B 席（Agent 无头会话）的装配。
 
 #![recursion_limit = "256"]
 
@@ -19,11 +23,11 @@ use wasm_bindgen::prelude::*;
 
 mod bridge;
 mod io;
+#[cfg(all(feature = "agent", target_arch = "wasm32"))]
+mod agent;
 
-/// 全局会话引用（JS 只持 WasmSession 句柄；IO 回调经 SESSION.with 访问）。
-thread_local! {
-    static SESSION: RefCell<Option<Rc<RefCell<Core>>>> = const { RefCell::new(None) };
-}
+/// IO 回调与 effects 共享的核句柄（wasm 单线程：Rc + RefCell，无锁）。
+pub(crate) type SharedCore = Rc<RefCell<Core>>;
 
 /// 核心：状态机 + 待处理事件队列 + IO 句柄（Rc 包装：IO 回调与 effects 共享）。
 pub(crate) struct Core {
@@ -36,17 +40,36 @@ pub(crate) struct Core {
     pub presence_bc: Option<Rc<io::bc::Bc>>,
     /// 服务器 WS。
     pub ws: Option<Rc<io::ws::ServerSocket>>,
+    /// A'（Agent 人的专用会话，feature `agent`）的变更推送：Some 时 Effect::Emit
+    /// 调它而**不落**全局 `goptopOnChange` 单槽（主会话恒 None，行为零变化）。
+    pub on_change: Option<js_sys::Function>,
+    /// Agent 局期间拦下本会话的页面导航（Effect::Nav 跳过）——A' 不该拽动主页面。
+    pub suppress_nav: bool,
+}
+
+/// 构造 [`Core`] 的公共尾巴（两条构造路径只有 on_change/suppress_nav 两个开关）。
+fn new_core(session: Session, on_change: Option<js_sys::Function>, suppress_nav: bool) -> SharedCore {
+    Rc::new(RefCell::new(Core {
+        session,
+        queue: VecDeque::new(),
+        peers: Vec::new(),
+        game_bc: None,
+        presence_bc: None,
+        ws: None,
+        on_change,
+        suppress_nav,
+    }))
 }
 
 fn window() -> web_sys::Window {
     web_sys::window().expect("no global window")
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     js_sys::Date::now() as u64
 }
 
-fn rand_u32() -> u32 {
+pub(crate) fn rand_u32() -> u32 {
     let crypto = window().crypto().expect("no crypto");
     let mut buf = [0u8; 4];
     crypto.get_random_values_with_u8_array(&mut buf).expect("getRandomValues");
@@ -114,7 +137,7 @@ fn ensure_user_id() -> String {
 }
 
 /// 页面级随机 sender ID（GameMsg.sender，每次加载重新生成）。
-fn fresh_peer_id() -> String {
+pub(crate) fn fresh_peer_id() -> String {
     let crypto = window().crypto().expect("no crypto");
     let mut buf = [0u8; 16];
     crypto.get_random_values_with_u8_array(&mut buf).expect("getRandomValues");
@@ -125,14 +148,18 @@ fn fresh_peer_id() -> String {
 /// wasm 入口：创建会话并接通全部 IO。
 #[wasm_bindgen]
 pub struct WasmSession {
-    core: Rc<RefCell<Core>>,
+    core: SharedCore,
+    /// FRONT 注册表的键（仅 `new_agent` 创建的 A' 有；`agent_id()` 读它）。
+    /// native 构建里本类型是空壳（无消费者），读数点只在 wasm。
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    front_key: Option<String>,
 }
 
-#[wasm_bindgen]
 impl WasmSession {
-    /// 构造（cfg_json：{name, serverMode, shareOrigin, kind, size}）。
-    #[wasm_bindgen(constructor)]
-    pub fn new(cfg_json: &str) -> WasmSession {
+    /// 两条构造路径（主会话 `new` / A' `new_agent`）共用的装配本体：identity/
+    /// sessionStorage、presence、Boot、首 drain 逐字同流程，差异只在
+    /// on_change/suppress_nav 两个开关。
+    fn build(cfg_json: &str, on_change: Option<js_sys::Function>, suppress_nav: bool) -> WasmSession {
         console_error_panic_hook::set_once();
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -152,16 +179,8 @@ impl WasmSession {
         session.kind = cfg.kind;
         session.size = cfg.size;
         session.engine = goptop_core::game::GameState::new(goptop_net::session::make_engine_kind(&session.kind, session.size));
-        let core = Rc::new(RefCell::new(Core {
-            session,
-            queue: VecDeque::new(),
-            peers: Vec::new(),
-            game_bc: None,
-            presence_bc: None,
-            ws: None,
-        }));
-        SESSION.with(|s| *s.borrow_mut() = Some(core.clone()));
-        let ws = WasmSession { core };
+        let core = new_core(session, on_change, suppress_nav);
+        let ws = WasmSession { core, front_key: None };
         let href = window().location().href().unwrap_or_default();
         ws.core.borrow_mut().queue.push_back(Event::Boot { href });
         io::start_presence(&ws.core);
@@ -170,6 +189,37 @@ impl WasmSession {
         }
         ws.drain();
         ws
+    }
+}
+
+#[wasm_bindgen]
+impl WasmSession {
+    /// 构造（cfg_json：{name, serverMode, shareOrigin, kind, size}）。
+    #[wasm_bindgen(constructor)]
+    pub fn new(cfg_json: &str) -> WasmSession {
+        Self::build(cfg_json, None, false)
+    }
+
+    /// A'（人的 Agent 对局专用会话，JS 所有）——与 [`WasmSession::new`] 逐字同
+    /// 流程（identity/sessionStorage、presence、Boot、首 drain），三处不同：登记
+    /// FRONT 注册表（`agent_id` 读号）、emit 走 `on_change`（Some 时）、Nav 受
+    /// `suppress_nav` 拦。不进全局单槽。同时至多一个 Agent 局（Hub 保证）→
+    /// 至多一个 A'，旧条目弱引用自动失效。
+    #[cfg(all(feature = "agent", target_arch = "wasm32"))]
+    pub fn new_agent(
+        cfg_json: &str,
+        on_change: Option<js_sys::Function>,
+        suppress_nav: bool,
+    ) -> WasmSession {
+        let mut ws = Self::build(cfg_json, on_change, suppress_nav);
+        ws.front_key = Some(agent::front_register(&ws.core));
+        ws
+    }
+
+    /// 本会话在 FRONT 注册表的 id（`new_agent` 的会话才有；主会话回空串）。
+    #[cfg(all(feature = "agent", target_arch = "wasm32"))]
+    pub fn agent_id(&self) -> String {
+        self.front_key.clone().unwrap_or_default()
     }
 
     /// 当前状态快照（UI 渲染契约）。
@@ -235,6 +285,13 @@ impl WasmSession {
 
     /// UI 命令（方法集 → UiCommand 入队 → 泵一次）。
     fn cmd(&self, c: UiCommand) {
+        // Agent 拦截面（feature `agent`）：Agent 局存活期间，非豁免会话的开局类
+        // 命令不入队，回提示条——与桌面 src-tauri/src/session.rs 的 session_cmd
+        // 同语义同文案。
+        #[cfg(all(feature = "agent", target_arch = "wasm32"))]
+        if agent::intercept_cmd(&self.core, &c) {
+            return;
+        }
         self.core.borrow_mut().queue.push_back(Event::Ui(c));
         self.drain();
     }
@@ -404,36 +461,46 @@ impl WasmSession {
 
     /// 事件泵：处理 IO 回调入队的全部事件（JS 以 50ms 定时调用）。
     pub fn drain(&self) {
-        loop {
-            let ev = self.core.borrow_mut().queue.pop_front();
-            let Some(ev) = ev else { break };
-            let ctx = ReduceCtx { now_ms: now_ms(), rand: [rand_u32(), rand_u32(), rand_u32(), rand_u32()] };
-            let effects = goptop_net::session::reduce(&mut self.core.borrow_mut().session, ev, &ctx);
-            bridge::run_effects(&self.core, effects);
+        drain_core(&self.core);
+        // 收尾的全局通知是主会话的既有行为（React 兜底刷新），原样保留；A'
+        // 的变更已按核走 on_change（Emit 分支），不再打扰全局单槽。
+        if self.core.borrow().on_change.is_none() {
+            bridge::notify_change();
         }
-        bridge::notify_change();
     }
 
     /// 安装 50ms 定时泵（App 挂载时调用一次）。
     pub fn start_pump(&self) {
-        let f = Closure::<dyn FnMut()>::new(|| {
-            SESSION.with(|s| {
-                if let Some(core) = s.borrow().clone() {
-                    let ws = WasmSession { core };
-                    ws.drain();
-                }
-            });
+        // 捕获**自身** core：阶段⑤起页面可并存主会话与 A'，全局单槽泵会把别人
+        // 的事件泵进错误的会话（契约 §2.2a 的 per-core 路由修复）。
+        let core = self.core.clone();
+        let f = Closure::<dyn FnMut()>::new(move || {
+            drain_core(&core);
+            // 定时泵只服务主会话/A'（on_change 为 None 走全局通知，语义同 drain）。
+            if core.borrow().on_change.is_none() {
+                bridge::notify_change();
+            }
         });
         let _ = window().set_interval_with_callback_and_timeout_and_arguments_0(f.as_ref().unchecked_ref(), 50);
         f.forget();
     }
 }
 
-/// IO 回调入队（crate 内共享）。
-pub(crate) fn queue_event(ev: Event) {
-    SESSION.with(|s| {
-        if let Some(core) = s.borrow().as_ref() {
-            core.borrow_mut().queue.push_back(ev);
-        }
-    });
+/// 泵一个 Core：把 IO 回调入队的事件逐条喂状态机并执行 Effect（不含收尾的
+/// 变更通知——那一步按会话形态分叉，见 [`WasmSession::drain`]）。
+pub(crate) fn drain_core(core: &SharedCore) {
+    loop {
+        let ev = core.borrow_mut().queue.pop_front();
+        let Some(ev) = ev else { break };
+        let ctx = ReduceCtx { now_ms: now_ms(), rand: [rand_u32(), rand_u32(), rand_u32(), rand_u32()] };
+        let effects = goptop_net::session::reduce(&mut core.borrow_mut().session, ev, &ctx);
+        bridge::run_effects(core, effects);
+    }
+}
+
+/// IO 回调入队（crate 内共享）：事件进**所属 core** 的队列。wasm 单页可并存
+/// 主会话、A'、B 三个 Core，回调闭包都持有所属 core——全局单槽会把别人的
+/// 事件喂错会话（契约 §2.2a）。
+pub(crate) fn queue_event_to(core: &SharedCore, ev: Event) {
+    core.borrow_mut().queue.push_back(ev);
 }

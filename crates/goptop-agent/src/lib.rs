@@ -21,22 +21,34 @@
 //! - [`prompt`]：系统提示词（Claude Code 风格简化版）；
 //! - [`mcp`]（feature "mcp"，仅桌面）：rmcp Streamable HTTP 出口——外部 Agent
 //!   经内嵌 MCP 服务器认领 B 席（`McpServer::start(cfg)` / `stop()`）。
+//! - [`time_compat`]：时间/随机的平台双臂（native=tokio/transport-native，
+//!   wasm=setTimeout/`Date.now`）——wasm 上「禁 tokio time」的唯一正门；
+//! - [`wasm`]（仅 wasm32）：web 平台臂——B 席宿主基座 `WebHost`（`window.goptop*`
+//!   钩子）与时间/随机实现。
 //!
-//! 范围红线（务必维持）：goptop-net / goptop-transport-native / src-tauri / frontend /
-//! harmony 一行不改——机制靠「装饰 Host」与「调 UiCommand / 读 snapshot」复用。
+//! 范围红线（阶段⑤起修订）：goptop-net / goptop-transport-native / src-tauri /
+//! harmony 一行不改；**frontend 与 goptop-transport 自阶段⑤放行**（web 内置模式
+//! 的 VfsStore 钩子、agent 出口与 per-core 会话路由在这两处落地）——机制靠
+//! 「装饰 Host / PlatformHost」与「调 UiCommand / 读 snapshot」复用。
 
 pub mod agent_loop;
 pub mod compact;
 pub mod llm;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pair;
 pub mod player;
 pub mod prompt;
 pub mod registry;
 pub mod store;
+#[cfg(target_arch = "wasm32")]
+pub mod store_web;
+pub mod time_compat;
 pub mod tools;
 pub mod vfs;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 /// 对手驱动方式 —— 同一会话对、同一棋盘、同一聊天，差别只在 B 席的驱动者。
 ///

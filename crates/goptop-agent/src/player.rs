@@ -19,18 +19,97 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use goptop_net::session::UiCommand;
+#[cfg(not(target_arch = "wasm32"))]
 use goptop_transport_native::{Host, NativeSession};
 use tokio::sync::watch;
+
+/// 平台宿主能力 —— [`goptop_transport_native::Host`](native) 的两端统一镜像
+/// （阶段⑤契约 §3.3）：storage_get/storage_set/copy/notice/nav/emit 六方法，
+/// **无 `Send + Sync` 界**——wasm 的 `js_sys::Function` 非 Send，加了界 WebHost
+/// 就实现不了；native 侧实现自动满足，无碍。
+///
+/// 消费者是装配层（桌面 src-tauri 的 HookHost 包 TauriHost / web 的 Hub 包
+/// WebHost），决策循环与工具层不碰它——宿主是「会话怎么落到平台」的事。
+pub trait PlatformHost {
+    /// 读设置类键值（桌面 `~/.goptop`、Web `localStorage` 钩子）。
+    fn storage_get(&self, key: &str) -> Option<String>;
+    /// 写/删设置类键值（`None` = 删除）。
+    fn storage_set(&self, key: &str, value: Option<&str>);
+    /// 复制到剪贴板。
+    fn copy(&self, text: &str);
+    /// 提示条（`None` = 清除；`ms` = 自动清除毫秒）。
+    fn notice(&self, text: Option<&str>, ms: Option<u32>);
+    /// SPA 导航。
+    fn nav(&self, path: &str);
+    /// 状态已变：宿主应把最新 snapshot 推给 UI。
+    fn emit(&self, snapshot_json: &str);
+}
+
+/// native 桥（契约 §3.3 的 blanket）：所有 transport-native 的 [`Host`] 实现
+/// 自动成为 [`PlatformHost`]——src-tauri 现传 `Arc<TauriHost>`/`Arc<HeadlessHost>`
+/// 照旧编译，桌面零改动。
+#[cfg(not(target_arch = "wasm32"))]
+impl<H: Host + 'static> PlatformHost for H {
+    fn storage_get(&self, key: &str) -> Option<String> {
+        Host::storage_get(self, key)
+    }
+    fn storage_set(&self, key: &str, value: Option<&str>) {
+        Host::storage_set(self, key, value);
+    }
+    fn copy(&self, text: &str) {
+        Host::copy(self, text);
+    }
+    fn notice(&self, text: Option<&str>, ms: Option<u32>) {
+        Host::notice(self, text, ms);
+    }
+    fn nav(&self, path: &str) {
+        Host::nav(self, path);
+    }
+    fn emit(&self, snapshot_json: &str) {
+        Host::emit(self, snapshot_json);
+    }
+}
+
+/// `Arc<dyn Host>` → `Arc<dyn PlatformHost>` 的抬升壳。dyn→dyn 没有直接强转
+/// （blanket impl 不构成 supertrait，vtable 不含目标方法面），只能包一层转发；
+/// 仅 native 存在（[`HookHost::wrap`] 的 native 签名保持 `Arc<dyn Host>` 不变，
+/// src-tauri 的调用点零改动）。
+#[cfg(not(target_arch = "wasm32"))]
+struct HostShim(Arc<dyn Host>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PlatformHost for HostShim {
+    fn storage_get(&self, key: &str) -> Option<String> {
+        self.0.storage_get(key)
+    }
+    fn storage_set(&self, key: &str, value: Option<&str>) {
+        self.0.storage_set(key, value);
+    }
+    fn copy(&self, text: &str) {
+        self.0.copy(text);
+    }
+    fn notice(&self, text: Option<&str>, ms: Option<u32>) {
+        self.0.notice(text, ms);
+    }
+    fn nav(&self, path: &str) {
+        self.0.nav(path);
+    }
+    fn emit(&self, snapshot_json: &str) {
+        self.0.emit(snapshot_json);
+    }
+}
 
 /// 对一席玩家的最小操作面。
 ///
 /// **全部方法同步**：`NativeSession::pump` 是同步泵（内部 `tokio::spawn` 走
 /// `enter_runtime` 的进程级运行时），同步面让本 trait 保持 dyn 兼容
-/// （`ToolCtx` 里存 `Arc<dyn PlayerHandle>`）。阻塞式条件等待在 native 侧可接受
-/// （B 的泵就是它的推进方式）；web 端阶段⑤换驱动时再按 cfg 收窄。
+/// （`ToolCtx` 里存 `Arc<dyn PlayerHandle>`）。web 端（阶段⑤）`WebPlayer`
+/// 的泵是 spawn_local 常驻任务，同步读/写经注册表现取，单线程下成立。
 pub trait PlayerHandle: Send + Sync {
     /// 发一条 UiCommand（落子/停一手/聊天/协商/计分确认/认输……唯一命令口）。
     /// 命令是否生效**不由返回值表达**（内部无返回）：对局规则错误（未轮到/占点）
@@ -43,27 +122,33 @@ pub trait PlayerHandle: Send + Sync {
 
     /// 泵一次：把 IO 回调入队的事件消化进状态机并执行 Effect。
     /// **不泵就没有推进**：native 的 IO 回调只入队（bc.rs / ws / rtc 各自的 tokio
-    /// 任务），事件要过泵才进状态机。
+    /// 任务），事件要过泵才进状态机；web 同理（spawn_local 常驻泵 + IO 回调入队）。
     fn pump(&self);
 
-    /// 轮询到谓词成立或超时。每拍自泵一次再验谓词（先泵后验——IO 事件可能正等在
-    /// 队列里）；50ms 一拍，与前端拉模式同节奏。
+    /// 轮询到谓词成立或超时（**仅 native**：`std::thread::sleep`/`Instant` 在
+    /// wasm 上不可用；生产代码零调用——只有测试用，web 的 WebPlayer 不实现，
+    /// 阻塞等待语义在 web 由事件推送替代）。每拍自泵一次再验谓词（先泵后验——
+    /// IO 事件可能正等在队列里）；50ms 一拍，与前端拉模式同节奏。
     ///
     /// 只泵自己这一席：对手席的推进是它自己宿主的事（桌面=前端 poll，测试=测试代码
     /// 泵两端）。谓词参数是**最新快照**（每次重读，不缓存）。
+    #[cfg(not(target_arch = "wasm32"))]
     fn wait_until(&self, pred: &mut dyn FnMut(&serde_json::Value) -> bool, timeout: Duration) -> bool;
 }
 
-/// [`PlayerHandle`] 的无头会话实现：一条 `Arc<NativeSession>` 的直述。
+/// [`PlayerHandle`] 的无头会话实现：一条 `Arc<NativeSession>` 的直述。**仅 native**
+/// ——web 端（阶段⑤）B 席的等价物是 goptop-transport agent 出口的 `WebPlayer`。
 ///
 /// 持 `Arc` 而非值：pair() 要把同一会话交给调用方（A' 给前端轮询），
 /// 生命周期跨层共享；`NativeSession` 的 Drop 置停机标志，drop 最后一份即全线停机。
 /// `Clone`：同一席要多处持有（ctx.player 与测试 driver 各持一份，都泵同一会话）。
 #[derive(Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct NativePlayer {
     session: Arc<NativeSession>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativePlayer {
     /// 包一条已创建的无头会话。
     #[must_use]
@@ -78,6 +163,7 @@ impl NativePlayer {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PlayerHandle for NativePlayer {
     fn cmd(&self, cmd: UiCommand) {
         self.session.cmd(cmd);
@@ -93,6 +179,7 @@ impl PlayerHandle for NativePlayer {
         self.session.pump();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn wait_until(&self, pred: &mut dyn FnMut(&serde_json::Value) -> bool, timeout: Duration) -> bool {
         // 先泵后验（IO 事件可能正等在队列里）、每拍重读快照（谓词永远看最新态）。
         // 阻塞式 std 睡眠在 native 侧可接受（见 trait 注）——调用点要么在同步线程，
@@ -160,8 +247,16 @@ impl EmitWatch {
 ///   Notice「对方拒绝了悔棋」）——Agent 作为**请求方**时这是被拒的唯一本地载体，
 ///   由 [`ack_event_from_notice`] 物化成 request_resolved 事件喂事件队列
 ///   （`bind_events` 绑定；未绑定即纯透传）。
+/// [`PlatformHost`] trait 对象的内层形态：native 侧补 `Send + Sync`（[`HookHost`]
+/// 要实现 transport-native 的 `Host`，其 supertrait 要求线程安全；装饰层的 wasm
+/// 实现 WebHost 非 Send，界只在 native 存在）。wasm 侧即裸 `dyn PlatformHost`。
+#[cfg(not(target_arch = "wasm32"))]
+type AnyHost = dyn PlatformHost + Send + Sync;
+#[cfg(target_arch = "wasm32")]
+type AnyHost = dyn PlatformHost;
+
 pub struct HookHost {
-    inner: Arc<dyn Host>,
+    inner: Arc<AnyHost>,
     /// 本局临时随机 userId（u- 前缀，与持久身份同形——只求 bc.rs 的回声过滤认它）。
     user_id: String,
     watch_tx: watch::Sender<(u64, String)>,
@@ -171,18 +266,33 @@ pub struct HookHost {
 }
 
 impl HookHost {
-    /// 装饰内层宿主并建 watch，一次拿全（宿主进 `NativeSession::new`，watch 给事件泵）。
-    ///
-    /// 临时 userId 用 `identity::gen_user_id` + transport 的 `rand4()`：与既有身份
-    /// 生成同一条路，熵来源（进程级 RandomState + 时间 + 自增）已验证防同毫秒撞车
-    ///（lib.rs 的 rand4 说明——两个会话同 userId 会让挑战发给自己）。
+    /// 装饰内层宿主并建 watch，一次拿全（native 签名保持 `Arc<dyn Host>`——
+    /// src-tauri 现传 `X as Arc<dyn Host>` 的调用点零改动；内部经 [`HostShim`]
+    /// 抬到 [`PlatformHost`]，拦截逻辑与 web 共用 [`Self::wrap_platform`]）。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn wrap(inner: Arc<dyn Host>) -> (Arc<Self>, EmitWatch) {
+        Self::wrap_platform(Arc::new(HostShim(inner)))
+    }
+
+    /// 装饰内层宿主并建 watch（web 签名，契约 §6 冻结面：wasm 侧以
+    /// `wrap(Arc<dyn PlatformHost>)` 进 Hub，内层基座是 [`crate::wasm::WebHost`]）。
+    #[cfg(target_arch = "wasm32")]
+    pub fn wrap(inner: Arc<dyn PlatformHost>) -> (Arc<Self>, EmitWatch) {
+        Self::wrap_platform(inner)
+    }
+
+    /// 两端共用的装配本体。临时 userId 用 `identity::gen_user_id` + [`crate::time_compat`]
+    /// 的熵源：与既有身份生成同一条路，熵来源（进程级 RandomState + 时间 + 自增）
+    /// 已验证防同毫秒撞车（两个会话同 userId 会让挑战发给自己）。
+    fn wrap_platform(inner: Arc<AnyHost>) -> (Arc<Self>, EmitWatch) {
         let (watch_tx, watch_rx) = tokio::sync::watch::channel((0u64, String::new()));
-        // 临时 userId 与既有身份生成同一条路（gen_user_id + rand4）：u- 前缀同形，
+        // 临时 userId 与既有身份生成同一条路（gen_user_id + rand）：u- 前缀同形，
         // 熵来源（进程级 RandomState + 自增）已验证同毫秒不撞车——两个会话同 userId
         // 会让 bc.rs 的回声过滤把对方消息当自己的回声吃掉。
-        let rand = goptop_transport_native::rand4();
-        let user_id = goptop_net::identity::gen_user_id(goptop_transport_native::now_ms(), rand[0]);
+        let user_id = goptop_net::identity::gen_user_id(
+            crate::time_compat::now_ms(),
+            crate::time_compat::rand_u32(),
+        );
         let host = Arc::new(Self {
             inner,
             user_id,
@@ -205,10 +315,11 @@ impl HookHost {
     pub fn user_id(&self) -> &str {
         &self.user_id
     }
-}
 
-impl Host for HookHost {
-    fn storage_get(&self, key: &str) -> Option<String> {
+    /* —— 六个动作的实现本体（两端一份；trait impl 全部一行转发到这里，
+          事件物化/身份拦截的语义绝不 cfg 复制）—— */
+
+    fn act_storage_get(&self, key: &str) -> Option<String> {
         match key {
             // 身份读：恒回本局临时随机值，绝不读内层——读了就把人的持久设备身份
             // 带进 B 席（同 ID 即回声互吞，见 struct 注）。仅去重键，无身份语义。
@@ -220,7 +331,7 @@ impl Host for HookHost {
         }
     }
 
-    fn storage_set(&self, key: &str, value: Option<&str>) {
+    fn act_storage_set(&self, key: &str, value: Option<&str>) {
         // 身份写路径同样吞掉：会话初始化/设置流若把 userId 落盘，覆盖的将是
         // **人的**持久设备身份——这是本装饰存在的第一理由，读写两侧都要堵死。
         if key == "goptop:userId" {
@@ -229,11 +340,11 @@ impl Host for HookHost {
         self.inner.storage_set(key, value);
     }
 
-    fn copy(&self, text: &str) {
+    fn act_copy(&self, text: &str) {
         self.inner.copy(text);
     }
 
-    fn notice(&self, text: Option<&str>, ms: Option<u32>) {
+    fn act_notice(&self, text: Option<&str>, ms: Option<u32>) {
         // 协商 Ack 的物化口：请求方的被拒/被允只见提示条（不改快照），不拦就丢。
         // seq 由队列锁内统一分配（与 watch diff 泵同一入口，绝不撞号）。
         if let Some(t) = text {
@@ -247,11 +358,11 @@ impl Host for HookHost {
         self.inner.notice(text, ms);
     }
 
-    fn nav(&self, path: &str) {
+    fn act_nav(&self, path: &str) {
         self.inner.nav(path);
     }
 
-    fn emit(&self, snapshot_json: &str) {
+    fn act_emit(&self, snapshot_json: &str) {
         // 事件物化的源头：先推 watch（seq 单调；接收方只关心最新一拍，中间态被
         // watch 覆盖是特性——diff 也以最新拍为基线），再透传内层（TauriHost 还要
         // 推给前端，HeadlessHost 还要计数）。无人接收时 send 回 Err：正常（泵任务
@@ -259,6 +370,55 @@ impl Host for HookHost {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.watch_tx.send((seq, snapshot_json.to_string()));
         self.inner.emit(snapshot_json);
+    }
+}
+
+/// native 面：会话执行器（`NativeSession::new`）认的是 transport-native 的
+/// [`Host`]，六个方法转发到实现本体。
+#[cfg(not(target_arch = "wasm32"))]
+impl Host for HookHost {
+    fn storage_get(&self, key: &str) -> Option<String> {
+        self.act_storage_get(key)
+    }
+    fn storage_set(&self, key: &str, value: Option<&str>) {
+        self.act_storage_set(key, value);
+    }
+    fn copy(&self, text: &str) {
+        self.act_copy(text);
+    }
+    fn notice(&self, text: Option<&str>, ms: Option<u32>) {
+        self.act_notice(text, ms);
+    }
+    fn nav(&self, path: &str) {
+        self.act_nav(path);
+    }
+    fn emit(&self, snapshot_json: &str) {
+        self.act_emit(snapshot_json);
+    }
+}
+
+/// web 面：Hub（goptop-transport 的 agent 出口）持 `Arc<dyn PlatformHost>` 读
+/// B 席的身份/头像/stun，六个方法同样转发到实现本体（native 侧 PlatformHost 由
+/// blanket 从 Host 自动来，无需重复实现）。
+#[cfg(target_arch = "wasm32")]
+impl PlatformHost for HookHost {
+    fn storage_get(&self, key: &str) -> Option<String> {
+        self.act_storage_get(key)
+    }
+    fn storage_set(&self, key: &str, value: Option<&str>) {
+        self.act_storage_set(key, value);
+    }
+    fn copy(&self, text: &str) {
+        self.act_copy(text);
+    }
+    fn notice(&self, text: Option<&str>, ms: Option<u32>) {
+        self.act_notice(text, ms);
+    }
+    fn nav(&self, path: &str) {
+        self.act_nav(path);
+    }
+    fn emit(&self, snapshot_json: &str) {
+        self.act_emit(snapshot_json);
     }
 }
 
@@ -676,30 +836,30 @@ mod tests {
         let uid = host.user_id().to_string();
         assert!(uid.starts_with("u-"), "临时 userId 与持久身份同形：{uid}");
         // 读恒回临时值，但绝不写进内层存储
-        assert_eq!(host.storage_get("goptop:userId").as_deref(), Some(uid.as_str()));
+        assert_eq!(host.act_storage_get("goptop:userId").as_deref(), Some(uid.as_str()));
         assert!(
             !inner.storage.lock().unwrap().contains_key("goptop:userId"),
             "临时 userId 不落盘"
         );
         // 写路径同样吞掉：会话初始化/设置流不得把人的持久身份覆盖成临时值
-        host.storage_set("goptop:userId", Some("u-hacked"));
+        host.act_storage_set("goptop:userId", Some("u-hacked"));
         assert!(!inner.storage.lock().unwrap().contains_key("goptop:userId"));
-        assert_eq!(host.storage_get("goptop:userId").as_deref(), Some(uid.as_str()));
+        assert_eq!(host.act_storage_get("goptop:userId").as_deref(), Some(uid.as_str()));
     }
 
     #[test]
     fn hook_host_stun强制空_其余透传() {
         let inner = Arc::new(HeadlessHost::default());
-        inner.storage_set("goptop:name", Some("甲"));
+        goptop_transport_native::Host::storage_set(&*inner, "goptop:name", Some("甲"));
         let (host, _w) = HookHost::wrap(inner.clone());
-        assert_eq!(host.storage_get("goptop:stun").as_deref(), Some("[]"), "stun 强制空，免 8s gathering");
+        assert_eq!(host.act_storage_get("goptop:stun").as_deref(), Some("[]"), "stun 强制空，免 8s gathering");
         assert!(!inner.storage.lock().unwrap().contains_key("goptop:stun"), "stun 是覆写不是写盘");
-        assert_eq!(host.storage_get("goptop:name").as_deref(), Some("甲"), "其余键读透传");
-        host.storage_set("goptop:name", Some("乙"));
-        assert_eq!(inner.storage_get("goptop:name").as_deref(), Some("乙"), "其余键写透传");
-        host.notice(Some("提示"), None);
-        host.nav("/p2p");
-        host.copy("文本");
+        assert_eq!(host.act_storage_get("goptop:name").as_deref(), Some("甲"), "其余键读透传");
+        host.act_storage_set("goptop:name", Some("乙"));
+        assert_eq!(goptop_transport_native::Host::storage_get(&*inner, "goptop:name").as_deref(), Some("乙"), "其余键写透传");
+        host.act_notice(Some("提示"), None);
+        host.act_nav("/p2p");
+        host.act_copy("文本");
         assert_eq!(inner.notices.lock().unwrap().len(), 1);
         assert_eq!(inner.navs.lock().unwrap().first().map(String::as_str), Some("/p2p"));
     }
@@ -715,8 +875,8 @@ mod tests {
     fn hook_host_emit推watch且透传() {
         let inner = Arc::new(HeadlessHost::default());
         let (host, watch) = HookHost::wrap(inner.clone());
-        host.emit(r#"{"phase":"home"}"#);
-        host.emit(r#"{"phase":"waiting"}"#);
+        host.act_emit(r#"{"phase":"home"}"#);
+        host.act_emit(r#"{"phase":"waiting"}"#);
         let (seq, text) = watch.latest();
         assert_eq!(seq, 2, "seq 单调递增，接收方取到最新一拍");
         assert_eq!(text, r#"{"phase":"waiting"}"#);
@@ -791,9 +951,9 @@ mod tests {
         let q = Arc::new(EventQueue::new());
         host.bind_events(&q);
         // 请求方视角的被拒/被允提示（matchplay 的本地 Ack 文案）。
-        host.notice(Some("对方拒绝了悔棋"), Some(2400));
-        host.notice(Some("对方已同意重开"), Some(2400));
-        host.notice(Some("双方连续停一手，进入终局计分"), Some(5200)); // 非 Ack，不物化
+        host.act_notice(Some("对方拒绝了悔棋"), Some(2400));
+        host.act_notice(Some("对方已同意重开"), Some(2400));
+        host.act_notice(Some("双方连续停一手，进入终局计分"), Some(5200)); // 非 Ack，不物化
         assert_eq!(
             q.history(),
             vec![
@@ -804,7 +964,7 @@ mod tests {
         );
         // 未绑定的宿主：notice 纯透传不炸（弱引用 None 分支）。
         let (host2, _w2) = HookHost::wrap(Arc::new(HeadlessHost::default()));
-        host2.notice(Some("对方拒绝了悔棋"), None);
+        host2.act_notice(Some("对方拒绝了悔棋"), None);
     }
 
     #[test]
@@ -945,9 +1105,9 @@ mod tests {
         let baseline = event_baseline(&watch);
         let handle =
             tokio::spawn(run_event_pump(EmitWatch::new(watch.clone_rx()), queue.clone(), baseline));
-        host.emit(r#"{"chatLog":[{"name":"小明","text":"你好"}]}"#);
+        host.act_emit(r#"{"chatLog":[{"name":"小明","text":"你好"}]}"#);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        host.emit(r#"{"chatLog":[{"name":"小明","text":"你好"},{"name":"Agent","text":"请多指教"}]}"#);
+        host.act_emit(r#"{"chatLog":[{"name":"小明","text":"你好"},{"name":"Agent","text":"请多指教"}]}"#);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             queue.history(),
