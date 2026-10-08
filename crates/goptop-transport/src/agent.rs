@@ -556,13 +556,13 @@ struct RingInner {
 }
 
 impl EventRing {
-    fn push(&self, tool: &str, ok: bool, ms: u64, summary: String) {
+    fn push(&self, tool: &str, ok: bool, ms: u64, summary: String, detail: Option<String>) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.items.len() >= 200 {
             g.items.pop_front();
         }
         g.items.push_back(serde_json::json!({
-            "ts": now_ms(), "tool": tool, "ok": ok, "ms": ms, "summary": summary,
+            "ts": now_ms(), "tool": tool, "ok": ok, "ms": ms, "summary": summary, "detail": detail,
         }));
         g.total += 1;
     }
@@ -583,48 +583,8 @@ impl EventRing {
 }
 
 /// 玩家命令包装：B 席的每个 UiCommand 记一条日志（摘要口径与桌面逐字同文案）。
-struct LogPlayer {
-    inner: WebPlayer,
-    ring: Arc<EventRing>,
-}
-
-impl PlayerHandle for LogPlayer {
-    fn cmd(&self, cmd: UiCommand) {
-        let t0 = now_ms();
-        self.inner.cmd(cmd.clone());
-        let (kind, summary) = action_summary(&cmd);
-        self.ring.push(&format!("submit:{kind}"), true, now_ms().saturating_sub(t0), summary);
-    }
-
-    fn snapshot(&self) -> serde_json::Value {
-        self.inner.snapshot()
-    }
-
-    fn pump(&self) {
-        self.inner.pump();
-    }
-}
-
-/// UiCommand → 日志的 (工具名, 摘要)。文本一律截断——日志是给人看的进度条。
-fn action_summary(cmd: &UiCommand) -> (String, String) {
-    fn clip(s: &str) -> String {
-        s.chars().take(60).collect()
-    }
-    match cmd {
-        UiCommand::Place { x, y } => ("move".into(), format!("落子 ({x},{y})")),
-        UiCommand::Pass => ("pass".into(), "停一手".into()),
-        UiCommand::Resign => ("resign".into(), "认输".into()),
-        UiCommand::SendChat(t) => ("chat".into(), format!("发送消息：{}", clip(t))),
-        UiCommand::RequestUndo => ("request".into(), "请求悔棋".into()),
-        UiCommand::RequestReset => ("request".into(), "请求重开".into()),
-        UiCommand::RequestSwap => ("request".into(), "请求换棋".into()),
-        UiCommand::ConfirmApprove => ("confirm".into(), "同意对方请求".into()),
-        UiCommand::ConfirmDecline => ("confirm".into(), "拒绝对方请求".into()),
-        UiCommand::ConfirmScore => ("score".into(), "确认计分".into()),
-        UiCommand::ToggleDead { x, y } => ("dead".into(), format!("标记死子 ({x},{y})")),
-        _ => ("other".into(), "其他会话命令".into()),
-    }
-}
+/// 玩家命令包装已退场：UiCommand 级的记账由循环的 on_tool 全量钩子承担
+///（submit 的 head=路径、detail=暂存内容头），双层记账只会两行一动作。
 
 /// HTTP 通道包装：每次真实 LLM 请求记一条日志并给运行表 +1 实时调用计数。
 struct LogHttp {
@@ -647,19 +607,37 @@ impl HttpChannel for LogHttp {
         let n = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
         let ms = now_ms().saturating_sub(t0);
         match &result {
-            Ok((status, text)) => self.ring.push(
-                "llm",
-                *status < 400,
-                ms,
-                format!("第 {n} 次模型调用：HTTP {status}，{} 字节回复", text.len()),
+            // 成功不进环（次数在统计行）；失败必进（红色详情行——卡局诊断第一现场）。
+            Ok((status, text)) if *status < 400 => self.ring.push(
+                "llm", true, ms,
+                format!("第 {n} 次模型调用：HTTP {status}"), None,
             ),
-            Err(e) => self.ring.push("llm", false, ms, format!("第 {n} 次模型调用失败：{e}")),
+            Ok((status, text)) => self.ring.push(
+                "llm", false, ms,
+                format!("第 {n} 次模型调用：HTTP {status}"),
+                Some(clamp_err(text)),
+            ),
+            Err(e) => self.ring.push("llm", false, ms, format!("第 {n} 次模型调用失败"), Some(e.clone())),
         }
         result
     }
 }
 
-/// 记忆存储包装：/memory 的写删记日志（读写不记——读是模型的本分，刷屏无益）。
+/// 错误详情钳制（同桌面 trunc_err：源头收口防超长 HTML 灌环）。
+fn clamp_err(text: &str) -> String {
+    let t = text.trim();
+    if t.starts_with('<') {
+        return format!("<非 JSON 响应：{} 字节>", text.len());
+    }
+    let single: String = t.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).collect();
+    let mut out: String = single.chars().take(160).collect();
+    if single.chars().count() > 160 {
+        out.push('…');
+    }
+    out
+}
+
+/// 记忆存储包装：删除记日志（写已由 on_tool 的 Write 行覆盖，重复即两行一动作）。
 struct LogStore {
     inner: WebStore,
     ring: Arc<EventRing>,
@@ -671,19 +649,18 @@ impl VfsStore for LogStore {
     }
 
     fn write(&self, ns: &str, path: &str, content: &str) -> Result<(), String> {
-        let r = self.inner.write(ns, path, content);
-        self.ring.push(
-            "memory",
-            r.is_ok(),
-            0,
-            format!("记忆写入 /memory/{path}（{} 字节）", content.len()),
-        );
-        r
+        self.inner.write(ns, path, content)
     }
 
     fn delete(&self, ns: &str, path: &str) -> Result<bool, String> {
         let r = self.inner.delete(ns, path);
-        self.ring.push("memory", r.as_ref().is_ok_and(|&d| d), 0, format!("记忆删除 /memory/{path}"));
+        self.ring.push(
+            "memory_delete",
+            r.as_ref().is_ok_and(|&d| d),
+            0,
+            format!("/memory/{path}"),
+            None,
+        );
         r
     }
 
@@ -721,6 +698,7 @@ struct LlmCfgJson {
     enable_subagent: Option<bool>,
     effort: Option<String>,
     debug: Option<bool>,
+    stream: Option<bool>,
 }
 
 /// 协议拼写归一（桌面 parse_protocol 逐字镜像）：crate serde 值域是 snake_case，
@@ -767,6 +745,7 @@ fn load_llm_cfg(get: &dyn Fn(&str) -> Option<String>, ui_lang: &str) -> Result<(
         ),
         effort: goptop_agent::llm::sanitize_effort(&j.effort),
         debug: j.debug.unwrap_or(false),
+        stream: j.stream.unwrap_or(false),
     };
     if cfg.base_url.is_empty() || cfg.model.is_empty() {
         return Err("LLM 配置不完整：端点与模型都不能为空".into());
@@ -872,7 +851,7 @@ async fn run_builtin_task(run: Arc<Run>, cfg: StartCfg, seat: SeatColor) {
     let staging = Arc::new(Staging::new());
     run.inner.lock().unwrap_or_else(|e| e.into_inner()).staging = Some(staging.clone());
     let make_ctx = || ToolCtx {
-        player: Arc::new(LogPlayer { inner: agent.clone(), ring: run.events.clone() }),
+        player: Arc::new(agent.clone()),
         watch: EmitWatch::new(agent_watch.clone_rx()),
         events: queue.clone(),
         staging: staging.clone(),
@@ -882,11 +861,12 @@ async fn run_builtin_task(run: Arc<Run>, cfg: StartCfg, seat: SeatColor) {
         subagent_enabled,
         subagent: None,
         on_tool: {
-            // 与桌面 AgentHub 同款：注册表工具进同一份环；submit 由 LogPlayer 记账。
+            // 全量记账（含失败与 submit）：事件流是唯一现场，失败的 submit
+            // 红色换行展示报错——「模型 submit 记忆」这类误用必须可见。
             let ring = Arc::clone(&run.events);
-            Some(Arc::new(move |tool: &str, ok: bool, ms: u64, summary: &str| {
-                ring.push(tool, ok, ms, summary.to_string());
-            }) as Arc<dyn Fn(&str, bool, u64, &str) + Send + Sync>)
+            Some(Arc::new(move |tool: &str, ok: bool, ms: u64, head: &str, detail: Option<&str>| {
+                ring.push(tool, ok, ms, head.to_string(), detail.map(str::to_string));
+            }) as Arc<dyn Fn(&str, bool, u64, &str, Option<&str>) + Send + Sync>)
         },
     };
     let sub_ctx = make_ctx();

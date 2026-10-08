@@ -769,7 +769,7 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
     // Arc 只喂了 ToolCtx 的话，状态回执永远读不到暂存着法，棋盘的幽灵子不画。
     run.inner.lock().unwrap_or_else(|e| e.into_inner()).staging = Some(staging.clone());
     let make_ctx = || ToolCtx {
-        player: Arc::new(LogPlayer { inner: agent.clone(), ring: run.events.clone() }),
+        player: Arc::new(agent.clone()),
         watch: EmitWatch::new(agent_watch.clone_rx()),
         events: queue.clone(),
         staging: staging.clone(),
@@ -779,12 +779,12 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
         subagent_enabled,
         subagent: None,
         on_tool: {
-            // 注册表工具（read/write/edit/grep/wait_events/delegate）进同一份环；
-            // submit 不走这里（LogPlayer 的 cmd 落账已覆盖，重复即两行一动作）。
+            // 全量记账（含失败与 submit）：事件流是唯一现场——失败红色换行展示报错，
+            // submit 详情取暂存内容头（循环在 execute 前已 peek 好）。
             let ring = Arc::clone(&run.events);
-            Some(Arc::new(move |tool: &str, ok: bool, ms: u64, summary: &str| {
-                ring.push(tool, ok, ms, summary.to_string());
-            }) as Arc<dyn Fn(&str, bool, u64, &str) + Send + Sync>)
+            Some(Arc::new(move |tool: &str, ok: bool, ms: u64, head: &str, detail: Option<&str>| {
+                ring.push(tool, ok, ms, head.to_string(), detail.map(str::to_string));
+            }) as goptop_agent::registry::ToolLogHook)
         },
     };
     // 子代理的 ctx 先建（subagent=None——深度 1 的结构保证）；主 ctx 持 runner。
@@ -1345,6 +1345,7 @@ struct LlmCfgJson {
     enable_subagent: Option<bool>,
     effort: Option<String>,
     debug: Option<bool>,
+    stream: Option<bool>,
 }
 
 /// 协议拼写归一：goptop-agent 的 Protocol serde 值域是 snake_case
@@ -1415,6 +1416,7 @@ fn parse_llm_cfg(
         ),
         effort: goptop_agent::llm::sanitize_effort(&j.effort),
         debug: j.debug.unwrap_or(false),
+        stream: j.stream.unwrap_or(false),
     };
     if cfg.base_url.is_empty() || cfg.model.is_empty() {
         return Err("LLM 配置不完整：端点与模型都不能为空".into());
@@ -1454,15 +1456,16 @@ struct RingItem {
     ok: bool,
     ms: u64,
     summary: String,
+    detail: Option<String>,
 }
 
 impl EventRing {
-    fn push(&self, tool: &str, ok: bool, ms: u64, summary: String) {
+    fn push(&self, tool: &str, ok: bool, ms: u64, summary: String, detail: Option<String>) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.items.len() >= 200 {
             g.items.pop_front();
         }
-        g.items.push_back(RingItem { ts: now_ms(), tool: tool.to_string(), ok, ms, summary });
+        g.items.push_back(RingItem { ts: now_ms(), tool: tool.to_string(), ok, ms, summary, detail });
         g.total += 1;
     }
 
@@ -1476,72 +1479,19 @@ impl EventRing {
             .enumerate()
             .filter(|(i, _)| first + *i as u64 >= since)
             .map(|(_, it)| {
-                serde_json::json!({"ts": it.ts, "tool": it.tool, "ok": it.ok, "ms": it.ms, "summary": it.summary})
+                serde_json::json!({"ts": it.ts, "tool": it.tool, "ok": it.ok, "ms": it.ms, "summary": it.summary, "detail": it.detail})
             })
             .collect();
         (g.total, items)
     }
 }
 
-/// 玩家命令包装：B 席的每个 UiCommand（= submit 落地的动作、计分自动确认、认输）
-/// 记一条日志。`cmd` 无返回值（对局规则错误由状态机静默拒），ok 恒 true 表「已下达」。
-struct LogPlayer {
-    inner: NativePlayer,
-    ring: Arc<EventRing>,
-}
+/// 玩家命令包装已退场：UiCommand 级的记账由循环的 on_tool 全量钩子承担
+///（submit 的 head=路径、detail=暂存内容头），双层记账只会两行一动作。
 
-impl PlayerHandle for LogPlayer {
-    fn cmd(&self, cmd: goptop_net::session::UiCommand) {
-        let t0 = Instant::now();
-        self.inner.cmd(cmd.clone());
-        let (kind, summary) = action_summary(&cmd);
-        self.ring.push(
-            &format!("submit:{kind}"),
-            true,
-            t0.elapsed().as_millis() as u64,
-            summary,
-        );
-    }
-
-    fn snapshot(&self) -> serde_json::Value {
-        self.inner.snapshot()
-    }
-
-    fn pump(&self) {
-        self.inner.pump();
-    }
-
-    fn wait_until(
-        &self,
-        pred: &mut dyn FnMut(&serde_json::Value) -> bool,
-        timeout: Duration,
-    ) -> bool {
-        self.inner.wait_until(pred, timeout)
-    }
-}
-
-/// UiCommand → 日志的 (工具名, 摘要)。文本一律截断——日志是给人看的进度条，
-/// 不是聊天记录的第二个副本（全文在 /game/chat）。
-fn action_summary(cmd: &goptop_net::session::UiCommand) -> (String, String) {
-    use goptop_net::session::UiCommand as C;
-    fn clip(s: &str) -> String {
-        s.chars().take(60).collect()
-    }
-    match cmd {
-        C::Place { x, y } => ("move".into(), format!("落子 ({x},{y})")),
-        C::Pass => ("pass".into(), "停一手".into()),
-        C::Resign => ("resign".into(), "认输".into()),
-        C::SendChat(t) => ("chat".into(), format!("发送消息：{}", clip(t))),
-        C::RequestUndo => ("request".into(), "请求悔棋".into()),
-        C::RequestReset => ("request".into(), "请求重开".into()),
-        C::RequestSwap => ("request".into(), "请求换棋".into()),
-        C::ConfirmApprove => ("confirm".into(), "同意对方请求".into()),
-        C::ConfirmDecline => ("confirm".into(), "拒绝对方请求".into()),
-        C::ConfirmScore => ("score".into(), "确认计分".into()),
-        C::ToggleDead { x, y } => ("dead".into(), format!("标记死子 ({x},{y})")),
-        _ => ("other".into(), "其他会话命令".into()),
-    }
-}
+/// UiCommand → 日志的 (工具名, 摘要)：已随 LogPlayer 退场——UiCommand 级记账由
+/// 循环的 on_tool 全量钩子承担（submit 的 head=路径、detail=暂存内容头），
+/// 双层记账只会两行一动作。
 
 /// HTTP 通道包装：每次真实 LLM 请求记一条日志并给运行表 +1 实时调用计数
 /// （循环对 Hub 不透明，这是唯一能实时数调用次数的缝）。
@@ -1564,19 +1514,38 @@ impl HttpChannel for LogHttp {
         let n = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
         let ms = t0.elapsed().as_millis() as u64;
         match &result {
-            Ok((status, text)) => self.ring.push(
-                "llm",
-                *status < 400,
-                ms,
-                format!("第 {n} 次模型调用：HTTP {status}，{} 字节回复", text.len()),
+            // 成功调用不进环（次数在统计行）；**失败必须进**（红色详情行——
+            // 环里 llm ok=false 是「卡局诊断」的第一现场）。
+            Ok((status, text)) if *status < 400 => self.ring.push(
+                "llm", true, ms,
+                format!("第 {n} 次模型调用：HTTP {status}"), None,
             ),
-            Err(e) => self.ring.push("llm", false, ms, format!("第 {n} 次模型调用失败：{e}")),
+            Ok((status, text)) => self.ring.push(
+                "llm", false, ms,
+                format!("第 {n} 次模型调用：HTTP {status}"),
+                Some(trunc_err(text)),
+            ),
+            Err(e) => self.ring.push("llm", false, ms, format!("第 {n} 次模型调用失败"), Some(e.clone())),
         }
         result
     }
 }
 
-/// 记忆存储包装：/memory 的写删记日志（读写不记——读是模型的本分，刷屏无益）。
+/// 错误详情钳制（前端还会再钳一次；源头收口防超长 HTML 灌环）。
+fn trunc_err(text: &str) -> String {
+    let t = text.trim();
+    if t.starts_with('<') {
+        return format!("<非 JSON 响应：{} 字节>", text.len());
+    }
+    let single: String = t.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).collect();
+    let mut out: String = single.chars().take(160).collect();
+    if single.chars().count() > 160 {
+        out.push('…');
+    }
+    out
+}
+
+/// 记忆存储包装：删除记日志（写已由 on_tool 的 Write 行覆盖，重复即两行一动作）。
 struct LogStore {
     inner: NativeStore,
     ring: Arc<EventRing>,
@@ -1588,19 +1557,18 @@ impl VfsStore for LogStore {
     }
 
     fn write(&self, ns: &str, path: &str, content: &str) -> Result<(), String> {
-        let r = self.inner.write(ns, path, content);
-        self.ring.push(
-            "memory",
-            r.is_ok(),
-            0,
-            format!("记忆写入 /memory/{path}（{} 字节）", content.len()),
-        );
-        r
+        self.inner.write(ns, path, content)
     }
 
     fn delete(&self, ns: &str, path: &str) -> Result<bool, String> {
         let r = self.inner.delete(ns, path);
-        self.ring.push("memory", r.as_ref().is_ok_and(|&d| d), 0, format!("记忆删除 /memory/{path}"));
+        self.ring.push(
+            "memory_delete",
+            r.as_ref().is_ok_and(|&d| d),
+            0,
+            format!("/memory/{path}"),
+            None,
+        );
         r
     }
 
@@ -1636,7 +1604,7 @@ mod tests {
     fn 日志环_环形上限与增量游标() {
         let ring = EventRing::default();
         for i in 0..205 {
-            ring.push("llm", true, i, format!("第 {i} 次"));
+            ring.push("llm", true, i, format!("第 {i} 次"), None);
         }
         let (next, items) = ring.snapshot(0);
         assert_eq!(next, 205, "next 是总条数，不因环截断而变小");
@@ -1749,19 +1717,6 @@ mod tests {
         )
         .expect("缺省字段应可解析");
         assert!(matches!(cfg.driver, Driver::Mcp));
-    }
-
-    /* ---- 动作摘要（日志环的 tool/summary 口径） ---- */
-
-    #[test]
-    fn 动作摘要_主类与文本截断() {
-        use goptop_net::session::UiCommand as C;
-        assert_eq!(action_summary(&C::Place { x: 7, y: 7 }), ("move".into(), "落子 (7,7)".into()));
-        let long = "x".repeat(200);
-        let (_, s) = action_summary(&C::SendChat(long));
-        assert_eq!(s.chars().count(), 60 + "发送消息：".chars().count(), "文本截断，日志不是聊天副本");
-        assert_eq!(action_summary(&C::Resign).0, "resign");
-        assert_eq!(action_summary(&C::SetName("甲".into())).0, "other");
     }
 
     /* ---- 运行状态机：终态不被运行中状态覆盖 ---- */

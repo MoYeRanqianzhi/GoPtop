@@ -236,8 +236,8 @@ async function diagDump(ep) {
         calls: Number(t.match(/LLM 调用 (\d+)/)?.[1] ?? -1),
         opLog: /(Read|Write|Wait)\(/.test(t),
         llmLineGone: !/\[llm\]/.test(t),
-        moveLog: /Submit\(落子/.test(t),
-        chatLog: /Submit\(发送消息/.test(t),
+        moveLog: /Submit\(\/game\/in\/move\)/.test(t),
+        chatLog: /Submit\(\/game\/in\/chat\)/.test(t),
       };
     });
     check("工具日志为操作式（Read/Write/Wait 在案）", stat.calls > 0 && stat.opLog, `LLM 调用=${stat.calls} 操作行=${stat.opLog}`);

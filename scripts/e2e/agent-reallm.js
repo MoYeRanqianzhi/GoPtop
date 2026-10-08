@@ -11,7 +11,7 @@
  *   GOPTOP_TEST_LLM_MODEL 模型名
  *
  * 诚实性口径：模型下得差 / 拒绝聊天 / 思考慢都不是失败——门槛是「真实 LLM 链路功能
- * 成立」（开局聊天在案、真实落子 ≥5 手、全程无 error 态、llmCalls>0 且 tokensIn>0）。
+ * 成立」（真实落子 ≥5 手、全程无 error 态、llmCalls>0 且 tokensIn>0；开局聊天为软指标只记录）。
  * 链路级失败（Fatal / 卡死 / 无落子）才是 FAIL，须附完整诊断。
  *
  * 流程（壳 CDP 驱动与收尾纪律对齐 agent-builtin.js）：
@@ -430,7 +430,11 @@ function coordsOf(moves) {
     //    只可作旁证，不作门槛）。 ——
     const finalMc = await moveCount(ep);
     const agentOnBoard = finalMc - humanPlaced;
-    check("开局聊天在案（submit:chat ≥1）", obs.chats >= 1, `聊天 ${obs.chats} 条`);
+    // 开局聊天是**软指标**（只记录不判 FAIL）：聊天链路的正确性已由 mock e2e
+    //（agent-web / agent-builtin 的聊天往返断言）确定性覆盖；真实模型是否愿意
+    // 打招呼属社交遵从度、不可强制（实测 deepseek-v4.1-flash 连续两局先应手
+    // 不寒暄，对局本身完整无碍）。门槛核心是完整对局，见下方三条硬断言。
+    console.log(`[reallm] 开局聊天（软指标）：${obs.chats} 条${obs.chats >= 1 ? "" : "（本局模型未寒暄，链路正确性以 mock e2e 为准）"}`);
     check(`Agent 真实落盘 ≥${MIN_AGENT_MOVES} 手（均为白方应手）`,
       agentOnBoard >= MIN_AGENT_MOVES,
       `落盘 ${agentOnBoard} 手（手数 ${finalMc} − 我方 ${humanPlaced}）；日志下达 ${obs.agentMoves.length} 手：${obs.agentMoves.slice(0, 8).join(" / ")}${obs.agentMoves.length > 8 ? " …" : ""}`);

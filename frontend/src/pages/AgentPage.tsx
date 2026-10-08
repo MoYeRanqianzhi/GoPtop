@@ -118,6 +118,9 @@ export type LlmConfig = {
   effort: string;
   /** 测试模式（默认关）：思维链与输出全文进工具日志——诊断「Agent 疑似卡住」。 */
   debug: boolean;
+  /** 流式输出（默认关，用户拍板「新增可选流式」）：部分 API 强制流式/非流式之一，
+   *  这是兼容性开关；开启后请求 stream:true，SSE 在 Rust 侧聚合回同一形态。 */
+  stream: boolean;
 };
 
 export const DEFAULT_LLM_CONFIG: LlmConfig = {
@@ -129,6 +132,7 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
   enableSubagent: false,
   effort: "off",
   debug: false,
+  stream: false,
 };
 
 /** 存储里的 LLM 配置解析（坏/缺字段逐项回默认——设置半截写入不能把表单打挂）。 */
@@ -148,6 +152,7 @@ export function normalizeLlmConfig(raw: string | null): LlmConfig {
       enableSubagent: d.enableSubagent === true,
       effort: typeof d.effort === "string" && d.effort.trim() !== "" ? d.effort.trim().toLowerCase() : "off",
       debug: d.debug === true,
+      stream: d.stream === true,
     };
   } catch {
     return { ...DEFAULT_LLM_CONFIG };
@@ -240,12 +245,11 @@ export function agentStateLabel(state: string): string {
   }
 }
 
-/** `agent_events` 的一条工具日志。 */
-export type AgentEventItem = { ts: number; tool: string; ok: boolean; ms: number; summary: string };
+/** `agent_events` 的一条工具日志。detail=第二行详情（失败报错 / 暂存内容头 /
+ *  思维链全文；null=无第二行）。 */
+export type AgentEventItem = { ts: number; tool: string; ok: boolean; ms: number; summary: string; detail: string | null };
 
-/** 日志行的操作式排版（pi / claude code 风格）：Read(/game/board)、Write(/memory/x)、
- *  Submit(落子 (7,7))。llm HTTP 行不进日志（是噪音，次数在统计行——过滤在渲染处）；
- *  耗时也不上屏（数据里在）。失败一律缀 ×。 */
+/** 操作名映射（注册表工具名 → 人话动词；submit 系一律 Submit）。 */
 const OP_LABEL: Record<string, string> = {
   read: "Read",
   write: "Write",
@@ -256,14 +260,28 @@ const OP_LABEL: Record<string, string> = {
   game_start: "Start",
   game_leave: "Leave",
 };
+
+/** 日志条目的两行式排版（用户拍板 2026-10-08）：第一行操作 `Op(路径)`，第二行
+ *  换行缩进显示具体信息（失败报错 / 暂存内容 / 思维链全文）——不再把其他内容
+ *  塞在 Op(...) 括号里。llm 成功行不上屏（次数在统计行）；**llm 失败行红色上屏**
+ *  （卡局诊断第一现场）。事件流（tool="event"）同样两行：`事件` + 摘要详情。 */
+export function formatAgentEventParts(e: AgentEventItem): { head: string; detail: string | null } | null {
+  if (e.tool === "thinking") return { head: "思考", detail: e.detail ?? e.summary };
+  if (e.tool === "say") return { head: "输出", detail: e.detail ?? e.summary };
+  if (e.tool === "event") return { head: "事件", detail: e.detail ?? e.summary };
+  if (e.tool === "llm") {
+    if (e.ok) return null;
+    return { head: "LLM 调用失败", detail: e.detail ?? e.summary };
+  }
+  const op = OP_LABEL[e.tool] ?? "Submit";
+  return { head: `${op}(${e.summary})`, detail: e.detail ?? (e.ok ? null : "失败") };
+}
+
+/** 单行摘要（测试与无 detail 的场景用）。 */
 export function formatAgentEvent(e: AgentEventItem): string {
-  // 测试模式的思维链/输出（llm-config.debug 开启才进环）：非操作行，前缀区分。
-  if (e.tool === "thinking") return `思考 ${e.summary}`;
-  if (e.tool === "say") return `输出 ${e.summary}`;
-  const op = OP_LABEL[e.tool];
-  const mark = e.ok ? "" : " ×";
-  if (op) return `${op}(${e.summary})${mark}`;
-  return `Submit(${e.summary})${mark}`;
+  const parts = formatAgentEventParts(e);
+  if (!parts) return "";
+  return parts.detail ? `${parts.head}\n  ${parts.detail}` : parts.head;
 }
 
 /** .mcp.json 连接串（一键复制给外部 MCP 客户端）。 */
@@ -792,8 +810,9 @@ export function AgentPage() {
   const errNote = status.state === "error" && status.detail ? status.detail.split("\n")[0].slice(0, 80) : "";
   const statusNote = errNote || `执${myColor === "black" ? "黑" : "白"}`;
   const running = phase !== "setup";
-  /* 工具日志显示面：llm HTTP 行不上屏（次数在统计行）；只渲染尾部 60 条。 */
-  const logEvents = useMemo(() => events.filter((e) => e.tool !== "llm").slice(-60), [events]);
+  /* 工具日志显示面：llm 成功行不上屏（次数在统计行），**失败行保留红色上屏**；
+     只渲染尾部 60 条。 */
+  const logEvents = useMemo(() => events.filter((e) => e.tool !== "llm" || !e.ok).slice(-60), [events]);
   // 收聊天 → 日志一起收（用户拍板：日志不该在聊天收起后单独占半屏）
   useEffect(() => {
     if (!chatOpen) setLogOpen(false);
@@ -1049,6 +1068,15 @@ export function AgentPage() {
             >
               {llm.debug ? "已开启（日志含思维链）" : "已关闭"}
             </button>
+            <button
+              className={`brutal-btn brutal-btn--sm${llm.stream ? " brutal-btn--active" : ""}`}
+              aria-pressed={llm.stream}
+              disabled={!enabled}
+              title="请求 stream:true（SSE 在本地聚合回同一形态）——部分 API 强制流式/非流式之一时切换"
+              onClick={() => updateLlm({ stream: !llm.stream })}
+            >
+              {llm.stream ? "流式已开启" : "流式已关闭"}
+            </button>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>子代理</span>
@@ -1146,11 +1174,20 @@ export function AgentPage() {
           {logEvents.length === 0 ? (
             <span>暂无操作日志</span>
           ) : (
-            logEvents.map((e, i) => (
-              <span key={`${e.ts}-${i}`} style={{ overflowWrap: "anywhere", color: e.ok ? "var(--muted)" : "#b00020" }}>
-                {formatAgentEvent(e)}
-              </span>
-            ))
+            logEvents.map((e, i) => {
+              const parts = formatAgentEventParts(e);
+              if (!parts) return null;
+              return (
+                <div key={`${e.ts}-${i}`} style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <span style={{ overflowWrap: "anywhere", color: e.ok ? "var(--muted)" : "#b00020" }}>{parts.head}</span>
+                  {parts.detail && (
+                    <span style={{ overflowWrap: "anywhere", paddingLeft: 14, color: e.ok ? "var(--muted)" : "#b00020", opacity: e.ok ? 0.85 : 1 }}>
+                      {parts.detail}
+                    </span>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       )}

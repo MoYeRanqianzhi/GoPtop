@@ -124,6 +124,7 @@ describe("normalizeLlmConfig", () => {
       enableSubagent: true,
       effort: "off",
       debug: false,
+      stream: false,
     });
     expect(normalizeLlmConfig(JSON.stringify({ protocol: "claude-3" })).protocol).toBe("anthropic");
   });
@@ -180,16 +181,21 @@ describe("agentStateLabel / formatAgentEvent", () => {
     expect(agentStateLabel("future_state")).toBe("future_state");
   });
 
-  it("日志行：操作式排版 Read/Write/Submit，失败缀 ×，耗时与 llm 行不上屏", () => {
-    expect(formatAgentEvent({ ts: 1, tool: "submit:move", ok: true, ms: 412, summary: "落子 (7,7)" })).toBe("Submit(落子 (7,7))");
-    expect(formatAgentEvent({ ts: 2, tool: "read", ok: true, ms: 3, summary: "/game/board" })).toBe("Read(/game/board)");
-    expect(formatAgentEvent({ ts: 3, tool: "write", ok: true, ms: 3, summary: "/memory/notes/style.md" })).toBe("Write(/memory/notes/style.md)");
-    expect(formatAgentEvent({ ts: 4, tool: "edit", ok: false, ms: 3, summary: "/memory/x" })).toBe("Edit(/memory/x) ×");
-    expect(formatAgentEvent({ ts: 5, tool: "grep", ok: true, ms: 3, summary: "● @ /game/history" })).toBe("Grep(● @ /game/history)");
-    expect(formatAgentEvent({ ts: 6, tool: "wait_events", ok: true, ms: 3000, summary: "timeout=25" })).toBe("Wait(timeout=25)");
-    // 测试模式（llm-config.debug）：思维链/输出是非操作行，前缀区分
-    expect(formatAgentEvent({ ts: 7, tool: "thinking", ok: true, ms: 0, summary: "对手第 8 行有活三，应挡 (8,7)" })).toBe("思考 对手第 8 行有活三，应挡 (8,7)");
-    expect(formatAgentEvent({ ts: 8, tool: "say", ok: true, ms: 0, summary: "好棋。" })).toBe("输出 好棋。");
+  it("日志两行式：操作行 + 换行详情；llm 成功行不上屏（null）、失败行红色头", () => {
+    // submit：head=路径，detail=暂存内容头（换行显示）
+    expect(formatAgentEvent({ ts: 1, tool: "submit", ok: true, ms: 412, summary: "/game/in/move", detail: "7,7" })).toBe("Submit(/game/in/move)\n  7,7");
+    expect(formatAgentEvent({ ts: 2, tool: "read", ok: true, ms: 3, summary: "/game/board", detail: null })).toBe("Read(/game/board)");
+    expect(formatAgentEvent({ ts: 3, tool: "write", ok: true, ms: 3, summary: "/memory/notes/style.md", detail: null })).toBe("Write(/memory/notes/style.md)");
+    // edit 失败：detail 是报错文本，换行显示
+    expect(formatAgentEvent({ ts: 4, tool: "edit", ok: false, ms: 3, summary: "/memory/x", detail: "old_string not found" })).toBe("Edit(/memory/x)\n  old_string not found");
+    expect(formatAgentEvent({ ts: 5, tool: "grep", ok: true, ms: 3, summary: "● @ /game/history", detail: null })).toBe("Grep(● @ /game/history)");
+    expect(formatAgentEvent({ ts: 6, tool: "wait_events", ok: true, ms: 3000, summary: "timeout=25", detail: null })).toBe("Wait(timeout=25)");
+    // 测试模式（llm-config.debug）：思维链/输出同为两行式（头 + 换行缩进全文）
+    expect(formatAgentEvent({ ts: 7, tool: "thinking", ok: true, ms: 0, summary: "", detail: "对手第 8 行有活三，应挡 (8,7)" })).toBe("思考\n  对手第 8 行有活三，应挡 (8,7)");
+    expect(formatAgentEvent({ ts: 8, tool: "say", ok: true, ms: 0, summary: "", detail: "好棋。" })).toBe("输出\n  好棋。");
+    // llm：成功行不渲染（null），失败行红色头 + 换行报错
+    expect(formatAgentEvent({ ts: 9, tool: "llm", ok: true, ms: 900, summary: "第 41 次模型调用", detail: null })).toBe("");
+    expect(formatAgentEvent({ ts: 10, tool: "llm", ok: false, ms: 900, summary: "第 42 次模型调用", detail: "HTTP 404: <非 JSON 响应：5663 字节>" })).toBe("LLM 调用失败\n  HTTP 404: <非 JSON 响应：5663 字节>");
   });
 });
 
