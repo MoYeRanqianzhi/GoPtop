@@ -268,10 +268,26 @@ pub async fn run(deps: LoopDeps) -> LoopOutcome {
         stats.input_tokens += resp.usage.input_tokens;
         stats.output_tokens += resp.usage.output_tokens;
 
-        // assistant 消息入史：文本与工具调用同一条（协议回放要求配对完整）。
+        // 测试模式（用户拍板）：思维链与输出全文进环（tool="thinking"/"say"）——
+        // 诊断「Agent 疑似卡住」的唯一窗口；关着时不进（环里不留长文本）。
+        if llm_cfg.debug {
+            if !resp.thinking_text.is_empty() {
+                ring_say(&tools, "thinking", &resp.thinking_text);
+            }
+            if !resp.content.is_empty() {
+                ring_say(&tools, "say", &resp.content);
+            }
+        }
+
+        // assistant 消息入史：文本与工具调用同一条（协议回放要求配对完整）；
+        // thinking 原样块跟在后面（Anthropic/Responses 的回放强约束，见
+        // Block::ThinkingRaw 的 doc）。
         let mut assistant_blocks: Vec<Block> = Vec::new();
         if !resp.content.is_empty() {
             assistant_blocks.push(Block::Text { text: resp.content.clone() });
+        }
+        for b in &resp.thinking_blocks {
+            assistant_blocks.push(Block::ThinkingRaw { data: b.clone() });
         }
         for call in &resp.tool_calls {
             assistant_blocks.push(Block::ToolCall { call: call.clone() });
@@ -457,10 +473,17 @@ fn event_block(events: &[GameEvent]) -> String {
     s
 }
 
+/// 测试模式的思维链/输出进环（tool="thinking"/"say"；UI 渲染为非操作行）。
+/// 钩子没接（测试台）就静默——展示面缺失不该影响对局。
+fn ring_say(ctx: &ToolCtx, tool: &str, text: &str) {
+    if let Some(hook) = &ctx.on_tool {
+        hook(tool, true, 0, text);
+    }
+}
+
 /// 计分自动确认：走 write 暂存 + submit，与模型动作完全同一条路，不绕过 registry
 ///（回执/错误文案、格式校验、settle 节奏全部复用工具面的那份真相）。
-async fn auto_confirm_score(ctx: &ToolCtx) -> Result<Value, ToolError> {
-    let path = crate::vfs::InFile::Score.path();
+async fn auto_confirm_score(ctx: &ToolCtx) -> Result<Value, ToolError> {    let path = crate::vfs::InFile::Score.path();
     let stage = serde_json::json!({ "path": path, "content": "ok" });
     let _staged =
         registry::execute(crate::tools::TOOL_WRITE.name, &stage, ctx).await?;
@@ -626,6 +649,10 @@ impl SubagentRunner for SubagentLoop {
             let mut assistant_blocks: Vec<Block> = Vec::new();
             if !resp.content.is_empty() {
                 assistant_blocks.push(Block::Text { text: resp.content.clone() });
+            }
+            // 子循环同受回放强约束：thinking 原样块一并入史。
+            for b in &resp.thinking_blocks {
+                assistant_blocks.push(Block::ThinkingRaw { data: b.clone() });
             }
             for call in &resp.tool_calls {
                 assistant_blocks.push(Block::ToolCall { call: call.clone() });

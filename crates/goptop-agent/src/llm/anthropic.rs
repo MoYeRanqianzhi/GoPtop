@@ -65,6 +65,17 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
         "max_tokens": req.max_output_tokens,
         "messages": merge_same_role(messages),
     });
+    // effort → extended thinking：预算给思考，max_tokens 必须盖住「思考+正文」，
+    // 否则思考吃光预算、正文零输出（stop=max_tokens 空手而归——实测卡住形态之一）。
+    if let Some(level) = super::sanitize_effort(&cfg.effort) {
+        let budget = match level.as_str() {
+            "low" => 1024,
+            "medium" => 4096,
+            _ => 10240,
+        };
+        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        body["max_tokens"] = json!(req.max_output_tokens.max(1024) + budget);
+    }
     if !req.system.is_empty() {
         body["system"] = json!(req.system);
     }
@@ -101,6 +112,9 @@ fn block_to_wire(b: &Block) -> Value {
             "type": "image",
             "source": { "type": "base64", "media_type": mime, "data": data_base64 },
         }),
+        // thinking 块逐字回传：extended thinking + 工具循环时 API 强制要求
+        // assistant 消息带原 thinking 块（签名完整性），丢了第二手直接 4xx。
+        Block::ThinkingRaw { data } => data.clone(),
     }
 }
 
@@ -134,6 +148,8 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
     let v: Value = serde_json::from_str(text)
         .map_err(|e| LlmError::Fatal(format!("Anthropic 响应不是合法 JSON: {e}")))?;
     let mut content = String::new();
+    let mut thinking_text = String::new();
+    let mut thinking_blocks = Vec::new();
     let mut tool_calls = Vec::new();
     if let Some(blocks) = v.get("content").and_then(Value::as_array) {
         for b in blocks {
@@ -152,7 +168,14 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
                         arguments: b.get("input").cloned().unwrap_or_else(|| json!({})),
                     });
                 }
-                // thinking / server 工具块等 v1 未启用，忽略。
+                // thinking / redacted_thinking：原样收进回放块（签名完整性），
+                // 明文部分另拼 thinking_text 供测试模式展示。
+                Some("thinking") | Some("redacted_thinking") => {
+                    if let Some(t) = b.get("thinking").and_then(Value::as_str) {
+                        thinking_text.push_str(t);
+                    }
+                    thinking_blocks.push(b.clone());
+                }
                 _ => {}
             }
         }
@@ -166,6 +189,8 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
     let usage = v.get("usage").cloned().unwrap_or(Value::Null);
     Ok(ChatResponse {
         content,
+        thinking_text,
+        thinking_blocks,
         tool_calls,
         stop,
         usage: Usage {
@@ -192,6 +217,8 @@ mod tests {
                 model: "claude-test".to_string(),
                 max_output_tokens: 1024,
                 reply_lang: None,
+                effort: None,
+                debug: false,
             },
             api_key: "k-test".to_string(),
             http: Arc::new(NativeHttp::new().expect("http client")),

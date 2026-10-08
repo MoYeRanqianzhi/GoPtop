@@ -34,6 +34,8 @@ mod tests {
     fn resp(text: &str) -> ChatResponse {
         ChatResponse {
             content: text.to_string(),
+            thinking_text: String::new(),
+            thinking_blocks: vec![],
             tool_calls: vec![],
             stop: StopReason::EndTurn,
             usage: Usage { input_tokens: 1, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0 },

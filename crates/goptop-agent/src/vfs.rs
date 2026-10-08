@@ -794,14 +794,15 @@ Read-only (synthesized from live game):
   /game/history    move list (JSONL)  |  /game/history/<n> = position after move n (same five variants)
   /game/chat       chat log (plain lines; long → read with offset/limit)
   /game/events     full event history (JSONL, seq-increasing)
-Stage-then-submit (write to stage, submit(path) to commit):
+Stage-then-submit — for /game/in/* slots ONLY (write to stage, submit(path) to commit;
+submitting CLEARS the slot, like pressing send empties the input box):
   /game/in/move     "x,y" or "pass"          → submit places your stone
   /game/in/chat     message text             → submit sends it
   /game/in/request  "undo"|"reset"|"swap"    → submit sends the request
   /game/in/confirm  "approve"|"reject"       → submit answers pending request
   /game/in/score    "ok"                     → submit confirms scoring
   /game/in/resign   (anything)               → submit resigns
-Persistent memory (survives across games):
+Persistent memory (survives across games; writes persist immediately, no submit):
   /memory/...       free-form files, e.g. /memory/notes/opponent-style.md
 "#
     .to_string()

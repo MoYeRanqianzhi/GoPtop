@@ -122,6 +122,8 @@ describe("normalizeLlmConfig", () => {
       maxOutputTokens: 1024,
       replyLang: "",
       enableSubagent: true,
+      effort: "",
+      debug: false,
     });
     expect(normalizeLlmConfig(JSON.stringify({ protocol: "claude-3" })).protocol).toBe("anthropic");
   });
@@ -185,6 +187,9 @@ describe("agentStateLabel / formatAgentEvent", () => {
     expect(formatAgentEvent({ ts: 4, tool: "edit", ok: false, ms: 3, summary: "/memory/x" })).toBe("Edit(/memory/x) ×");
     expect(formatAgentEvent({ ts: 5, tool: "grep", ok: true, ms: 3, summary: "● @ /game/history" })).toBe("Grep(● @ /game/history)");
     expect(formatAgentEvent({ ts: 6, tool: "wait_events", ok: true, ms: 3000, summary: "timeout=25" })).toBe("Wait(timeout=25)");
+    // 测试模式（llm-config.debug）：思维链/输出是非操作行，前缀区分
+    expect(formatAgentEvent({ ts: 7, tool: "thinking", ok: true, ms: 0, summary: "对手第 8 行有活三，应挡 (8,7)" })).toBe("思考 对手第 8 行有活三，应挡 (8,7)");
+    expect(formatAgentEvent({ ts: 8, tool: "say", ok: true, ms: 0, summary: "好棋。" })).toBe("输出 好棋。");
   });
 });
 

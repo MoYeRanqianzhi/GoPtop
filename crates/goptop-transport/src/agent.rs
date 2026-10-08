@@ -719,6 +719,8 @@ struct LlmCfgJson {
     max_output_tokens: Option<u32>,
     reply_lang: Option<String>,
     enable_subagent: Option<bool>,
+    effort: Option<String>,
+    debug: Option<bool>,
 }
 
 /// 协议拼写归一（桌面 parse_protocol 逐字镜像）：crate serde 值域是 snake_case，
@@ -763,6 +765,8 @@ fn load_llm_cfg(get: &dyn Fn(&str) -> Option<String>, ui_lang: &str) -> Result<(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| ui_lang.to_string()),
         ),
+        effort: goptop_agent::llm::sanitize_effort(&j.effort),
+        debug: j.debug.unwrap_or(false),
     };
     if cfg.base_url.is_empty() || cfg.model.is_empty() {
         return Err("LLM 配置不完整：端点与模型都不能为空".into());

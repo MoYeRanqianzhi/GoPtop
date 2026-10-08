@@ -121,12 +121,14 @@ pub fn build_system_prompt(cfg: &PromptCfg) -> String {
            position after move n, same variants as the board), `/game/chat`, `/game/events` \
            (full event history, seq-increasing).\n\
          - `/memory` is your long-term memory — plain files that survive across games, e.g. \
-           notes on this opponent's style.\n\
+           notes on this opponent's style. Writes there take effect immediately; staging \
+           and submit do NOT apply to `/memory`.\n\
          - Read `/index` first; it lists every path and what it is for.\n\n\
-         Your workflow is ALWAYS stage-then-submit: write to an `/game/in/*` file to stage \
+         Stage-then-submit applies ONLY to the `/game/in/*` slots: write to stage \
          (you may overwrite it to reconsider — nothing happens yet), then `submit(path)` to \
-         make it real. Staging gives you a chance to re-read and reconsider before anything \
-         happens.\n\
+         make it real. Submitting CLEARS the slot — like pressing send empties the input \
+         box; the action is out, the file is empty again. Staging gives you a chance to \
+         re-read and reconsider before anything happens.\n\
          - Place a stone: write the coords to `/game/in/move`, then submit it.\n\
          - Send a message: write `/game/in/chat`, then submit it.\n\
          - Undo / reset / swap request: `/game/in/request`.\n\
@@ -223,7 +225,12 @@ mod tests {
     fn world_model_covers_stage_then_submit() {
         let p = build_system_prompt(&cfg());
         assert!(p.contains("Read `/index` first"));
-        assert!(p.contains("stage-then-submit"));
+        // 语义三要点（用户拍板 2026-10-08）：stage-then-submit 只管 /game/in/*；
+        // submit 提交即清槽（发送键语义）；/memory 即写即存不走 submit。
+        assert!(p.contains("Stage-then-submit"));
+        assert!(p.contains("ONLY to the `/game/in/*` slots"));
+        assert!(p.contains("CLEARS the slot"));
+        assert!(p.contains("do NOT apply to `/memory`"));
         assert!(p.contains("`submit(path)`"));
         for path in [
             "/game/in/move",

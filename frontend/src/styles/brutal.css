@@ -331,3 +331,14 @@ html.app-tauri .poster-strip { padding-right: 138px; }
    自动置底（AgentPage 的 logRef effect），滚轮/触控板仍可回看历史。 */
 .agent-log { overflow-y: auto; scrollbar-width: none; }
 .agent-log::-webkit-scrollbar { display: none; }
+
+/* —— 全局自设计滚动条（用户拍板 2026-10-08）：新粗野主义同款——墨色方块滑块、
+   描边轨道；所有滚动区统一此风格（.agent-log 例外：自动置底不需要看见滚动条）。
+   对局页面整体不出滚动条（棋盘尺寸由 play-stack 自适应消化，页面级溢出是 bug）。 */
+* { scrollbar-width: thin; scrollbar-color: var(--ink) var(--bg-2); }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--bg-2); border: 2px solid var(--ink); }
+::-webkit-scrollbar-thumb { background: var(--ink); border: 2px solid var(--bg-2); }
+::-webkit-scrollbar-thumb:hover { background: #3d3d3d; }
+::-webkit-scrollbar-corner { background: var(--bg-2); }
+.game-layout, .play-stack { overflow: hidden; }

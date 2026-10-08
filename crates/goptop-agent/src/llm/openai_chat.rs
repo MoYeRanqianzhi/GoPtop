@@ -118,6 +118,11 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
         "messages": messages,
         "max_tokens": req.max_output_tokens,
     });
+    // effort → reasoning_effort（推理系模型认这个字段；打给不支持模型的 4xx 会
+    // 走 Fatal 分类回给配置面——各家的能力差异在配置文档里交代，运行面不猜）。
+    if let Some(level) = super::sanitize_effort(&cfg.effort) {
+        body["reasoning_effort"] = json!(level);
+    }
     if !req.tools.is_empty() {
         body["tools"] = json!(req.tools.iter()
             .map(|t| json!({
@@ -144,6 +149,13 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
         .ok_or_else(|| LlmError::Fatal(format!("OpenAI Chat 响应缺 choices: {}", trunc(text))))?;
     let message = choice.get("message").cloned().unwrap_or(Value::Null);
     let content = message.get("content").and_then(Value::as_str).unwrap_or_default().to_string();
+    // 思维链展示（DeepSeek 系的 reasoning_content）：只进测试模式日志，
+    // **不回放**——序列化端有意跳过 ThinkingRaw（该系不收回传的推理字段）。
+    let thinking_text = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let mut tool_calls = Vec::new();
     if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
         for c in calls {
@@ -172,6 +184,8 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
     let usage = v.get("usage").cloned().unwrap_or(Value::Null);
     Ok(ChatResponse {
         content,
+        thinking_text,
+        thinking_blocks: Vec::new(),
         tool_calls,
         stop,
         usage: Usage {
@@ -205,6 +219,8 @@ mod tests {
                 model: "chat-test".to_string(),
                 max_output_tokens: 512,
                 reply_lang: None,
+                effort: None,
+                debug: false,
             },
             api_key: "k-openai".to_string(),
             http: Arc::new(NativeHttp::new().expect("http client")),

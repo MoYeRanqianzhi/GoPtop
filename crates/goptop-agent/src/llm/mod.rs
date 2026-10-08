@@ -69,6 +69,24 @@ pub struct LlmConfig {
     /// （"简体中文"/"English"/"喵语"……不校验）；`None`=跟随 UI 语言
     /// （agent_start cfg 由前端传入当前 UI 语言作默认）。
     pub reply_lang: Option<String>,
+    /// 思考预算档位（用户拍板 2026-10-08「设置 agent effort」）：`None`=不发任何
+    /// 思考参数（现状行为）；Some("low"/"medium"/"high") 按协议映射——
+    /// Anthropic→`thinking.budget_tokens`（1024/4096/10240，`max_tokens` 随之抬高）；
+    /// Responses→`reasoning.effort`；Chat Completions→`reasoning_effort`。
+    /// 非法值在 [`sanitize_effort`] 归 None（防呆在配置面而非运行面）。
+    pub effort: Option<String>,
+    /// 测试模式（用户拍板 2026-10-08）：开启后每次模型调用的**思维链与输出全文**
+    /// 进 agent_events 环（tool="thinking"/"say"），UI 日志可见——诊断「Agent 疑似
+    /// 卡住」的唯一窗口。默认关（环里不进长文本）。
+    pub debug: bool,
+}
+
+/// effort 档位防呆：只认 low/medium/high，其余（含空/未知）归 None。
+/// 宿主解析配置时调用——非法值打到 API 上是 4xx，防在这里比在运行面便宜。
+pub fn sanitize_effort(v: &Option<String>) -> Option<String> {
+    v.as_ref()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| matches!(s.as_str(), "low" | "medium" | "high"))
 }
 
 /// 工具面在请求里的形态（由 tools.rs 的 `ToolDef` 装配而来）。
@@ -105,6 +123,11 @@ pub enum Block {
     /// 图像（base64）。仅 Anthropic 工具结果原生支持；OpenAI 两协议 → 占位符文本
     ///（承载能力矩阵见计划；判定走 [`LlmClient::supports_image_result`]）。
     Image { mime: String, data_base64: String },
+    /// 思考/推理块的**原样回放载体**（Anthropic 的 `thinking`/`redacted_thinking`、
+    /// Responses 的 `reasoning` 项——两家都要求带工具调用时逐字回传，签名完整性；
+    /// Chat Completions 系（DeepSeek reasoning_content）不回传，序列化时跳过）。
+    /// 展示文本从 `data` 里取（anthropic=`.thinking`，responses=summary 项）。
+    ThinkingRaw { data: serde_json::Value },
 }
 
 /// 一条统一消息。
@@ -172,6 +195,12 @@ pub struct ChatRequest {
 #[derive(Clone, Debug)]
 pub struct ChatResponse {
     pub content: String,
+    /// 思维链全文（thinking/reasoning 的展示用拼接——历史回放走 thinking_blocks
+    /// 原样块，这个字段只喂测试模式的日志显示）。无思考能力的模型恒空串。
+    pub thinking_text: String,
+    /// 思考/推理块的**原样 wire 形态**（anthropic content 块 / responses output 项）
+    /// ——循环装配 assistant 历史消息时包成 Block::ThinkingRaw 逐字回放。
+    pub thinking_blocks: Vec<serde_json::Value>,
     pub tool_calls: Vec<ToolCall>,
     pub stop: StopReason,
     pub usage: Usage,

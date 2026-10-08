@@ -55,6 +55,8 @@ fn estimate_msg_tokens(msg: &Msg) -> u64 {
                 chars += call.name.chars().count() as u64;
                 chars += call.arguments.to_string().chars().count() as u64;
             }
+            // thinking 原样块整段上线（Anthropic/Responses 逐字回传），计入触发线。
+            Block::ThinkingRaw { data } => chars += data.to_string().chars().count() as u64,
             Block::Image { .. } => chars += ESTIMATED_IMAGE_CHARS,
         }
     }
@@ -138,6 +140,12 @@ fn serialize_conversation(messages: &[Msg]) -> String {
                     call.name, call.id, call.arguments
                 )),
                 Block::Image { .. } => parts.push("[User]: (image attachment)".to_string()),
+                // 思维链进对谈稿（摘要模型需要推理脉络；只取明文——回放签名不经过这里）。
+                Block::ThinkingRaw { data } => {
+                    if let Some(t) = data.get("thinking").and_then(|v| v.as_str()) {
+                        parts.push(format!("[Assistant thinking]: {t}"));
+                    }
+                }
             }
         }
     }

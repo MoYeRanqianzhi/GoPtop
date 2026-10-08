@@ -48,6 +48,8 @@ static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn pure_text(text: &str) -> ChatResponse {
     ChatResponse {
         content: text.to_string(),
+        thinking_text: String::new(),
+        thinking_blocks: vec![],
         tool_calls: vec![],
         stop: StopReason::EndTurn,
         usage: Usage { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 },
@@ -58,6 +60,8 @@ fn pure_text(text: &str) -> ChatResponse {
 fn tool_step(calls: Vec<(&str, Value)>) -> ChatResponse {
     ChatResponse {
         content: String::new(),
+        thinking_text: String::new(),
+        thinking_blocks: vec![],
         tool_calls: calls
             .into_iter()
             .enumerate()
@@ -224,6 +228,8 @@ fn build_deps(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str, cfg: LoopCo
             model: "mock-1".into(),
             max_output_tokens: 1024,
             reply_lang: None,
+            effort: None,
+            debug: false,
         },
         cfg,
         tools: ctx,
@@ -1073,6 +1079,8 @@ async fn compact_循环接线_usage触发与摘要换血() {
         ws("/game/in/chat", "先打个招呼。"),
         ChatResponse {
             content: big,
+            thinking_text: String::new(),
+            thinking_blocks: vec![],
             tool_calls: vec![],
             stop: StopReason::EndTurn,
             usage: Usage { input_tokens: 50_000, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 },

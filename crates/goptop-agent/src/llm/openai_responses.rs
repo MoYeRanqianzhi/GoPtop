@@ -65,6 +65,9 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
                 // 视觉矩阵（计划）：本协议工具结果不含图像——占位文本兜底
                 //（registry 层已按 supports_image_result 替换，这里防御）。
                 Block::Image { .. } => text.push_str(crate::vfs::syn_image_placeholder()),
+                // reasoning 项逐字回传（store=false 全量重传形态下 OpenAI 要求
+                // 带思维链的 assistant 轮次把 reasoning 项一并回给）。
+                Block::ThinkingRaw { data } => input.push(data.clone()),
                 Block::ToolCall { .. } => {}
             }
         }
@@ -107,6 +110,10 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
         "store": false,
         "max_output_tokens": req.max_output_tokens,
     });
+    // effort → reasoning.effort（推理系模型；不支持模型 4xx 走 Fatal 回配置面）。
+    if let Some(level) = super::sanitize_effort(&cfg.effort) {
+        body["reasoning"] = json!({ "effort": level });
+    }
     if !req.system.is_empty() {
         body["instructions"] = json!(req.system);
     }
@@ -136,6 +143,8 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
         return Err(LlmError::Transient(format!("responses status=failed: {detail}")));
     }
     let mut content = String::new();
+    let mut thinking_text = String::new();
+    let mut thinking_blocks = Vec::new();
     let mut tool_calls = Vec::new();
     if let Some(items) = v.get("output").and_then(Value::as_array) {
         for item in items {
@@ -164,7 +173,18 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
                         arguments,
                     });
                 }
-                // reasoning 等条目 v1 未启用，忽略。
+                // reasoning 项：原样收进回放块（store=false 重传要求），summary
+                // 明文拼 thinking_text 供测试模式展示。
+                Some("reasoning") => {
+                    if let Some(summaries) = item.get("summary").and_then(Value::as_array) {
+                        for s in summaries {
+                            if let Some(t) = s.get("text").and_then(Value::as_str) {
+                                thinking_text.push_str(t);
+                            }
+                        }
+                    }
+                    thinking_blocks.push(item.clone());
+                }
                 _ => {}
             }
         }
@@ -184,6 +204,8 @@ fn parse_response(text: &str) -> Result<ChatResponse, LlmError> {
     let usage = v.get("usage").cloned().unwrap_or(Value::Null);
     Ok(ChatResponse {
         content,
+        thinking_text,
+        thinking_blocks,
         tool_calls,
         stop,
         usage: Usage {
@@ -217,6 +239,8 @@ mod tests {
                 model: "responses-test".to_string(),
                 max_output_tokens: 2048,
                 reply_lang: None,
+                effort: None,
+                debug: false,
             },
             api_key: "k-rsp".to_string(),
             http: Arc::new(NativeHttp::new().expect("http client")),

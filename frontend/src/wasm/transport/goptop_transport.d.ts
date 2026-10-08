@@ -197,8 +197,8 @@ export interface InitOutput {
     readonly wasmsession_state_debug: (a: number, b: number) => void;
     readonly wasmsession_state_json: (a: number, b: number) => void;
     readonly wasmsession_toggle_dead: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1936: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1938: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1939: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_1941: (a: number, b: number, c: number, d: number) => void;
     readonly __wasm_bindgen_func_elem_503: (a: number, b: number, c: number) => void;
     readonly __wasm_bindgen_func_elem_503_2: (a: number, b: number, c: number) => void;
     readonly __wasm_bindgen_func_elem_502: (a: number, b: number) => void;

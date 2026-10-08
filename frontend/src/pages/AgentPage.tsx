@@ -111,6 +111,12 @@ export type LlmConfig = {
   replyLang: string;
   /** delegate 子代理开关（默认关）。 */
   enableSubagent: boolean;
+  /** 思考档位（用户拍板「设置 agent effort」）：""=无（不发思考参数）、
+   *  low/medium/high 按协议映射（Anthropic thinking 预算 / Responses reasoning /
+   *  Chat reasoning_effort）。打给不支持的模型会 4xx——描述里写明。 */
+  effort: "" | "low" | "medium" | "high";
+  /** 测试模式（默认关）：思维链与输出全文进工具日志——诊断「Agent 疑似卡住」。 */
+  debug: boolean;
 };
 
 export const DEFAULT_LLM_CONFIG: LlmConfig = {
@@ -120,6 +126,8 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
   maxOutputTokens: 1024,
   replyLang: "",
   enableSubagent: false,
+  effort: "",
+  debug: false,
 };
 
 /** 存储里的 LLM 配置解析（坏/缺字段逐项回默认——设置半截写入不能把表单打挂）。 */
@@ -137,6 +145,8 @@ export function normalizeLlmConfig(raw: string | null): LlmConfig {
           : DEFAULT_LLM_CONFIG.maxOutputTokens,
       replyLang: typeof d.replyLang === "string" ? d.replyLang : "",
       enableSubagent: d.enableSubagent === true,
+      effort: d.effort === "low" || d.effort === "medium" || d.effort === "high" ? d.effort : "",
+      debug: d.debug === true,
     };
   } catch {
     return { ...DEFAULT_LLM_CONFIG };
@@ -246,6 +256,9 @@ const OP_LABEL: Record<string, string> = {
   game_leave: "Leave",
 };
 export function formatAgentEvent(e: AgentEventItem): string {
+  // 测试模式的思维链/输出（llm-config.debug 开启才进环）：非操作行，前缀区分。
+  if (e.tool === "thinking") return `思考 ${e.summary}`;
+  if (e.tool === "say") return `输出 ${e.summary}`;
   const op = OP_LABEL[e.tool];
   const mark = e.ok ? "" : " ×";
   if (op) return `${op}(${e.summary})${mark}`;
@@ -780,6 +793,10 @@ export function AgentPage() {
   const running = phase !== "setup";
   /* 工具日志显示面：llm HTTP 行不上屏（次数在统计行）；只渲染尾部 60 条。 */
   const logEvents = useMemo(() => events.filter((e) => e.tool !== "llm").slice(-60), [events]);
+  // 收聊天 → 日志一起收（用户拍板：日志不该在聊天收起后单独占半屏）
+  useEffect(() => {
+    if (!chatOpen) setLogOpen(false);
+  }, [chatOpen]);
   // 新事件自动置底：人只关心最新动作（无此逻辑时滚动条停原位，最新内容在视口外）
   useEffect(() => {
     const el = logRef.current;
@@ -1001,6 +1018,38 @@ export function AgentPage() {
             />
           </label>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>思考档位</span>
+            {(["", "low", "medium", "high"] as const).map((v) => (
+              <button
+                key={v || "off"}
+                className={`brutal-btn brutal-btn--sm${llm.effort === v ? " brutal-btn--active" : ""}`}
+                aria-pressed={llm.effort === v}
+                disabled={!enabled}
+                title={
+                  v === ""
+                    ? "不发思考参数（现状行为）"
+                    : "Anthropic=thinking 预算 / Responses=reasoning.effort / Chat=reasoning_effort；不支持的模型可能报错"
+                }
+                onClick={() => updateLlm({ effort: v })}
+              >
+                {v === "" ? "无" : v === "low" ? "低" : v === "medium" ? "中" : "高"}
+              </button>
+            ))}
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>更深思考更费 token 与时间</span>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>测试模式</span>
+            <button
+              className={`brutal-btn brutal-btn--sm${llm.debug ? " brutal-btn--active" : ""}`}
+              aria-pressed={llm.debug}
+              disabled={!enabled}
+              title="开启后模型思维链与输出全文进工具日志——诊断 Agent 卡住用"
+              onClick={() => updateLlm({ debug: !llm.debug })}
+            >
+              {llm.debug ? "已开启（日志含思维链）" : "已关闭"}
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>子代理</span>
             <button
               className={`brutal-btn brutal-btn--sm${llm.enableSubagent ? " brutal-btn--active" : ""}`}
@@ -1195,21 +1244,28 @@ export function AgentPage() {
         />
       </div>
 
-      {/* 侧栏（实测放得下）：与棋盘并行，纵向不占棋盘预算；Agent 状态卡常驻——收聊天不收状态 */}
+      {/* 侧栏（实测放得下）：与棋盘并行，纵向不占棋盘预算；Agent 状态卡常驻——
+          收聊天后 aside 收缩到内容高（align-self 翻转），日志也随聊天一起收起，
+          不再出现「半屏空框」（验收反馈 2026-10-08）。 */}
       {docked && (
-        <aside className="brutal-card" style={{ width: dockW ?? 0, flexShrink: 0, display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "#fff", minHeight: 0 }}>
+        <aside className="brutal-card" style={{ width: dockW ?? 0, flexShrink: 0, display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "#fff", minHeight: 0, alignSelf: chatOpen ? "stretch" : "flex-start" }}>
           {chatAndStatus}
         </aside>
       )}
 
-      {/* 侧栏放不下：退聊天弹窗（同 P2P 的两态互斥；首次实测前两态都不渲染一帧） */}
-      {!docked && dockW !== null && chatOpen && (
+      {/* 侧栏放不下：聊天退弹窗（同 P2P 的两态互斥；首次实测前两态都不渲染一帧）；
+          聊天收起时状态卡不能消失——退成右下角悬浮短卡（停止/日志仍可达）。 */}
+      {!docked && dockW !== null && (chatOpen ? (
         <div className="chat-modal-bg" onClick={() => setChatOpen(false)}>
           <div className="brutal-card chat-modal" onClick={(e) => e.stopPropagation()} style={{ padding: 12 }}>
             {chatAndStatus}
           </div>
         </div>
-      )}
+      ) : (
+        <div style={{ position: "fixed", right: 16, bottom: 16, zIndex: 5, maxWidth: 360 }}>
+          {agentCard}
+        </div>
+      ))}
     </>
   );
 }
