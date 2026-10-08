@@ -31,6 +31,12 @@ cd scripts/e2e && npm install && npx playwright install chromium
 | `matrix.js` | 矩阵批跑（内置五端 11 对组合） | 汇总表，退出码即结果 |
 | `features.js` | 设计功能：local / go / challenge / resign（聊天区内）/ specchat / kick | 每场景 PASS/FAIL 计数 |
 | `diag-pair.js` / `diag-watch.js` | 配对与观战镜像诊断（逐手打印各端手数与盘面差异） | 控制台逐手行 |
+| `agent-entry.js` | 「Agent 对战」入口基线（Web 启用面 + 鸿蒙降级回归路径） | 25 项 check，退出码即结果 |
+| `agent-builtin.js` | Agent 内置驱动壳级全链（Mock LLM；配对→落子→聊天→拦截→认输终局） | 19 项 check；自起壳（CDP 9222） |
+| `agent-mcp.js` | 外部 Agent 经 MCP 认领对手席全链（rmcp 客户端直连内嵌服务器） | 退出码即结果 |
+| `agent-web.js` | Agent 内置驱动 **Web 端**全链（浏览器 + Mock LLM；镜像 agent-builtin 关键链） | 18 项 check；自起 serve.js 5173/5174 |
+| `agent-reallm.js` | 真 LLM 端点实测门槛（**密钥经环境变量传入，不入库**） | 退出码即结果 |
+| `agent-mock-llm.js` | Anthropic 协议本地桩（CORS 全开，可作模块 `startStub()`） | 也可独立运行 `node agent-mock-llm.js` |
 | `serve.js` | 静态 dist 服务器（SPA 回退） | `node serve.js <port> <host> <distDir>` |
 
 跨端（桌面壳/安卓/鸿蒙）测试请先读 `.agents/docs/real-device-testing.md`（端点规格串、

@@ -4,6 +4,12 @@
  * wasm 入口：创建会话并接通全部 IO。
  */
 export class WasmSession {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmSession.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmSessionFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -51,6 +57,26 @@ export class WasmSession {
         const ptr0 = passStringToWasm0(receipt_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         wasm.wasmsession_accept_spec_receipt(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * 本会话在 FRONT 注册表的 id（`new_agent` 的会话才有；主会话回空串）。
+     * @returns {string}
+     */
+    agent_id() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wasmsession_agent_id(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * @param {string} id
@@ -132,6 +158,23 @@ export class WasmSession {
         this.__wbg_ptr = ret;
         WasmSessionFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * A'（人的 Agent 对局专用会话，JS 所有）——与 [`WasmSession::new`] 逐字同
+     * 流程（identity/sessionStorage、presence、Boot、首 drain），三处不同：登记
+     * FRONT 注册表（`agent_id` 读号）、emit 走 `on_change`（Some 时）、Nav 受
+     * `suppress_nav` 拦。不进全局单槽。同时至多一个 Agent 局（Hub 保证）→
+     * 至多一个 A'，旧条目弱引用自动失效。
+     * @param {string} cfg_json
+     * @param {Function | null | undefined} on_change
+     * @param {boolean} suppress_nav
+     * @returns {WasmSession}
+     */
+    static new_agent(cfg_json, on_change, suppress_nav) {
+        const ptr0 = passStringToWasm0(cfg_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsession_new_agent(ptr0, len0, isLikeNone(on_change) ? 0 : addHeapObject(on_change), suppress_nav);
+        return WasmSession.__wrap(ret);
     }
     /**
      * 回执解析（粘贴弹窗用）。返回 {ok:true, answer:{...}} 或 {ok:false}。
@@ -373,6 +416,134 @@ export class WasmSession {
     }
 }
 if (Symbol.dispose) WasmSession.prototype[Symbol.dispose] = WasmSession.prototype.free;
+
+/**
+ * `agent_bind(sessionId)`：登记人类侧 A' 会话键（配对目标 + 拦截面豁免）。
+ *
+ * **开局邀请代发**（桌面同款）：登记时若该会话还空置（phase=home）就代发一次
+ * `CreateInvite`——A' 建在 /p2p 基座上不会自发邀请，本命令是链路里唯一能替 A'
+ * 按下「开启对战」的点；**仅在 home 时发**（我执白方向的 A' 是携链 Boot 的受邀席，
+ * 误发会拆掉它正在进行的受理）。会话暂不在注册表也照存登记值（桌面同款不报错）。
+ * @param {string} session_id
+ * @returns {string}
+ */
+export function agent_bind(session_id) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.agent_bind(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * `agent_events(id, since)`：工具日志环（≤200）的增量拉取。`since` 用 u32
+ * （wasm-bindgen 的 u64 映射 BigInt，环 ≤200 无需——契约偏差 3）。
+ * @param {number} id
+ * @param {number} since
+ * @returns {string}
+ */
+export function agent_events(id, since) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.agent_events(retptr, id, since);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred1_0 = r0;
+        deferred1_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * `agent_llm_test()`：发一次最小真请求验证配置，`"ok"` 或人话错误（异步导出，
+ * 真请求最坏 60s 超时 × 3 次尝试）。**不硬编码任何端点/key**：配置全部读 store 链。
+ * @returns {Promise<string>}
+ */
+export function agent_llm_test() {
+    const ret = wasm.agent_llm_test();
+    return takeObject(ret);
+}
+
+/**
+ * `agent_start(cfgJson) -> {"ok":true,"id":N} | {"ok":false,"error"}`。
+ *
+ * 单局互斥（any_live）与参数校验的文案与桌面逐字一致；任务在 spawn_local 里
+ * 自转，本导出只登记就返回。
+ * @param {string} cfg_json
+ * @returns {string}
+ */
+export function agent_start(cfg_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(cfg_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.agent_start(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * `agent_status(id)`：状态 JSON（与桌面 agent_status 逐字同形：
+ * state/detail/stagedMove/llmCalls/tokensIn/tokensOut/compactions）。
+ * 运行不在表里回 `{"ok":false,"error":"run not found"}`。
+ * @param {number} id
+ * @returns {string}
+ */
+export function agent_status(id) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.agent_status(retptr, id);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred1_0 = r0;
+        deferred1_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * `agent_stop(id) -> {"ok":true}`（异步导出回 Promise；永不 reject）。
+ *
+ * 顺序有契约（不可换，与桌面逐字）：认输先落地（对面要看到终局有因，而不是
+ * 看到断线），`RESIGN_SETTLE_MS` 定拍给数据面留发送窗口，再置 abort——配对
+ * 轮询与循环的既有检查点随即收口，最后拆泵/撤防/摘表。
+ * @param {number} id
+ * @returns {Promise<string>}
+ */
+export function agent_stop(id) {
+    const ret = wasm.agent_stop(id);
+    return takeObject(ret);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -468,6 +639,10 @@ function __wbg_get_imports() {
                 wasm.__wbindgen_export4(deferred0_0, deferred0_1, 1);
             }
         },
+        __wbg_fetch_1c92d61a37418c53: function(arg0, arg1, arg2, arg3) {
+            const ret = getObject(arg0).fetch(getStringFromWasm0(arg1, arg2), getObject(arg3));
+            return addHeapObject(ret);
+        },
         __wbg_getItem_eb388fb8c39edb35: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             const ret = getObject(arg1).getItem(getStringFromWasm0(arg2, arg3));
             var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
@@ -506,6 +681,16 @@ function __wbg_get_imports() {
             let result;
             try {
                 result = getObject(arg0) instanceof MessageEvent;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
+        __wbg_instanceof_Response_8f49efbd4bfd76d6: function(arg0) {
+            let result;
+            try {
+                result = getObject(arg0) instanceof Response;
             } catch (_) {
                 result = false;
             }
@@ -559,7 +744,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_1156(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_1930(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -582,6 +767,24 @@ function __wbg_get_imports() {
             const ret = new Object();
             return addHeapObject(ret);
         },
+        __wbg_new_typed_cceaf62d8d95e9f2: function(arg0, arg1) {
+            try {
+                var state0 = {a: arg0, b: arg1};
+                var cb0 = (arg0, arg1) => {
+                    const a = state0.a;
+                    state0.a = 0;
+                    try {
+                        return __wasm_bindgen_func_elem_1930(a, state0.b, arg0, arg1);
+                    } finally {
+                        state0.a = a;
+                    }
+                };
+                const ret = new Promise(cb0);
+                return addHeapObject(ret);
+            } finally {
+                state0.a = 0;
+            }
+        },
         __wbg_new_with_configuration_b7e127163d21350c: function() { return handleError(function (arg0) {
             const ret = new RTCPeerConnection(getObject(arg0));
             return addHeapObject(ret);
@@ -594,6 +797,13 @@ function __wbg_get_imports() {
             const ret = Array.of(getObject(arg0));
             return addHeapObject(ret);
         },
+        __wbg_origin_e8a7e1c5499701de: function() { return handleError(function (arg0, arg1) {
+            const ret = getObject(arg1).origin;
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        }, arguments); },
         __wbg_postMessage_f353f52415750876: function() { return handleError(function (arg0, arg1) {
             getObject(arg0).postMessage(getObject(arg1));
         }, arguments); },
@@ -662,11 +872,24 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).setTimeout(getObject(arg1), arg2);
             return ret;
         }, arguments); },
+        __wbg_set_8155bb79a948541b: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(getObject(arg0), getObject(arg1), getObject(arg2));
+            return ret;
+        }, arguments); },
+        __wbg_set_body_f301b68bff45f419: function(arg0, arg1) {
+            getObject(arg0).body = getObject(arg1);
+        },
+        __wbg_set_headers_805555608daf7f2a: function(arg0, arg1) {
+            getObject(arg0).headers = getObject(arg1);
+        },
         __wbg_set_ice_servers_e9e50c8d797951a5: function(arg0, arg1) {
             getObject(arg0).iceServers = getObject(arg1);
         },
         __wbg_set_id_ccec271eb26f8f9c: function(arg0, arg1) {
             getObject(arg0).id = arg1;
+        },
+        __wbg_set_method_cf2b992b9a610bc3: function(arg0, arg1, arg2) {
+            getObject(arg0).method = getStringFromWasm0(arg1, arg2);
         },
         __wbg_set_negotiated_8a332e20563ab5be: function(arg0, arg1) {
             getObject(arg0).negotiated = arg1 !== 0;
@@ -733,6 +956,14 @@ function __wbg_get_imports() {
             const ret = typeof window === 'undefined' ? null : window;
             return isLikeNone(ret) ? 0 : addHeapObject(ret);
         },
+        __wbg_status_b0de02a07fd7d927: function(arg0) {
+            const ret = getObject(arg0).status;
+            return ret;
+        },
+        __wbg_text_9302f33ea8cfce7b: function() { return handleError(function (arg0) {
+            const ret = getObject(arg0).text();
+            return addHeapObject(ret);
+        }, arguments); },
         __wbg_then_7026b513a94278a8: function(arg0, arg1) {
             const ret = getObject(arg0).then(getObject(arg1));
             return addHeapObject(ret);
@@ -742,23 +973,23 @@ function __wbg_get_imports() {
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 12, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_370);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 16, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_502);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 132, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_1154);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 229, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_1928);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 12, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_370_2);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 16, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_502_2);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 11, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_369);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 15, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_501);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
@@ -787,22 +1018,22 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_369(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_369(arg0, arg1);
+function __wasm_bindgen_func_elem_501(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_501(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_370(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_370(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_502(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_502(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_370_2(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_370_2(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_502_2(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_502_2(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_1154(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_1928(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_1154(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_1928(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -813,8 +1044,8 @@ function __wasm_bindgen_func_elem_1154(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_1156(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_1156(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_1930(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_1930(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

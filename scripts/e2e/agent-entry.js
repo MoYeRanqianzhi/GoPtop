@@ -1,13 +1,17 @@
 /**
- * agent-entry.js —— 「Agent 对战」入口与降级面的浏览器基线（Web 5173/5174）。
+ * agent-entry.js —— 「Agent 对战」入口与启用/降级两面的浏览器基线（Web 5173/5174）。
  *
- * 覆盖（阶段③集成门禁的入口部分）：
+ * 覆盖（阶段⑤集成后 Web 内置模式已上线，本脚本改测「web 内置可用」形态）：
  * 1. 菜单页恰好一个「Agent 对战」入口，点击真进 /agent；
- * 2. Web（非 Tauri）整页降级：横幅在、MCP 卡/驱动按钮不渲染、功能控件全部禁用；
- * 3. 设置卡（内置）形态正确：LLM 配置各字段在场、内置驱动按钮选中。
+ * 2. Web（非 Tauri）**启用面**：降级横幅不在、MCP 卡/驱动按钮仍不渲染（桌面专属）、
+ *    设置卡功能控件全部可用（webOk 判定四道全过：产物带 agent 导出 + Vfs 钩子已装）；
+ * 3. 设置卡（内置）形态正确：LLM 配置各字段在场、内置驱动按钮选中；
+ * 4. **降级回归路径**：装上鸿蒙壳同款 goptopHost 桥（harmonyHost 判定命中）后
+ *    横幅重新在场——鸿蒙降级面（主计划 R7）仍有断言可依。
  *
  * 交互全部走真实点击；断言读 DOM 文案/禁用态（与 ai.js 同一口径）。
- * 前置：frontend/dist 已构建；本脚本自起 serve.js（复用基建，端口可传）。
+ * 前置：frontend/dist 已构建（transport wasm 产物须带 agent 导出）；本脚本自起
+ * serve.js（复用基建，端口可传）。
  *
  * 用法：node agent-entry.js [端口]      默认 5173（占用时自动换 5174）
  */
@@ -62,6 +66,7 @@ function serve(port) {
   // agent-builtin.js 同一条教训：先收尾，退出码收尾后再落）。
   let server = null;
   let ep = null;
+  let epDegraded = null;
   let exitCode;
   try {
     server = await serve(PORT);
@@ -86,40 +91,45 @@ function serve(port) {
       .then(() => check("点击入口进入 /agent", true))
       .catch(() => check("点击入口进入 /agent", false, `停在 ${ep.page.url()}`));
 
-    // —— 2) Web 降级面 ——
-    await ep.page.waitForFunction(() => document.body.innerText.includes("Agent 对战 · 对局设置"), null, { timeout: 8000 })
-      .catch(() => {});
+    // —— 2) Web 启用面（webOk 异步置位：先等「开始对局」变可用，再断言横幅不在） ——
+    // 首帧 webOk=false 会先渲染一拍横幅，直接断言会撞上闪烁——以控件启用为就绪信号。
+    const enabled = await ep.page.waitForFunction(() => {
+      const scope = document.querySelector(".play-stack");
+      const b = scope && [...scope.querySelectorAll("button")].find((x) => x.textContent.includes("开始对局"));
+      return !!b && !b.disabled;
+    }, null, { timeout: 20000, polling: 200 }).then(() => true).catch(() => false);
+    check("Web 内置模式启用（webOk 四道判定通过）", enabled);
     const banner = await ep.page.evaluate(() => document.body.innerText.includes("内置 Agent 对战仅桌面版可用"));
-    check("Web 降级横幅在场", banner);
+    check("降级横幅不在场（webOk 下不渲染）", !banner);
     const mcpDriverBtn = await ep.page.locator("button", { hasText: "MCP（外部 Agent）" }).count();
-    check("MCP 驱动按钮不渲染（Web）", mcpDriverBtn === 0, `count=${mcpDriverBtn}`);
+    check("MCP 驱动按钮不渲染（桌面专属）", mcpDriverBtn === 0, `count=${mcpDriverBtn}`);
     const mcpCard = await ep.page.evaluate(() => document.body.innerText.includes("MCP 服务器（外部 Agent 经此认领对手席）"));
-    check("MCP 连接卡不渲染（Web）", !mcpCard);
+    check("MCP 连接卡不渲染（桌面专属）", !mcpCard);
 
-    const disabledStats = await ep.page.evaluate(() => {
+    const enabledStats = await ep.page.evaluate(() => {
       // 只看设置卡自身的控件：顶栏 KindSizePicker 是主会话的（/agent 页仍挂载），
-      // 它的五子棋/围棋按钮不受本页降级管——不圈作用域会把「头部的可用按钮」误计进来。
+      // 它的五子棋/围棋按钮不受本页管——不圈作用域会把「头部的按钮」误计进来。
       const scope = document.querySelector(".play-stack");
       const byText = (t) => [...scope.querySelectorAll("button")].filter((b) => b.textContent.includes(t));
       // 空数组的 every 恒真——控件被回归删掉时断言会假 PASS，先断 count >= 1。
-      const allDisabled = (list) => list.length > 0 && list.every((el) => el.disabled);
+      const allEnabled = (list) => list.length > 0 && list.every((el) => !el.disabled);
       return {
-        start: allDisabled(byText("开始对局")),
-        kinds: allDisabled(byText("五子棋").concat(byText("围棋"))),
-        colors: allDisabled(byText("我执黑").concat(byText("我执白"))),
-        builtinDriver: allDisabled(byText("内置（LLM 循环）")),
-        protocols: allDisabled(byText("Anthropic")),
-        testConn: allDisabled(byText("测试连接")),
-        baseUrl: allDisabled([...scope.querySelectorAll("input")].filter((i) => i.placeholder.includes("your-gateway"))),
+        start: allEnabled(byText("开始对局")),
+        kinds: allEnabled(byText("五子棋").concat(byText("围棋"))),
+        colors: allEnabled(byText("我执黑").concat(byText("我执白"))),
+        builtinDriver: allEnabled(byText("内置（LLM 循环）")),
+        protocols: allEnabled(byText("Anthropic")),
+        testConn: allEnabled(byText("测试连接")),
+        baseUrl: allEnabled([...scope.querySelectorAll("input")].filter((i) => i.placeholder.includes("your-gateway"))),
       };
     });
-    check("开始对局禁用", disabledStats.start);
-    check("棋种按钮禁用", disabledStats.kinds);
-    check("执子按钮禁用", disabledStats.colors);
-    check("驱动按钮禁用", disabledStats.builtinDriver);
-    check("协议按钮禁用", disabledStats.protocols);
-    check("测试连接禁用", disabledStats.testConn);
-    check("Base URL 输入禁用", disabledStats.baseUrl);
+    check("开始对局可用", enabledStats.start);
+    check("棋种按钮可用", enabledStats.kinds);
+    check("执子按钮可用", enabledStats.colors);
+    check("驱动按钮可用", enabledStats.builtinDriver);
+    check("协议按钮可用", enabledStats.protocols);
+    check("测试连接可用", enabledStats.testConn);
+    check("Base URL 输入可用", enabledStats.baseUrl);
 
     // —— 3) 设置卡（内置）形态 ——
     const cardText = await ep.page.evaluate(() => document.body.innerText);
@@ -132,11 +142,42 @@ function serve(port) {
     });
     check("内置驱动按钮为选中态", builtinPressed === "true", `aria-pressed=${builtinPressed}`);
 
-    // 路由直达 /agent 同样落降级面（刷新/直链用户路径）
+    // 路由直达 /agent 同样落启用面（刷新/直链用户路径）
     await ep.goto(`${origin}/agent`);
     await ep.ready(30000);
-    const direct = await ep.page.evaluate(() => document.body.innerText.includes("内置 Agent 对战仅桌面版可用"));
-    check("直达 /agent 同样降级", direct);
+    const directEnabled = await ep.page.waitForFunction(() => {
+      const scope = document.querySelector(".play-stack");
+      const b = scope && [...scope.querySelectorAll("button")].find((x) => x.textContent.includes("开始对局"));
+      return !!b && !b.disabled;
+    }, null, { timeout: 20000, polling: 200 }).then(() => true).catch(() => false);
+    const directBanner = await ep.page.evaluate(() => document.body.innerText.includes("内置 Agent 对战仅桌面版可用"));
+    check("直达 /agent 同样启用（无降级横幅）", directEnabled && !directBanner);
+
+    // —— 4) 降级回归路径：鸿蒙壳同款 goptopHost 桥 → harmonyHost() 命中 → 整页降级 ——
+    // 主计划 R7：鸿蒙壳内 wasm 产物虽在，但钩子通道/存储面未验收，维持整页降级。
+    // addInitScript 必须在导航前装（goptopHost 在页面脚本跑之前就要在场）。
+    const ctx = ep.page.context();
+    const page2 = await ctx.newPage();
+    await page2.addInitScript(() => {
+      Object.defineProperty(window, "goptopHost", {
+        value: { call: () => "", aiPost: () => Promise.resolve("{}"), storeSet: () => {}, storeLoad: () => "" },
+        writable: false, configurable: true,
+      });
+    });
+    epDegraded = new Endpoint("web-鸿蒙同判", page2, { mobile: false, tap: false });
+    epDegraded._browser = { close: () => {} }; // 关页面即可，别把共用 browser 关了
+    await page2.goto(`${origin}/agent`, { waitUntil: "domcontentloaded" });
+    const degradedBanner = await page2.waitForFunction(
+      () => document.body.innerText.includes("内置 Agent 对战仅桌面版可用"),
+      null, { timeout: 20000, polling: 200 },
+    ).then(() => true).catch(() => false);
+    const degradedStart = await page2.evaluate(() => {
+      const scope = document.querySelector(".play-stack");
+      const b = scope && [...scope.querySelectorAll("button")].find((x) => x.textContent.includes("开始对局"));
+      return b ? b.disabled : null;
+    });
+    check("鸿蒙桥在场 → 降级横幅重新在场（R7 面仍有断言）", degradedBanner);
+    check("鸿蒙桥在场 → 开始对局禁用", degradedStart === true, `disabled=${degradedStart}`);
 
     console.log(`\n===== RESULT: ${pass} passed, ${fail} failed =====`);
     exitCode = fail > 0 ? 1 : 0;
@@ -144,6 +185,7 @@ function serve(port) {
     console.error("E2E CRASH:", e);
     exitCode = 2;
   } finally {
+    if (epDegraded) { await epDegraded.page.close().catch(() => {}); }
     if (ep) await ep.close().catch(() => {});
     // serve 的失败路径可能只回 {portBusy} 标记（子进程已自己退出），kill 需判别
     if (server && typeof server.kill === "function") server.kill();
