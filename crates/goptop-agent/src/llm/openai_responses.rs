@@ -44,6 +44,19 @@ pub(crate) async fn chat(
     if !(200..300).contains(&status) {
         return Err(classify_status(status, &text));
     }
+    if cfg.stream {
+        // 流式：等 response.completed 帧——它携带**完整响应对象**，直接复用
+        // 非流式解析（增量帧不需要逐个拼）。
+        for ev in super::sse_data_events(&text) {
+            if ev.get("type").and_then(Value::as_str) == Some("response.completed") {
+                let full = ev.get("response").cloned().unwrap_or(Value::Null);
+                return parse_response(&full.to_string());
+            }
+        }
+        return Err(LlmError::Transient(
+            "responses stream ended without response.completed".into(),
+        ));
+    }
     parse_response(&text)
 }
 
@@ -113,6 +126,10 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
     // effort → reasoning.effort（推理系模型；不支持模型 4xx 走 Fatal 回配置面）。
     if let Some(level) = super::sanitize_effort(&cfg.effort) {
         body["reasoning"] = json!({ "effort": level });
+    }
+    // 流式（兼容性开关）：等 response.completed 帧取完整响应对象聚合。
+    if cfg.stream {
+        body["stream"] = json!(true);
     }
     if !req.system.is_empty() {
         body["instructions"] = json!(req.system);
@@ -241,6 +258,7 @@ mod tests {
                 reply_lang: None,
                 effort: None,
                 debug: false,
+                stream: false,
             },
             api_key: "k-rsp".to_string(),
             http: Arc::new(NativeHttp::new().expect("http client")),

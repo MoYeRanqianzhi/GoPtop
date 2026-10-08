@@ -129,14 +129,25 @@ pub struct ToolCtx {
     /// 而非 Fatal，装配缺口不该炸掉整局）。
     pub subagent: Option<Arc<dyn SubagentRunner>>,
     /// 工具调用日志钩子：主循环每次 execute 后回调 (工具名, 是否成功, 耗时 ms,
-    /// 参数摘要)。宿主接它进 agent_events 环——**submit 不回调**：submit 落成的
-    /// UiCommand 已由宿主侧 LogPlayer 记账，两边都记就是同一个动作两行日志。
-    /// `None`=静默（测试 / MCP 出口自有自己的记账面）。
+    /// 操作行摘要, 失败/详情文本)。**全量记账**——成功失败都进环，submit 也不例外
+    ///（事件流是唯一现场：失败的 submit 红色换行展示报错，模型与人都能看见）。
+    /// `None`=静默（MCP 出口的回执面在 tools/call 响应上）。
     pub on_tool: Option<ToolLogHook>,
 }
 
-/// [`ToolCtx::on_tool`] 的类型（clippy 复杂类型告警的整形别名）。
-pub type ToolLogHook = Arc<dyn Fn(&str, bool, u64, &str) + Send + Sync>;
+/// [`ToolCtx::on_tool`] 的类型：head=操作行（`Op(路径)` 的括号内容），
+/// detail=第二行详情（失败报错 / 暂存内容头；None=不显示第二行）。
+pub type ToolLogHook = Arc<dyn Fn(&str, bool, u64, &str, Option<&str>) + Send + Sync>;
+
+/// submit 调用的暂存内容头（详情行用；要在 execute **之前**取——提交即清槽）。
+pub(crate) fn staged_head(name: &str, args: &serde_json::Value, ctx: &ToolCtx) -> Option<String> {
+    if name != crate::tools::TOOL_SUBMIT.name {
+        return None;
+    }
+    let path = args.get("path").and_then(serde_json::Value::as_str)?;
+    let file = classify_in(path)?;
+    Some(ctx.staging.peek(file).unwrap_or_default().chars().take(80).collect())
+}
 
 impl Clone for ToolCtx {
     /// 字段全是 `Arc`/句柄/`&'static str`：克隆廉价且**共享同一局**（同一会话、
@@ -385,7 +396,15 @@ async fn execute_write(
     let content = arg_str(args, "content")?;
 
     // 第一优先：in/ 槽 = 暂存（只查格式回预览，不执行——规则错误留给 submit）。
+    // **Write 只建新**（pi/claude code 语义，用户拍板 2026-10-08）：槽里已有暂存
+    // 内容 → 报错改走 edit；提交后槽被清空，下一次 write 又是新建——这样每次
+    // 重新考虑都留有 Edit 痕迹，盲覆盖写不进来。
     if let Some(file) = classify_in(path) {
+        if ctx.staging.peek(file).is_some_and(|t| !t.is_empty()) {
+            return Err(respond(format!(
+                "{path} already has staged content — use edit on it to reconsider, or submit it first (submit clears the slot)."
+            )));
+        }
         return ctx.staging.stage(file, content).map_err(respond);
     }
 
@@ -397,6 +416,12 @@ async fn execute_write(
     };
 
     let key = store::normalize_path(rel).map_err(respond)?;
+    // **Write 只建新**（claude code 语义）：/memory 已存在同名文件 → 改走 edit。
+    if ctx.memory.read(ctx.memory_ns, &key).map_err(ToolError::Fatal)?.is_some() {
+        return Err(respond(format!(
+            "/memory/{key} already exists — use edit to change it (read it first if unsure)."
+        )));
+    }
     // 配额先查（RespondToModel 级），存储后写（Err 才是真故障 Fatal）。先读旧文件
     // 求净增量：覆盖写不该被旧内容占的额度二次计费。
     if content.len() > MAX_FILE_BYTES {
@@ -456,11 +481,20 @@ async fn execute_edit(
             .ok_or_else(|| respond("argument \"replace_all\" must be a boolean."))?,
     };
 
-    // 仅 /memory 可编辑；in/ 槽有 write 覆盖语义，/game 只读——各有归属，不借 edit。
-    if classify_in(path).is_some() {
-        return Err(respond(format!(
-            "{path} is a staging slot — write overwrites it, no edit needed."
-        )));
+    // in/ 槽可 edit：Write 只建新后（用户拍板 2026-10-08），重新考虑暂存内容的
+    // 唯一路径就是 edit（claude code 语义：write 建、edit 改），复用同一 apply_edit。
+    if let Some(file) = classify_in(path) {
+        let Some(cur) = ctx.staging.peek(file).filter(|t| !t.is_empty()) else {
+            return Err(respond(format!(
+                "nothing staged at {path} — write the content first, then edit or submit it."
+            )));
+        };
+        let (applied, occurrences) = apply_edit(&cur, &old, &new, replace_all).map_err(respond)?;
+        ctx.staging.stage(file, &applied).map_err(respond)?;
+        return Ok(serde_json::json!({
+            "ok": true, "path": path, "occurrences": occurrences,
+            "note": "staged content updated — submit(path) to commit",
+        }));
     }
     let resolved = vfs::resolve(path).map_err(respond)?;
     let Resolved::Memory(rel) = &resolved else {

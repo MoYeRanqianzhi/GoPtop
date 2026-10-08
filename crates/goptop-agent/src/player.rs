@@ -473,6 +473,26 @@ impl GameEvent {
             | Self::GameOver { seq, .. } => *seq,
         }
     }
+
+    /// 人话摘要（事件流详情行——面板可见性，用户拍板 2026-10-08：事件也要上面板，
+    /// 否则不利于测试）。
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Move { by, x, y, .. } => format!("{by} 落子 ({x},{y})"),
+            Self::Pass { by, .. } => format!("{by} 停一手"),
+            Self::Chat { from, text, .. } => format!("{from}：{text}"),
+            Self::RequestReceived { kind, from, .. } => format!("{from} 请求 {kind}"),
+            Self::RequestResolved { kind, approved, .. } => {
+                format!("{kind} 请求已{}（approved={approved}）", if *approved { "同意" } else { "拒绝" })
+            }
+            Self::ScoringStarted { .. } => "进入终局计分".into(),
+            Self::ScoreResult { black, white, winner, .. } => {
+                format!("计分：黑 {black} : 白 {white}，{winner} 胜")
+            }
+            Self::GameOver { winner, .. } => format!("终局：{winner} 胜"),
+        }
+    }
 }
 
 /// 就地改写事件 seq（[`EventQueue::extend_new`] 的锁内重编号用；生成方先填 0 占位）。

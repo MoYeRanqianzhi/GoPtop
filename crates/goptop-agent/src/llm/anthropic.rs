@@ -45,7 +45,11 @@ pub(crate) async fn chat(
     if !(200..300).contains(&status) {
         return Err(classify_status(status, &text));
     }
-    parse_response(&text)
+    if cfg.stream {
+        parse_stream_response(&text)
+    } else {
+        parse_response(&text)
+    }
 }
 
 /// 统一请求 → Anthropic 请求体。
@@ -92,6 +96,10 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
                 "input_schema": t.input_schema,
             }))
             .collect::<Vec<_>>());
+    }
+    // 流式（兼容性开关，用户拍板）：服务端回 SSE 帧序列，客户端聚合回同一形态。
+    if cfg.stream {
+        body["stream"] = json!(true);
     }
     body
 }
@@ -146,6 +154,95 @@ fn merge_same_role(mut messages: Vec<Value>) -> Vec<Value> {
         merged.push(msg);
     }
     merged
+}
+
+/// 流式聚合：Anthropic 的 SSE 帧按 index 重组出与非流式等价的响应。
+/// 帧型：message_start（input usage）/ content_block_start（tool_use 的 id+name）/
+/// content_block_delta（text_delta·thinking_delta·input_json_delta 按 index 累积）/
+/// message_delta（stop_reason + output usage）/ message_stop。
+fn parse_stream_response(text: &str) -> Result<ChatResponse, LlmError> {
+    let mut content = String::new();
+    let mut thinking_text = String::new();
+    let mut thinking_blocks = Vec::new();
+    let mut tool_calls: Vec<Option<ToolCall>> = Vec::new();
+    let mut stop = StopReason::Other;
+    let mut usage = Usage::default();
+    for ev in super::sse_data_events(text) {
+        match ev.get("type").and_then(Value::as_str) {
+            Some("message_start") => {
+                usage.input_tokens = ev.pointer("/message/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                usage.cache_read_tokens = ev.pointer("/message/usage/cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                usage.cache_write_tokens = ev.pointer("/message/usage/cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            }
+            Some("content_block_start") => {
+                let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let block = ev.get("content_block").cloned().unwrap_or(Value::Null);
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let call = ToolCall {
+                        id: block.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        arguments: Value::Null, // input_json_delta 逐段补齐，stop 时 parse
+                    };
+                    while tool_calls.len() <= idx {
+                        tool_calls.push(None);
+                    }
+                    tool_calls[idx] = Some(call);
+                }
+            }
+            Some("content_block_delta") => {
+                let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let delta = ev.get("delta").cloned().unwrap_or(Value::Null);
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        content.push_str(delta.get("text").and_then(Value::as_str).unwrap_or_default());
+                    }
+                    Some("thinking_delta") => {
+                        thinking_text.push_str(delta.get("thinking").and_then(Value::as_str).unwrap_or_default());
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(Some(call)) = tool_calls.get_mut(idx) {
+                            // 部分参数挂在临时位——统一塞进 arguments 的暂存字符串，
+                            // 帧流结束后 parse（见下方收尾循环）。
+                            let acc = call.arguments.as_str().unwrap_or_default().to_string()
+                                + delta.get("partial_json").and_then(Value::as_str).unwrap_or_default();
+                            call.arguments = Value::String(acc);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("message_delta") => {
+                if let Some(reason) = ev.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    stop = match reason {
+                        "tool_use" => StopReason::ToolUse,
+                        "max_tokens" => StopReason::MaxTokens,
+                        "end_turn" => StopReason::EndTurn,
+                        _ => StopReason::Other,
+                    };
+                }
+                usage.output_tokens = ev.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(usage.output_tokens);
+            }
+            _ => {}
+        }
+    }
+    // 收尾：input_json_delta 的暂存字符串 parse 成对象；thinking 原样块在流里没有
+    // 完整签名形态（帧流不给 redacted 原块）——流式下 thinking 只进展示不进回放。
+    let tool_calls = tool_calls
+        .into_iter()
+        .flatten()
+        .map(|mut call| {
+            call.arguments = serde_json::from_str(call.arguments.as_str().unwrap_or("{}")).unwrap_or_else(|_| json!({}));
+            call
+        })
+        .collect();
+    Ok(ChatResponse {
+        content,
+        thinking_text,
+        thinking_blocks,
+        tool_calls,
+        stop,
+        usage,
+    })
 }
 
 /// Anthropic 响应体 → 统一响应。
@@ -224,6 +321,7 @@ mod tests {
                 reply_lang: None,
                 effort: None,
                 debug: false,
+                stream: false,
             },
             api_key: "k-test".to_string(),
             http: Arc::new(NativeHttp::new().expect("http client")),

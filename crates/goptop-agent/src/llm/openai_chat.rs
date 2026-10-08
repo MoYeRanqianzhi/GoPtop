@@ -44,7 +44,75 @@ pub(crate) async fn chat(
     if !(200..300).contains(&status) {
         return Err(classify_status(status, &text));
     }
-    parse_response(&text)
+    if cfg.stream {
+        parse_stream_response(&text)
+    } else {
+        parse_response(&text)
+    }
+}
+
+/// 流式聚合：Chat Completions 的 delta 帧重组出与非流式等价的响应。
+/// 帧型：choices[0].delta（content / reasoning_content / tool_calls[index] 的
+/// id+function 增量）、finish_reason、usage（末帧，include_usage 已开）。
+fn parse_stream_response(text: &str) -> Result<ChatResponse, LlmError> {
+    let mut content = String::new();
+    let mut thinking_text = String::new();
+    let mut stop = StopReason::Other;
+    let mut usage = Usage::default();
+    // tool_calls 按 delta 的 index 聚合（id/name 首帧给齐，arguments 逐段拼）。
+    let mut calls: Vec<(String, String, String)> = Vec::new(); // (id, name, arguments 串)
+    for ev in super::sse_data_events(text) {
+        if let Some(u) = ev.get("usage").cloned().filter(|u| !u.is_null()) {
+            usage = Usage {
+                input_tokens: u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+                output_tokens: u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            };
+        }
+        let Some(choice) = ev.pointer("/choices/0") else { continue };
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            stop = match reason {
+                "tool_calls" => StopReason::ToolUse,
+                "length" => StopReason::MaxTokens,
+                "stop" => StopReason::EndTurn,
+                _ => StopReason::Other,
+            };
+        }
+        let Some(delta) = choice.get("delta") else { continue };
+        if let Some(t) = delta.get("content").and_then(Value::as_str) {
+            content.push_str(t);
+        }
+        if let Some(t) = delta.get("reasoning_content").and_then(Value::as_str) {
+            thinking_text.push_str(t);
+        }
+        if let Some(tc) = delta.get("tool_calls").and_then(Value::as_array) {
+            for c in tc {
+                let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                while calls.len() <= idx {
+                    calls.push((String::new(), String::new(), String::new()));
+                }
+                if let Some(id) = c.get("id").and_then(Value::as_str) {
+                    calls[idx].0 = id.to_string();
+                }
+                if let Some(name) = c.pointer("/function/name").and_then(Value::as_str) {
+                    calls[idx].1 = name.to_string();
+                }
+                if let Some(a) = c.pointer("/function/arguments").and_then(Value::as_str) {
+                    calls[idx].2.push_str(a);
+                }
+            }
+        }
+    }
+    let tool_calls = calls
+        .into_iter()
+        .map(|(id, name, arguments)| ToolCall {
+            id,
+            name,
+            arguments: serde_json::from_str(&arguments).unwrap_or_else(|_| json!({})),
+        })
+        .collect();
+    Ok(ChatResponse { content, thinking_text, thinking_blocks: Vec::new(), tool_calls, stop, usage })
 }
 
 /// 统一请求 → Chat Completions 请求体。
@@ -122,6 +190,12 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
     // 走 Fatal 分类回给配置面——各家的能力差异在配置文档里交代，运行面不猜）。
     if let Some(level) = super::sanitize_effort(&cfg.effort) {
         body["reasoning_effort"] = json!(level);
+    }
+    // 流式（兼容性开关）：delta 帧在 parse_stream_response 聚合；usage 要单独
+    // 开 stream_options 才随流下发。
+    if cfg.stream {
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({ "include_usage": true });
     }
     if !req.tools.is_empty() {
         body["tools"] = json!(req.tools.iter()
@@ -221,6 +295,7 @@ mod tests {
                 reply_lang: None,
                 effort: None,
                 debug: false,
+                stream: false,
             },
             api_key: "k-openai".to_string(),
             http: Arc::new(NativeHttp::new().expect("http client")),

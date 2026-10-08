@@ -69,11 +69,26 @@ async fn write_read_round_trip() {
     assert_eq!(out["content"], json!("黑喜占角"));
     assert_eq!(out["total_lines"], json!(1));
 
-    // 覆盖写：usage 按净增量（不是字面相加）。
-    let out = act(&c, "write", json!({ "path": "/memory/notes/style.md", "content": "黑喜占角；白好战" }))
+    // 覆盖写：**拒**——write 只建新（用户拍板 2026-10-08），改已存在文件走 edit。
+    let err = act(&c, "write", json!({ "path": "/memory/notes/style.md", "content": "黑喜占角；白好战" }))
         .await
-        .expect("覆盖写应成功");
-    assert_eq!(out["usage"], json!("黑喜占角；白好战".len()), "净增量计费");
+        .unwrap_err();
+    assert!(
+        err.message().contains("already exists") && err.message().contains("use edit"),
+        "对已存在文件的 write 必须拒并指路 edit：{err:?}"
+    );
+
+    // 改内容走 edit：usage 按净增量（不是字面相加）。
+    let out = act(
+        &c,
+        "edit",
+        json!({ "path": "/memory/notes/style.md", "old_string": "黑喜占角", "new_string": "黑喜占角；白好战" }),
+    )
+    .await
+    .expect("edit 应成功");
+    assert_eq!(out["ok"], json!(true));
+    let out = act(&c, "read", json!({ "path": "/memory/notes/style.md" })).await.expect("read 应成功");
+    assert_eq!(out["content"], json!("黑喜占角；白好战"));
 
     // 读不存在的文件：回人话错误 + 指路 grep。
     let err = act(&c, "read", json!({ "path": "/memory/nope.md" })).await.unwrap_err();
@@ -123,11 +138,21 @@ async fn edit_唯一性与替换() {
     assert_eq!(out["occurrences"], json!(1));
     assert_eq!(out["size"], json!("only two here".len()));
 
-    // edit 不越过 /memory：in/ 槽与 /game 只读文件各有归属。
+    // in/ 槽可 edit（write 只建新后，改暂存内容的唯一路径）：空槽拒并指路 write；
+    // 有暂存则替换成功。
     let err = act(&c, "edit", json!({ "path": "/game/in/move", "old_string": "a", "new_string": "b" }))
         .await
         .unwrap_err();
-    assert!(err.message().contains("staging slot"), "{err:?}");
+    assert!(
+        err.message().contains("nothing staged") && err.message().contains("write"),
+        "空槽 edit 必须拒并指路 write：{err:?}"
+    );
+    act(&c, "write", json!({ "path": "/game/in/move", "content": "7,7" })).await.expect("暂存");
+    let out = act(&c, "edit", json!({ "path": "/game/in/move", "old_string": "7,7", "new_string": "8,8" }))
+        .await
+        .expect("暂存内容应可 edit");
+    assert_eq!(out["occurrences"], json!(1));
+    // /game 只读文件拒 edit。
     let err = act(&c, "edit", json!({ "path": "/game/board", "old_string": "a", "new_string": "b" }))
         .await
         .unwrap_err();

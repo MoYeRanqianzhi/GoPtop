@@ -993,6 +993,16 @@ impl Staging {
         self.lock().remove(file.path())
     }
 
+    /// 任一槽有未提交的暂存内容。决策循环的停车谓词用：write 了 in/ 槽却还没
+    /// submit 时**不许 park**——那是一段写了一半的行动，挂起会让 submit 迟迟到
+    /// 下一件外部事件才发生（实测：聊天回复 write 后挂起，人 30 秒后落子才把它
+    /// 顺带提交，e2e「聊天往返」因此超时）。park 期间不会有工具执行，本值只在
+    /// 进入 park 前判一次。
+    #[must_use]
+    pub fn any_staged(&self) -> bool {
+        self.lock().values().any(|v| !v.is_empty())
+    }
+
     /// 锁入口：临界区只有 HashMap 增删查，无 await。中毒即持锁方 panic（bug），
     /// 暂存区是单值小结构，into_inner 硬闯比把毒扩散成整局失败稳。
     fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<&'static str, String>> {

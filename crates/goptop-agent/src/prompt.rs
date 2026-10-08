@@ -71,8 +71,9 @@ fn event_mechanism(driver: Driver) -> &'static str {
             "# Event mechanism\n\n\
              You never poll: your opponent's moves, chat messages, requests, scoring and game \
              over are pushed to you automatically between your tool calls as `<event>` blocks. \
-             When it is not your turn you may think, take notes in `/memory`, or chat — the \
-             next event will reach you without any action on your part."
+             When it is not your turn, the session PARKS — you are simply not called again \
+             until something new happens. Never fill that silence with tool calls, and never \
+             write per-turn notes to `/memory` to keep yourself busy (see Memory discipline)."
         }
         Driver::Mcp => {
             "# Event mechanism\n\n\
@@ -123,6 +124,8 @@ pub fn build_system_prompt(cfg: &PromptCfg) -> String {
          - `/memory` is your long-term memory — plain files that survive across games, e.g. \
            notes on this opponent's style. Writes there take effect immediately; staging \
            and submit do NOT apply to `/memory`.\n\
+         - Write creates a NEW file only; writing over an existing file errors — use \
+           edit to change it (read first if unsure).\n\
          - Read `/index` first; it lists every path and what it is for.\n\n\
          Stage-then-submit applies ONLY to the `/game/in/*` slots: write to stage \
          (you may overwrite it to reconsider — nothing happens yet), then `submit(path)` to \
@@ -144,18 +147,30 @@ pub fn build_system_prompt(cfg: &PromptCfg) -> String {
     out.push_str(event_mechanism(*driver));
     out.push_str("\n\n");
 
-    // Action discipline：TextOnly≠行动（循环不因此停）、不强制每手棋、被拒不盲试。
+    // Action discipline：TextOnly≠行动（循环不因此停）、不强制每手棋、被拒不盲试、
+    // 记忆克制（仿 claude code：只记值得跨局保留的，绝不每步写）。
     out.push_str(
         "# Action discipline\n\n\
          - Text-only replies are NOT an action. The loop never stops for them — to do anything \
            (move, chat, request, resign) you must go through the tools: stage with `write`, \
            commit with `submit`.\n\
-         - You are never forced to move every turn. Waiting, thinking, or writing notes is a \
-           valid way to spend a turn.\n\
+         - You are never forced to move every turn. When it is the opponent's turn the session \
+           parks until they act — silence is fine and expected; do NOT invent busywork tool \
+           calls to fill it.\n\
+         - Memory is SCARCE. Write to `/memory` only when something DURABLE happened that is \
+           worth keeping across games (an opponent preference, an explicit agreement, a real \
+           lesson). Position analysis, per-turn notes and this game's state do NOT belong in \
+           memory — the game files already hold them. Writing memory every turn is a bug, \
+           not diligence.\n\
          - When a submit is rejected, read the error and understand it. Never retry the same \
            coordinates blindly. Format mistakes are rejected at write time; game-rule \
            violations (occupied point, not your turn) at submit time — a rejection never \
-           advances the game, so fix and continue.\n",
+           advances the game, so fix and continue.\n\
+         - Game ending is decided by the ENGINE, never by you: five-in-a-row, board full, \
+           scoring result, or resignation. Resign ONLY when the position is genuinely \
+           hopeless — never resign to end a wait, to escape a bad-looking position, or \
+           because you believe the game should be over (it isn't over until the engine says \
+           so — winner appears in /game/status and as a game_over event).\n",
     );
     // 子代理只在册时提——提示词与工具面互为冗余，但绝不能冗余出一个不存在的工具。
     if *subagent_enabled {

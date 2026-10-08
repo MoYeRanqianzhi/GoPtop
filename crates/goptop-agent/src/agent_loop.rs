@@ -124,16 +124,11 @@ and the session does not end for it. Act through the tools: write to stage (e.g.
 /game/in/move or /game/in/chat) and then submit the path. You are never forced to move \
 every turn, but a round only counts when it ends in a tool call.";
 
-/// 等待心跳：事件队列已空且轮到对手。模型可选择做别的或直接等——落子会作为
-/// `<event>` 自动推送，无需轮询。
-const WAIT_HEARTBEAT: &str = "Waiting for the opponent's action. Nothing is required from \
-you right now — their move / message / request will arrive as a pushed <event>. You may \
-chat, take notes in /memory, or simply wait.";
-
-/// 空转限速拍长：队列空且轮到对手时，下一轮 LLM 调用前歇这一拍。没有它，「等待」
-/// 是紧循环——真端点上一秒几十次空请求是自找 429，Mock 测试里则把剧本在微秒内
-/// 烧穿。50ms 封顶 20 req/s，远低于 LLM 自然节奏，等待体感无差别。
-const IDLE_POLL_MS: u64 = 50;
+/// 停车轮询拍长（用户拍板 2026-10-08，Claude Code 机制）：等待期**零 LLM 调用**——
+/// 轮到对手且无未消费事件时循环挂起，150ms 一拍（自泵 + 复核），新事件 / 轮到我们 /
+/// 终局 / 用户停止任一变化即唤醒。没有它「等待」就是 text-only 空转烧调用
+///（实测：模型为了「以工具调用收尾」反复写记忆分析文件，33 次调用后出错）。
+const PARK_POLL_MS: u64 = 150;
 
 /// 收尾指令（winner 出现后的最后一轮：给模型一次写告别语的机会，随后循环收场）。
 fn farewell_instruction(winner: &str) -> String {
@@ -324,14 +319,20 @@ limit, so its arguments may be truncated. Re-issue the tool call with complete a
         let mut resigned = false;
         for call in &resp.tool_calls {
             let t0 = crate::time_compat::now_ms();
+            // submit 的详情（暂存内容头）必须在 execute 前取——提交即清槽。
+            let staged_head = registry::staged_head(&call.name, &call.arguments, &tools);
             let res = registry::execute(&call.name, &call.arguments, &tools).await;
+            let ms = crate::time_compat::now_ms() - t0;
             if let Some(hook) = &tools.on_tool {
-                // submit 不回调：它落成的 UiCommand 已由宿主侧 LogPlayer 记账
-                //（ToolCtx.on_tool 的 doc）；llm 调用走 LogHttp，也不经这里。
-                if call.name != crate::tools::TOOL_SUBMIT.name {
-                    let ms = crate::time_compat::now_ms() - t0;
-                    hook(&call.name, res.is_ok(), ms, &registry::args_summary(&call.arguments));
-                }
+                // 全量记账（含失败与 submit）：事件流是唯一现场，失败的 submit
+                // 红色换行展示报错——「模型 submit 记忆」这类误用必须可见。
+                let head = registry::args_summary(&call.arguments);
+                let detail = match &res {
+                    Ok(_) => staged_head.as_deref(),
+                    Err(ToolError::RespondToModel(m)) => Some(m.as_str()),
+                    Err(ToolError::Fatal(m)) => Some(m.as_str()),
+                };
+                hook(&call.name, res.is_ok(), ms, &head, detail);
             }
             match res {
                 Ok(v) => {
@@ -356,8 +357,32 @@ limit, so its arguments may be truncated. Re-issue the tool call with complete a
         }
 
         // 事件自动推送：排空队列 + 读最新快照（winner/轮次/计分的判定源）。
-        let events = tools.events.drain();
-        let snap = tools.player.snapshot();
+        // 排空即上环（用户拍板：事件流也要在面板可见，否则不利于测试）——
+        // 头=`事件`，详情=人话摘要（对手落子坐标/消息全文/请求/终局）。
+        let mut events = drain_logged(&tools);
+        let mut snap = tools.player.snapshot();
+
+        // —— 停车（用户拍板 2026-10-08，Claude Code 机制）：等待期零 LLM 调用。——
+        // 轮到对手且无未消费事件 → 挂起：150ms 一拍（自泵推进 transport 状态、
+        // 复核谓词），新事件 / 轮到我们 / 终局任一出现即唤醒继续。
+        // 「模型为凑工具调用而在等待期写记忆分析文件」的空转烧钱路径就此消失。
+        // **暂存未提交不 park**：write 了 in/ 槽是一段写了一半的行动（两段式
+        // write→submit 中间不许停），挂起会让 submit 迟到下一件外部事件。
+        if events.is_empty() && !is_my_turn(&snap) && !ending && !tools.staging.any_staged() {
+            loop {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                tools.player.pump();
+                snap = tools.player.snapshot();
+                events = drain_logged(&tools);
+                let winner = snap.get("winner").and_then(Value::as_str).is_some();
+                if !events.is_empty() || is_my_turn(&snap) || winner {
+                    break;
+                }
+                crate::time_compat::delay(PARK_POLL_MS).await;
+            }
+        }
 
         // 退出条件 1：winner。先给一轮收尾（写告别语 + submit），随后收场。
         if let Some(winner) = snap.get("winner").and_then(Value::as_str) {
@@ -375,13 +400,12 @@ limit, so its arguments may be truncated. Re-issue the tool call with complete a
             continue;
         }
 
-        // 注入文本：事件块（或空队列+轮到对手的心跳）、TextOnly 提醒、
-        // 计分自动确认回执——全部并入本条 user 消息。
+        // 注入文本：事件块、TextOnly 提醒、计分自动确认回执——并入本条 user 消息。
+        // （停车唤醒后 events 非空或轮到我们；stop 停车唤醒的空事件轮会被顶部
+        // stop 检查收场，不会走到这里空烧。）
         let mut prose = String::new();
         if !events.is_empty() {
             prose.push_str(&event_block(&events));
-        } else if !is_my_turn(&snap) {
-            prose.push_str(WAIT_HEARTBEAT);
         }
         if resp.tool_calls.is_empty() {
             // TextOnly ≠ 行动：提醒继续，绝不终止、绝不自动认输。
@@ -410,12 +434,6 @@ by the human player). Receipt: {receipt}\n"
         // 防空守卫挡的是「空 user 消息上线」这类协议级坏请求，不是死代码。
         if !blocks.is_empty() {
             history.push(Msg { role: Role::User, content: blocks });
-        }
-        // 空转限速（IDLE_POLL_MS 注）：只在「无事可做、轮到对手」的等待回合歇拍
-        // ——轮到我（该行动）或队列有事件（该处理）都不歇，行动路径零延迟。
-        // 歇拍走 time_compat::delay：wasm 上没有 tokio time（阶段⑤）。
-        if events.is_empty() && !is_my_turn(&snap) {
-            crate::time_compat::delay(IDLE_POLL_MS).await;
         }
     }
 }
@@ -477,8 +495,20 @@ fn event_block(events: &[GameEvent]) -> String {
 /// 钩子没接（测试台）就静默——展示面缺失不该影响对局。
 fn ring_say(ctx: &ToolCtx, tool: &str, text: &str) {
     if let Some(hook) = &ctx.on_tool {
-        hook(tool, true, 0, text);
+        hook(tool, true, 0, "", Some(text));
     }
+}
+
+/// 排空事件队列并把人话摘要写进日志环（tool="event"，head=事件，detail=摘要）。
+/// 面板可见性是测试需求（用户拍板 2026-10-08）；钩子未接时只排空不上环。
+fn drain_logged(ctx: &ToolCtx) -> Vec<crate::player::GameEvent> {
+    let events = ctx.events.drain();
+    if let Some(hook) = &ctx.on_tool {
+        for ev in &events {
+            hook("event", true, 0, "事件", Some(&ev.summary()));
+        }
+    }
+    events
 }
 
 /// 计分自动确认：走 write 暂存 + submit，与模型动作完全同一条路，不绕过 registry

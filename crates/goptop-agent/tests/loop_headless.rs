@@ -230,6 +230,7 @@ fn build_deps(ctx: ToolCtx, script: Arc<MockScript>, my_color: &str, cfg: LoopCo
             reply_lang: None,
             effort: None,
             debug: false,
+            stream: false,
         },
         cfg,
         tools: ctx,
@@ -379,6 +380,17 @@ async fn submit_两段式语义() {
     let front = rig.front.clone();
     let ctx = &rig.ctx;
 
+    // ⓪ 格式错误 write 即拒（权威文案逐字）——放在槽空时先测（存在性检查在
+    //    格式校验之后触发，槽里有暂存会先报「already has staged content」）。
+    let err = act(ctx, "write", json!({ "path": "/game/in/move", "content": "abc" }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.message(),
+        "invalid move \"abc\". Expected \"x,y\" (e.g. \"7,7\") or \"pass\".",
+        "格式错误文案逐字"
+    );
+
     // ① write 只暂存不执行：盘面纹丝不动，回执照计划样例。
     let receipt = act(ctx, "write", json!({ "path": "/game/in/move", "content": "7,7" }))
         .await
@@ -393,8 +405,10 @@ async fn submit_两段式语义() {
     assert_eq!(snap["moveCount"], json!(0), "暂存不落子");
     assert_eq!(snap["board"][7][7], json!("empty"), "盘面未变");
 
-    // ② 提交前可覆盖重写：read 回看新值。
-    act(ctx, "write", json!({ "path": "/game/in/move", "content": "8,8" })).await.expect("覆盖暂存");
+    // ② 提交前重新考虑走 edit（Write 只建新：对已暂存槽 write 报错——用户拍板）。
+    let dup = act(ctx, "write", json!({ "path": "/game/in/move", "content": "8,8" })).await.unwrap_err();
+    assert!(dup.message().contains("already has staged content"), "{dup:?}");
+    act(ctx, "edit", json!({ "path": "/game/in/move", "old_string": "7,7", "new_string": "8,8" })).await.expect("edit 暂存槽");
     let seen = act(ctx, "read", json!({ "path": "/game/in/move" })).await.expect("回看");
     assert_eq!(seen["content"], json!("8,8"), "read 回显暂存原文");
     assert_eq!(seen["total_lines"], json!(1));
@@ -402,16 +416,6 @@ async fn submit_两段式语义() {
     // ③ 未 write 直接 submit → 报错回模型。
     let err = act(ctx, "submit", json!({ "path": "/game/in/chat" })).await.unwrap_err();
     assert!(err.message().contains("nothing staged in /game/in/chat"), "空槽 submit 报错：{err:?}");
-
-    // ④ 格式错误 write 即拒（权威文案逐字）。
-    let err = act(ctx, "write", json!({ "path": "/game/in/move", "content": "abc" }))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.message(),
-        "invalid move \"abc\". Expected \"x,y\" (e.g. \"7,7\") or \"pass\".",
-        "格式错误文案逐字"
-    );
 
     // ⑤ 对局规则错误 submit 时拒（未轮到我——黑先，Agent 执白）。
     let err = act(ctx, "submit", json!({ "path": "/game/in/move" })).await.unwrap_err();

@@ -34,6 +34,8 @@ mod web_http;
 
 use std::sync::Arc;
 
+use serde_json::{Value, json};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_http::NativeHttp;
 #[cfg(target_arch = "wasm32")]
@@ -79,6 +81,29 @@ pub struct LlmConfig {
     /// 进 agent_events 环（tool="thinking"/"say"），UI 日志可见——诊断「Agent 疑似
     /// 卡住」的唯一窗口。默认关（环里不进长文本）。
     pub debug: bool,
+    /// 流式输出（用户拍板 2026-10-08「新增可选流式」）：Some 网关/供应商会**强制**
+    /// 流式或非流式之一，这是兼容性开关。开启后请求 `stream:true`，响应是 SSE——
+    /// 客户端侧不过是「读完整的长响应体」，聚合回同一个 [`ChatResponse`]；
+    /// UI 无需逐 token 展示（日志按调用粒度记账）。默认关。
+    pub stream: bool,
+}
+
+/// SSE 响应体 → `data:` 行的 JSON 序列（`[DONE]` 哨兵与非 JSON 行跳过）。
+/// 三家流式协议都是「一行 event/data 文本帧」，聚合在各适配器内做——这里只管
+/// 把帧剥出来。非流式响应体（意外形态）会解析出空序列，调用方自行兜底。
+pub(crate) fn sse_data_events(text: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else { continue };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(data) {
+            out.push(v);
+        }
+    }
+    out
 }
 
 /// effort 档位归一（codex Custom(String) 模式）：**档位原值即接口**——
