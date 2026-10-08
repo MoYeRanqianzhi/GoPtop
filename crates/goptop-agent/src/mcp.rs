@@ -16,9 +16,12 @@
 //!
 //! 会话对生命周期接线在本模块的 handler-state（[`McpShared`]，registry.rs 头注
 //! 预留的「阶段④ handler 层」）：UI 侧 [`McpServer::set_pending_game`] 存入待局
-//! 装配（棋种/路数/执色以用户 UI 配置为权威），外部 Agent 的 `game_start` 认领
-//! 并跑同一 [`crate::pair::pair`]；`game_leave` 收尾拆局。人侧未就绪 → 业务错误
-//! 文本（[`registry::GAME_START_NO_GAME`]），与工具面同一份。
+//! 装配（棋种/路数/执色以用户 UI 配置为权威），外部 Agent 的 `game_start` 认领并
+//! 跑待局里的**配对执行体**（[`PendingGame::pairing`]）——crate 自测用
+//! [`PendingGame::from_pair`]（跑同一 [`crate::pair::pair`]，自建两席）；桌面壳的
+//! A' 归前端会话表，由壳提供自己的配对闭包（pair.rs 同款原语结对其已登记的 A'）。
+//! `game_leave` 收尾拆局。人侧未就绪 → 业务错误文本
+//! （[`registry::GAME_START_NO_GAME`]），与工具面同一份。
 //!
 //! **rmcp 3.2.0 的 feature 实际拼写**（实施首日双重验证：下载源
 //! `~/.cargo/registry/src/*/rmcp-3.2.0/Cargo.toml` 的 `[features]` 定义 + 范本
@@ -76,11 +79,37 @@ const NO_LIVE_GAME: &str =
 /// 待局装配 —— UI 侧（AgentHub）在「开始」时经 [`McpServer::set_pending_game`]
 /// 存入，外部 Agent 的 `game_start` 认领。
 pub struct PendingGame {
-    /// [`pair::pair`] 的全部入参（棋种/路数/执色/两席名/两席宿主/分享源）。
-    /// 棋种/路数/执色以用户 UI 配置为权威，外部 Agent 无权改。
-    pub pair: pair::PairConfig,
+    /// 配对执行体：认领时跑一次、产出配对产物（失败还回待局，重试会再跑一次——
+    /// 所以是可重入的 [`Fn`]）。做成闭包的唯一理由：壳层（src-tauri）的 A' 归前端
+    /// 会话表，[`pair::pair`] 自建两席的路径接不进去（见模块注）；两条装配路共用
+    /// 同一个 handler 前置，棋种/路数/执色仍以用户 UI 配置为权威（闭包在 UI 侧
+    /// 装配时就带定了）。
+    pub pairing: PairFn,
     /// /memory 的存储后端（ns 按 [`Driver::Mcp.memory_ns`]=`"mcp"`）。
     pub memory: Arc<dyn VfsStore>,
+    /// 暂存区**单例**：工具面 ctx 与壳层的状态回执（幽灵子读数）必须共用同一份
+    /// ——两份 Staging 会让「工具面 write 的暂存」与「页面看到的拟落」互不相认。
+    pub staging: Arc<Staging>,
+}
+
+/// 配对执行体的返回 future（Box 装箱，免泛型散布到 handler 与 [`McpServer`] 面）。
+pub type PairFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<pair::Paired, String>> + Send>>;
+
+/// 配对执行体：可重入的异步闭包（认领失败还回待局后，重试 game_start 会再跑一次）。
+pub type PairFn = Arc<dyn Fn() -> PairFuture + Send + Sync>;
+
+impl PendingGame {
+    /// 自配待局：认领时跑 [`pair::pair`]（自建两席）——crate 测试与「A' 无外部
+    /// 会话表」场景的便捷构造；暂存区现场新建（单例归本待局私有，无人外借）。
+    #[must_use]
+    pub fn from_pair(cfg: pair::PairConfig, memory: Arc<dyn VfsStore>) -> Self {
+        Self {
+            pairing: Arc::new(move || Box::pin(pair::pair(cfg.clone()))),
+            memory,
+            staging: Arc::new(Staging::new()),
+        }
+    }
 }
 
 /// 活局 —— `game_start` 认领后的状态。
@@ -261,6 +290,15 @@ impl McpServer {
         self.shared.teardown();
         self.shared.take_pending();
     }
+
+    /// 只拆对局、不停服务器（壳层 agent_stop / 关闭对局时的收尾口；认输的规则面
+    /// 归调用方——与 [`Self::stop`] 的差别仅在不 abort serve 任务）。拆局即把
+    /// 工具面撤走：后续 tools/call 回「no live game」，阻塞中的 wait_events 以
+    /// 已物化的终局事件先行返回后同样落到这条业务错。
+    pub fn stop_game(&self) {
+        self.shared.teardown();
+        self.shared.take_pending();
+    }
 }
 
 impl Drop for McpServer {
@@ -386,9 +424,10 @@ impl McpHandler {
         let Some(pending) = self.shared.take_pending() else {
             return Err(GAME_START_NO_GAME.to_string());
         };
-        // 克隆喂 pair()（PairConfig::Clone 的存在理由见 pair.rs 注）：失败路径把
-        // 原件原样还回槽，外部 Agent 重试 game_start 才有得认领。
-        let paired = match pair::pair(pending.pair.clone()).await {
+        // 跑待局自带的配对执行体（from_pair=pair::pair 自建两席；壳层=结对它已登记
+        // 的 A'）：失败路径把待局原样还回槽，外部 Agent 重试 game_start 才有得认领
+        //（闭包可重入，见 PairFn 注）。
+        let paired = match (pending.pairing)().await {
             Ok(p) => p,
             Err(e) => {
                 self.shared.put_back_pending(pending);
@@ -409,7 +448,7 @@ impl McpHandler {
             player: Arc::new(paired.agent),
             watch: EmitWatch::new(paired.agent_watch.clone_rx()),
             events: queue,
-            staging: Arc::new(Staging::new()),
+            staging: pending.staging,
             memory: pending.memory,
             memory_ns: Driver::Mcp.memory_ns(),
             driver: Driver::Mcp,

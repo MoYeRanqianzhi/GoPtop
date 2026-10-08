@@ -225,8 +225,8 @@ async function diagDump(ep) {
       await sleep(400);
     }
     await ep.page.locator("button:visible", { hasText: "已关闭（点此启用）" }).first().click();
-    check("MCP 开关落键（阶段③ server 不启动，状态恒「未运行」）",
-      await waitText(ep, "状态：未运行", 8000, "MCP 状态行"));
+    check("MCP 开关真启停（阶段④：状态行「服务器运行中」）",
+      await waitText(ep, "状态：服务器运行中", 8000, "MCP 状态行"));
     const mcpKeys = await ep.getSetting("goptop:agent-mcp-enabled");
     const mcpToken = await ep.getSetting("goptop:agent-mcp-token");
     check("agent_mcp_set 落 store 键（enabled=true + token 已生成）",

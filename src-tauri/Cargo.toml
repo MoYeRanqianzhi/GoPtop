@@ -59,3 +59,15 @@ windows = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+# 「Agent 对战」的 MCP 出口（阶段④，计划 MCP 节「条件编译（用户拍板）」）：
+# 同一 path 依赖的第二段声明——cargo 对同一依赖在多段里的 feature 取**并集**
+# （匹配的目标两段同时生效，`mcp` 拉起 rmcp/axum；不匹配的目标只吃上面的
+# [dependencies] 段，MCP 代码整体不编译，非「编译了但禁用」）。
+# **为什么谓词不是 `cfg(desktop)`**：`desktop` 是 tauri-build 的 build-script
+# rustc-cfg，只对**代码**的 #[cfg] 生效；cargo 的目标段解析发生在构建脚本之前，
+# 只认标准目标 cfg——实测 `cfg(desktop)` 段静默不匹配、feature 不并（本仓
+# commit 前实测）。桌面/移动的标准分界是 OS：排除 android/ios 即桌面三端，
+# 效果与 tauri 的 desktop 门一致（wasm 从不构建本 crate，harmony 走 goptop-ohos）。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+goptop-agent = { path = "../crates/goptop-agent", features = ["mcp"] }

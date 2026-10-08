@@ -223,10 +223,11 @@ fn front_seat(server: &McpServer) -> FrontSeat {
     FrontSeat { player: front, _pump: pump }
 }
 
-/// 存入待局装配（gomoku 15、用户执黑 → Agent 执白）。
+/// 存入待局装配（gomoku 15、用户执黑 → Agent 执白）。自配路径 = from_pair
+/// （认领时跑 pair::pair 自建两席；壳层场景的 A'-归会话表配对闭包由壳提供）。
 fn set_game(server: &McpServer) {
-    server.set_pending_game(PendingGame {
-        pair: PairConfig {
+    server.set_pending_game(PendingGame::from_pair(
+        PairConfig {
             kind: "gomoku".into(),
             size: 15,
             my_color: SeatColor::Black,
@@ -236,8 +237,8 @@ fn set_game(server: &McpServer) {
             front_host: host(),
             agent_host: host(),
         },
-        memory: Arc::new(NativeStore::open(&temp_db()).expect("temp memory db")),
-    });
+        Arc::new(NativeStore::open(&temp_db()).expect("temp memory db")),
+    ));
 }
 
 /// 起服务器（随机口 + 固定 token）。

@@ -21,13 +21,19 @@
 //!   创建 A'（本就是 session_new 的 href 参数，无需扩展）并 bind——A' 的回执经
 //!   进程内 presence 自动送达 B，Hub 泵到双端 playing。
 //!
-//! **MCP 模式（本阶段）**：等 bind 接驳 A' 后置 `waiting_mcp`——外部 Agent 经
-//! `game_start` 认领席位的接线留阶段④，这里不预做。
+//! **MCP 模式（阶段④ H2 路）**：`agent_mcp_set(true)` 经 goptop-agent 的
+//! `mcp` feature（仅桌面编译）真起内嵌服务器（读 `goptop:agent-mcp-port/token`，
+//! 端口被占回退随机口并把实际值回写 info）；`agent_start(driver=mcp)` 接驳 A' 后
+//! 置 `waiting_mcp` 并把**认领闭包**存进服务器的待局槽——外部 Agent `game_start`
+//! 时才跑配对（用已 bind 的 A' + 现建 B，`pair.rs` 同款原语），认领成功后工具面
+//! （wait_events 等）路由到该局；本任务侧观察活局（认领→thinking/waiting、终局/
+//! 离场→done），`agent_stop` 先认输再 `stop_game` 拆局——认输的 game_over 事件会
+//! 先行物化进事件队列，阻塞中的 wait_events 随之返回，实现与停止的联动。
 //!
-//! **范围红线**：goptop-net / goptop-transport-native / crates/goptop-agent 一行不改；
-//! 接线全部走它们的公开 API。goptop-agent 的 `pair()` 不经手：它自建 A'（PairConfig
-//! 的 front 宿主由它内部消费），而本壳的 A' 归前端——配对步骤按 pair.rs 同款原语
-//! （CreateInvite / 等 rtc / 泵到 playing）在本文件落地，约 60 行，语义一致。
+//! **范围红线**：goptop-net / goptop-transport-native / harmony 一行不改；
+//! 接线全部走它们的公开 API。goptop-agent 的 `pair()` 在壳内不经手（它自建 A'，
+//! 而本壳的 A' 归前端——配对步骤按 pair.rs 同款原语在本文件落地，语义一致；MCP
+//! 待局闭包同款，见 [`claim_seats`]）。
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -35,10 +41,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use goptop_agent::agent_loop::{LoopConfig, LoopDeps, LoopStop, SubagentLoop, DEFAULT_CTX_LIMIT};
+#[cfg(desktop)]
+use goptop_agent::mcp::{McpConfig, McpServer, PendingGame};
 use goptop_agent::llm::{
     Block, ChatRequest, HttpChannel, LlmClient, LlmConfig, Msg, NativeHttp, Protocol, Role,
 };
-use goptop_agent::pair::SeatColor;
+use goptop_agent::pair::{self, SeatColor};
 use goptop_agent::player::{
     EmitWatch, EventQueue, HookHost, NativePlayer, PlayerHandle, event_baseline, run_event_pump,
 };
@@ -126,6 +134,11 @@ pub fn agent_start(app: AppHandle, cfg_json: String) -> Result<u32, String> {
         // 单局互斥：进程内 BC hub 全局无局号（bc.rs 头注自证缺口），并行两局会互串。
         return Err("已有 Agent 对局进行中，请先停止当前对局".to_string());
     }
+    // MCP 对局的认领请求只能来自内嵌服务器——没起服务器就开局必然卡死在 waiting_mcp。
+    #[cfg(desktop)]
+    if cfg.driver == Driver::Mcp && hub.mcp_server().is_none() {
+        return Err("MCP 服务器未启用：请先在 MCP 连接卡打开开关再开局".to_string());
+    }
     let run = Arc::new(Run::new(hub.next_id()));
     run.set_running(ST_PAIRING);
     run.set_detail(Some("配对中…".into()));
@@ -136,8 +149,7 @@ pub fn agent_start(app: AppHandle, cfg_json: String) -> Result<u32, String> {
     tokio::spawn(async move {
         match cfg.driver {
             Driver::Builtin => run_builtin_task(app2, run2, cfg, seat).await,
-            // 本阶段只接驳 A' 并置 waiting_mcp；game_start 认领接线留阶段④。
-            Driver::Mcp => run_mcp_task(app2, run2, cfg).await,
+            Driver::Mcp => run_mcp_task(app2, run2, cfg, seat).await,
         }
     });
     Ok(run.id)
@@ -178,7 +190,14 @@ pub async fn agent_stop(app: AppHandle, id: u32) -> Result<(), String> {
     run.abort.store(true, Ordering::Relaxed);
     run.cancel.notify_one();
     run.set_terminal("done", Some("已停止".into()));
-    // 3) 清理：运行表摘除（此后 status/events 报 not found——停止后的运行没有
+    // 3) MCP 对局的装配拆除（服务器本体不停，见 run_mcp_task）：外部 Agent 阻塞
+    //    中的 wait_events 已因步骤 1 的认输收到 game_over 事件——600ms 定拍就是
+    //    给事件物化留的窗口；此后 tools/call 一律回「no live game」，对局面收口。
+    #[cfg(desktop)]
+    if let Some(s) = app.state::<AgentHub>().mcp_server() {
+        s.stop_game();
+    }
+    // 4) 清理：运行表摘除（此后 status/events 报 not found——停止后的运行没有
     //    可读状态）。A' 的会话表项**不动**——它归前端所有，由 AgentPage 的
     //    teardown 走 dispose（session_drop）收摊，两边都摘只会互相竞争。
     app.state::<AgentHub>().remove(id);
@@ -302,16 +321,19 @@ pub async fn agent_llm_test(app: AppHandle) -> String {
     }
 }
 
-/// `agent_mcp_set(enabled) -> string`：落 store 键并回 info JSON。
+/// `agent_mcp_set(enabled) -> string`：落 store 键并**真启停**内嵌服务器，回 info JSON。
 ///
-/// **本阶段 server 不启动**（阶段④接线），所以回执的 `enabled` 恒 false——键先落，
-/// 阶段④的启动逻辑直接读这份配置。端口缺省 9537、token 首次生成并持久化。
+/// 启动读 `goptop:agent-mcp-port/token`（token 首次生成并持久化）；配置口被占时
+/// [`McpServer::start`] 回退随机口——**实际端口只回写进 info**（url 以真实口拼），
+/// 不覆盖用户配置的偏好口，下次启动仍按配置口先试。重复开启先停旧实例（端口/token
+/// 可能已改）。**必须异步**：`McpServer::start` 要 await（bind + spawn serve），
+/// 同步命令会占死 Tauri 主线程（agent_llm_test 同款理由）。
 /// **仅桌面目标**（计划 MCP 节「条件编译」：MCP 相关 Tauri 命令只在桌面注册，
 /// 安卓/鸿蒙不编译 MCP 代码；lib.rs 的注册面同门）。
 #[cfg(desktop)]
 #[tauri::command]
-pub fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
-    let r = (|| -> Result<(), String> {
+pub async fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
+    let r = || -> Result<(), String> {
         crate::store::store_set(app.clone(), KEY_MCP_ENABLED.into(), enabled.to_string())?;
         let map = crate::store::store_load(app.clone())?;
         if !map.contains_key(KEY_MCP_PORT) {
@@ -324,15 +346,49 @@ pub fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
             crate::store::store_set(app.clone(), KEY_MCP_TOKEN.into(), token)?;
         }
         Ok(())
-    })();
-    if let Err(e) = r {
+    };
+    if let Err(e) = r() {
         eprintln!("[agent] mcp_set 落键失败: {e}");
+    }
+    let hub = app.state::<AgentHub>();
+    if enabled {
+        // 先停旧实例再起新的：端口/token 以当前 store 为准，旧监听不该残留。
+        if let Some(old) = hub.take_mcp_server() {
+            old.stop();
+        }
+        let map = crate::store::store_load(app.clone()).unwrap_or_default();
+        let port = map
+            .get(KEY_MCP_PORT)
+            .and_then(|v| v.trim().parse::<u16>().ok())
+            .unwrap_or(MCP_DEFAULT_PORT as u16);
+        let token = map
+            .get(KEY_MCP_TOKEN)
+            .map(String::as_str)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
+        match McpServer::start(McpConfig { port, token }).await {
+            Ok(server) => {
+                if server.port() != port {
+                    eprintln!(
+                        "[agent] MCP 端口 {port} 被占，回退随机口 {}（info 以实际口为准）",
+                        server.port()
+                    );
+                }
+                hub.set_mcp_server(server);
+            }
+            Err(e) => eprintln!("[agent] MCP 服务器启动失败（两端口都不可绑）：{e}"),
+        }
+    } else if let Some(s) = hub.take_mcp_server() {
+        // 关闭即全停：serve 任务 + 活局/待局一起拆（agent_stop 只拆对局不停服务器）。
+        s.stop();
     }
     mcp_info_json(&app)
 }
 
 /// `agent_mcp_info() -> string`：MCP 连接信息 JSON（`{"enabled","url","token"}`）。
-/// enabled 恒 false（server 启动留阶段④）；url/token 回已配置值，供连接卡展示。
+/// 服务器在跑时 url/token 取**运行实例**的真实值（端口回退/token 改键后的唯一
+/// 真相）；未运行回已配置值，供连接卡展示。
 /// **仅桌面目标**（同 [`agent_mcp_set`] 的门）。
 #[cfg(desktop)]
 #[tauri::command]
@@ -343,13 +399,19 @@ pub fn agent_mcp_info(app: AppHandle) -> String {
 /// info JSON 的拼装（set/info 共用一份形状，防两处字段漂移）。
 #[cfg(desktop)]
 fn mcp_info_json(app: &AppHandle) -> String {
-    let map = crate::store::store_load(app.clone()).unwrap_or_default();
-    let port: u32 = map.get(KEY_MCP_PORT).and_then(|v| v.trim().parse().ok()).unwrap_or(MCP_DEFAULT_PORT);
-    let token = map.get(KEY_MCP_TOKEN).filter(|t| !t.trim().is_empty()).cloned();
+    let (enabled, url, token) = match app.state::<AgentHub>().mcp_server() {
+        Some(s) => (true, s.url(), Some(s.token().to_string())),
+        None => {
+            let map = crate::store::store_load(app.clone()).unwrap_or_default();
+            let port: u32 =
+                map.get(KEY_MCP_PORT).and_then(|v| v.trim().parse().ok()).unwrap_or(MCP_DEFAULT_PORT);
+            let token = map.get(KEY_MCP_TOKEN).filter(|t| !t.trim().is_empty()).cloned();
+            (false, format!("http://127.0.0.1:{port}/mcp"), token)
+        }
+    };
     serde_json::json!({
-        // 阶段④前 server 恒不运行：enabled 恒 false（任务契约拍板）。
-        "enabled": false,
-        "url": format!("http://127.0.0.1:{port}/mcp"),
+        "enabled": enabled,
+        "url": url,
         "token": token,
     })
     .to_string()
@@ -357,22 +419,51 @@ fn mcp_info_json(app: &AppHandle) -> String {
 
 /* ---------------- AgentHub：运行表与拦截面判据 ---------------- */
 
-/// 运行表 + 绑定槽。manage 进 Tauri（lib.rs），命令与任务都经 `app.state` 取。
+/// 运行表 + 绑定槽 + MCP 服务器槽。manage 进 Tauri（lib.rs），命令与任务都经
+/// `app.state` 取。
 pub struct AgentHub {
     runs: Mutex<HashMap<u32, Arc<Run>>>,
     next_run: AtomicU32,
     /// agent_bind 登记的 A' 会话 id（配对目标；配对任务取走后，豁免续记在
     /// 存活运行的 front_id 上——见 [`AgentHub::exempt_session`]）。
     bound: Mutex<Option<u32>>,
+    /// 内嵌 MCP 服务器（agent_mcp_set 真启停；Arc 使认领闭包与观察循环能持引用）。
+    /// None = 未启用/已关闭。仅桌面目标存在该槽（mcp feature 同门）。
+    #[cfg(desktop)]
+    mcp: Mutex<Option<Arc<McpServer>>>,
 }
 
 impl Default for AgentHub {
     fn default() -> Self {
-        Self { runs: Mutex::default(), next_run: AtomicU32::new(1), bound: Mutex::default() }
+        Self {
+            runs: Mutex::default(),
+            next_run: AtomicU32::new(1),
+            bound: Mutex::default(),
+            #[cfg(desktop)]
+            mcp: Mutex::default(),
+        }
     }
 }
 
 impl AgentHub {
+    /// 现役 MCP 服务器（None=未启用）。
+    #[cfg(desktop)]
+    fn mcp_server(&self) -> Option<Arc<McpServer>> {
+        self.mcp.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 换上新的 MCP 服务器实例（agent_mcp_set(true) 的启动结果）。
+    #[cfg(desktop)]
+    fn set_mcp_server(&self, s: McpServer) {
+        *self.mcp.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(s));
+    }
+
+    /// 取走现役实例（重复开启先停旧 / 关闭时全停）。
+    #[cfg(desktop)]
+    fn take_mcp_server(&self) -> Option<Arc<McpServer>> {
+        self.mcp.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
     fn insert(&self, run: Arc<Run>) {
         self.runs
             .lock()
@@ -731,13 +822,69 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
     }
 }
 
-/// MCP 模式任务（本阶段）：等 bind 接驳 A' 后置 waiting_mcp。
+/// MCP 模式任务（阶段④）：接驳 A' → 存认领闭包 → waiting_mcp → 观察活局到收口。
 ///
-/// 外部 Agent 的 `game_start` 认领（含我执白方向 B 出链的接线）都属阶段④的
-/// handler 接线；这里先把「人这席」接好——A' 归前端（bind 登记），本任务只确认
-/// 它在表里可寻址，然后把状态交给 waiting_mcp 等 B 出现。
-async fn run_mcp_task(app: AppHandle, run: Arc<Run>, _cfg: StartCfg) {
+/// **与内置模式的分工差异**：配对不在这里跑，而是存进服务器的待局槽——外部 Agent
+/// `game_start` 时才由 handler 跑 [`claim_seats`]（用已 bind 的 A' + 现建 B 结对，
+/// `pair.rs` 同款原语）。理由：MCP 的「对手」在壳外，A' 建好、B 建好都不等于对手
+/// 已接入，`waiting_mcp` 必须如实保持到认领那一刻。两个方向：
+/// - **我执黑**：bind 先于 agent_start（前端流程），A' 的邀请链接已就绪——直接进
+///   等待；B 在认领时以 A' 的链接创建。
+/// - **我执白**：B 先建局出链（链接经 detail 送前端、A' 携链 Boot 入局——同内置
+///   方向），B 在本任务先行建好（`McpWhiteSeat`），认领闭包只做「A'+B 泵到对局态」。
+///
+/// 认领后的观察循环（select 硬取消）：winner 出现 → done；live 消失（game_leave
+/// 拆局/服务器关闭）→ done「已离场」；`agent_stop` → cancel → 本任务直接退出
+/// （认输/拆局/收账都归命令侧，见 agent_stop 步骤 1/3）。
+#[cfg(desktop)]
+async fn run_mcp_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: SeatColor) {
     let hub = app.state::<AgentHub>();
+    let Some(server) = hub.mcp_server() else {
+        run.set_terminal(ST_ERROR, Some("MCP 服务器未启用：请先在 MCP 连接卡打开开关".into()));
+        return;
+    };
+
+    // —— 我执白：B 席先行建局出链（与 pair_seats 白分支同款；取消经 run 传播）。
+    //    B 挂在本任务的 premade 里，直到被认领闭包消费或任务退出随局部变量收摊。
+    let premade = if seat == SeatColor::White {
+        let agent_tauri = Arc::new(crate::session::TauriHost::new(app.clone()));
+        let (agent_hook, agent_watch) = HookHost::wrap(agent_tauri as Arc<dyn Host>);
+        let agent_cfg = SessionConfig {
+            name: cfg.agent_name.clone().unwrap_or_else(|| "Agent".into()),
+            server_mode: false,
+            share_origin: SHARE_ORIGIN.into(),
+            kind: cfg.kind.clone(),
+            size: cfg.size,
+        };
+        let base = format!("{}/p2p", SHARE_ORIGIN.trim_end_matches('/'));
+        let s = Arc::new(NativeSession::new(agent_cfg, agent_hook.clone(), &base));
+        s.start_pump();
+        let bp = NativePlayer::new(s);
+        run.set_detail(Some("Agent 席生成邀请中…".into()));
+        bp.cmd(UiCommand::CreateInvite);
+        if let Err(e) = wait_invite(&bp, &run).await {
+            if run.state() != ST_DONE {
+                run.set_terminal(ST_ERROR, Some(format!("B 席出链失败：{e}")));
+            }
+            return;
+        }
+        match invite_link(&bp) {
+            Some(link) => {
+                run.set_detail(Some(format!(
+                    "B 已就绪，请以此邀请链接创建 A'（携链 Boot 入局）：{link}"
+                )));
+                Some(McpWhiteSeat { player: bp, hook: agent_hook, watch: agent_watch })
+            }
+            None => {
+                run.set_terminal(ST_ERROR, Some("B 的邀请链接未就绪（缺 rtc=）".into()));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // —— 等 bind（黑：bind 先于 agent_start，秒回；白：等前端携链建 A' 后登记）。
     let front_id = match wait_bound(&run, &hub, BIND_WAIT_SECS).await {
         Some(id) => id,
         None => {
@@ -753,10 +900,188 @@ async fn run_mcp_task(app: AppHandle, run: Arc<Run>, _cfg: StartCfg) {
         );
         return;
     }
-    // player 留空：本阶段 B 还不存在，agent_stop 的认输分支自然跳过；
-    // A' 的收尾归前端（它自己的会话它自己 dispose）。
+
+    // —— 记忆库（ns=mcp，与内置同一份 db 文件）+ 暂存区单例。staging 必须先于
+    //    待局记进运行表：agent_status 的幽灵子读数与认领后工具面 ctx 用的是
+    //    同一份（PendingGame.staging），两份 Staging 会让拟落互不相认。
+    let db = match crate::store::store_dir(&app) {
+        Ok(dir) => dir.join("agent-memory.db"),
+        Err(e) => {
+            run.set_terminal(ST_ERROR, Some(format!("定位数据目录失败：{e}")));
+            return;
+        }
+    };
+    let memory: Arc<dyn VfsStore> = match NativeStore::open(&db) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            run.set_terminal(ST_ERROR, Some(format!("记忆库打开失败：{e}")));
+            return;
+        }
+    };
+    let staging = Arc::new(Staging::new());
+    run.inner.lock().unwrap_or_else(|e| e.into_inner()).staging = Some(staging.clone());
+
+    // —— 存待局：认领闭包（外部 Agent game_start 时跑）。失败路径由 handler 把
+    //    待局还回槽并回业务错，外部 Agent 重试 game_start 即可（闭包可重入）。
+    server.set_pending_game(PendingGame {
+        pairing: {
+            let app2 = app.clone();
+            let run2 = run.clone();
+            let cfg2 = cfg.clone();
+            let agent_tauri = Arc::new(crate::session::TauriHost::new(app.clone()));
+            Arc::new(move || {
+                let (app, run, cfg, agent_tauri, premade) =
+                    (app2.clone(), run2.clone(), cfg2.clone(), agent_tauri.clone(), premade.clone());
+                Box::pin(claim_seats(app, run, cfg, seat, agent_tauri, front_id, premade))
+            })
+        },
+        memory,
+        staging,
+    });
     run.set_running(ST_WAITING_MCP);
     run.set_detail(Some(format!("等待 MCP Agent 接入…（A' 会话 id={front_id}）")));
+
+    // —— 认领观察循环。
+    let mut was_live = false;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            // 用户停止：agent_stop 已认输（若在局中）、stop_game 拆了装配、终态
+            // 已收账——本任务只管退出，不碰状态。
+            _ = run.cancel.notified() => return,
+        }
+        if server.front_handle().is_some() {
+            if !was_live {
+                was_live = true;
+                run.set_detail(Some("MCP Agent 已接入".into()));
+            }
+            let (won, to_move, agent_color) = {
+                let g = run.inner.lock().unwrap_or_else(|e| e.into_inner());
+                match g.player.as_ref() {
+                    Some(p) => {
+                        let s = p.snapshot();
+                        (s.get("winner").is_some_and(|w| !w.is_null()),
+                         s.get("toMove").and_then(serde_json::Value::as_str).map(str::to_string),
+                         g.agent_color.clone())
+                    }
+                    None => (false, None, None),
+                }
+            };
+            if won {
+                run.set_terminal(ST_DONE, Some("对局结束".into()));
+                return;
+            }
+            // 轮到 B=thinking、轮到人=waiting——与内置 ticker 同口径的诚实近似
+            // （外部 Agent 的「思考」本侧不可见，用快照 toMove 反推）。
+            if to_move.as_deref() == agent_color.as_deref() {
+                run.set_running(ST_THINKING);
+            } else {
+                run.set_running(ST_WAITING);
+            }
+        } else if was_live {
+            // live 消失 = game_leave 拆局（外部 Agent 先认输后离场）或服务器被关。
+            run.set_terminal(ST_DONE, Some("MCP Agent 已离场".into()));
+            return;
+        }
+    }
+}
+
+/// 非桌面目标：mcp feature 不开、`goptop_agent::mcp` 不编译，显式降级（Driver::Mcp
+/// 的 cfgJson 在移动端只会得到这条人话错误，绝不静默）。
+#[cfg(not(desktop))]
+async fn run_mcp_task(_app: AppHandle, run: Arc<Run>, _cfg: StartCfg, _seat: SeatColor) {
+    run.set_terminal(ST_ERROR, Some("MCP 对战仅桌面版可用".into()));
+}
+
+/// 我执白方向的预建 B 席（认领闭包的现成材料；`Clone` 手工实现——EmitWatch 按
+/// clone_rx 克隆，多份接收端共享同一 watch 发送端，语义不变）。
+#[cfg(desktop)]
+struct McpWhiteSeat {
+    player: NativePlayer,
+    hook: Arc<HookHost>,
+    watch: EmitWatch,
+}
+
+#[cfg(desktop)]
+impl Clone for McpWhiteSeat {
+    fn clone(&self) -> Self {
+        Self {
+            player: self.player.clone(),
+            hook: self.hook.clone(),
+            watch: EmitWatch::new(self.watch.clone_rx()),
+        }
+    }
+}
+
+/// MCP 认领的配对段（待局闭包体；game_start 时由 goptop-agent 的 handler 调）：
+/// 用已 bind 的 A' 完成配对，产出 [`pair::Paired`] 交给 handler 装配活局。
+///
+/// **我执黑**：A' 已有邀请链接（bind 代发 + 前端等过 rtc；这里兜底补发），携链现建
+/// B；**我执白**：B 已预建（[`McpWhiteSeat`]），只差把两席泵到对局态。取消与终局
+/// 经 `run.cancel`/`run.state` 传播——用户在认领配对途中停止时返回 Err，handler
+/// 把待局还回槽（待局里的运行已终，重试认领会被开头的存活检查拦下）。
+#[cfg(desktop)]
+async fn claim_seats(
+    app: AppHandle,
+    run: Arc<Run>,
+    cfg: StartCfg,
+    seat: SeatColor,
+    agent_tauri: Arc<crate::session::TauriHost>,
+    front_id: u32,
+    premade: Option<McpWhiteSeat>,
+) -> Result<pair::Paired, String> {
+    if !run.is_live() {
+        return Err("对局已被用户停止，本次认领无效".into());
+    }
+    let front = take_front(&app, front_id)?;
+    let agent_cfg = SessionConfig {
+        name: cfg.agent_name.clone().unwrap_or_else(|| "Agent".into()),
+        server_mode: false,
+        share_origin: SHARE_ORIGIN.into(),
+        kind: cfg.kind.clone(),
+        size: cfg.size,
+    };
+    let paired = match seat {
+        SeatColor::Black => {
+            if invite_link(&front).is_none() {
+                front.cmd(UiCommand::CreateInvite);
+            }
+            run.set_detail(Some("MCP Agent 认领中：等待 A' 的邀请链接就绪…".into()));
+            wait_invite(&front, &run).await?;
+            let link =
+                invite_link(&front).ok_or_else(|| "A' 的邀请链接未就绪（缺 rtc=）".to_string())?;
+            let (agent_hook, agent_watch) = HookHost::wrap(agent_tauri as Arc<dyn Host>);
+            let s = Arc::new(NativeSession::new(agent_cfg, agent_hook.clone(), &link));
+            s.start_pump();
+            let agent = NativePlayer::new(s);
+            record_b_seat(&run, &agent, seat);
+            wait_playing(&front, &agent, &run).await?;
+            pair::Paired { front, agent, agent_watch, agent_hook }
+        }
+        SeatColor::White => {
+            let b = premade.ok_or_else(|| "B 席未预建（内部装配错误）".to_string())?;
+            run.set_detail(Some("MCP Agent 认领中：等待人席完成入局…".into()));
+            record_b_seat(&run, &b.player, seat);
+            wait_playing(&front, &b.player, &run).await?;
+            pair::Paired {
+                front,
+                agent: b.player,
+                agent_watch: EmitWatch::new(b.watch.clone_rx()),
+                agent_hook: b.hook,
+            }
+        }
+    };
+    Ok(paired)
+}
+
+/// 认领配对成功时把 B 席记进运行表：agent_stop 的认输落点、状态 ticker 的
+/// thinking/waiting 判定（agent_color）都靠它——与内置模式 run_builtin_task 的
+/// 记账同款。staging 在存待局时已记账（见 run_mcp_task）。
+#[cfg(desktop)]
+fn record_b_seat(run: &Run, agent: &NativePlayer, seat: SeatColor) {
+    let mut g = run.inner.lock().unwrap_or_else(|e| e.into_inner());
+    g.player = Some(agent.clone());
+    g.agent_color = Some(seat.opponent().as_str().to_string());
 }
 
 /* ---------------- 会话对接线（pair.rs 同款原语；A' 归前端，B 由本壳创建） ---------------- */
