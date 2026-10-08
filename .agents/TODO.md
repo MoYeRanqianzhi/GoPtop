@@ -3,6 +3,27 @@
 > 记忆规范见 CLAUDE.md 与 .agents/MEMORY.md。每个待办动手前先读对应记忆文件。
 > 审查报告：review/（开放）；review/archive/（2026-09-07 闭环归档）。
 
+## 2026-10-08 Agent 对战大轮（用户拍板立项，规格 plan/2026-10-08-agent-battle.md）
+
+- [x] 阶段①+②：goptop-agent crate（会话对/一切皆文件工具面/决策循环/compact/三协议
+      LLM），无头全量测试绿（Mock LLM）——提交链与 crate 结构见
+      memory/2026-10-08-agent-battle-round.md。
+- [x] 阶段③：接壳 + 唯一入口 AgentPage（/agent）+ 壳级 e2e（agent-builtin/agent-entry）
+      + 两轮审查修复（157fb86 等）。
+- [x] 阶段④：MCP 出口（rmcp 3.2 streamable HTTP，feature mcp 仅桌面编译）+ MCP 连接卡
+      + agent-mcp.js e2e（b1365f2）。
+- [x] 回归：`cargo test -p goptop-agent --features mcp` 100 绿、vitest 94/94
+      （本轮实测口径，见记忆文件「数字与基线」）。
+- [x] 文档与记忆同步：使用指南补「Agent 对战」章；本轮落地记录入 memory/。
+- [ ] 遗留一（阶段⑤）：Web 内置模式——VfsStore web 后端（IndexedDB 经 agentVfs.ts
+      钩子）、HttpChannel web 通道、循环 wasm 驱动（禁 tokio time）；当前 Web/鸿蒙
+      进 /agent 只有降级横幅。
+- [ ] 遗留二（phase ⑤ 后）：产物同步 build-wasm/build-ohos 冒烟 + 既有 e2e 全量
+      （本轮纯桌面接线，wasm 产物零变化）。
+- [ ] 遗留三：MCP 服务器大厅注册（下一任务，registry scope 与 handler-state 已留缝）。
+- [ ] 既有遗留不动：A 方案（stable 态用原 offer 重建 peer）、壳/模拟器实测矩阵待
+      内存宽裕重跑（见 2026-10-07 轮）。
+
 ## 2026-10-07 探查 bug 大轮（用户指令「加强测试和优化，探查bug」）
 
 - [x] 九维并行审查上一轮原生传输改动：44 发现 → **对抗验证确认 36 / 驳回 8**

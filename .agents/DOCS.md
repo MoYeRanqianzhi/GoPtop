@@ -15,6 +15,7 @@
 
 ## 记忆文件（memory/）
 
+- `2026-10-08-agent-battle-round.md` — Agent 对战阶段①-④落地：goptop-agent crate 结构、骨架先行 5 路并行编排（F/G 所有权漂移教训）、审查发现模式（防恒真/豁免记账/编译期平台门/设置落盘可等待）、rmcp 3.2 feature 拼写双重验证、真 LLM 门槛凭据红线；遗留阶段⑤ Web 内置模式
 - `2026-09-07-p2p-direction-a-no-server-auto-share-origin.md` — A 路线纯无服务器；分享域名全自动禁用户设置
 - `2026-09-07-receipt-ui-and-spectator-design.md` — 回执 UI 三要求；观战只与邀请者直连；同浏览器双窗口为极端情况
 - `2026-09-07-p2p-peer-terminology-inviter-invitee.md` — 房主/客人 → 邀请者/受邀者
