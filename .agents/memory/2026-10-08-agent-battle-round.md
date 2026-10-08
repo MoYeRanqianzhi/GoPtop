@@ -162,6 +162,3 @@ feature 实际拼写 `server` + `transport-streamable-http-server`，实施首�
    OHOS 侧 HTTP/钩子通道，参照 Web 阶段⑤ 的契约先例）。
 3. **已知抖动**：loop_headless 偶发（见阶段⑤节）；壳/模拟器实测矩阵待内存宽裕重跑、
    A 方案留观（见 2026-10-07 轮）。
-3. **MCP 服务器大厅注册**属下一任务（registry scope 枚举与 handler-state 已留缝）。
-4. 既有遗留不动：A 方案（stable 态用原 offer 重建 peer）、壳/模拟器实测矩阵待内存
-   宽裕重跑（见 2026-10-07 轮）。
