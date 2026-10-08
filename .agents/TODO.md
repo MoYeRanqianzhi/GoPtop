@@ -20,11 +20,13 @@
       全禁，PlatformHost 泛化 + WebHost/WebStore/WebHttpChannel），W2 transport 的
       detached 会话/FRONT 注册表/Hub/拦截面/agent_* 导出面 + 前端 agentVfs/agentWeb/
       createDetachedSession/AgentPage 翻转（e7a3c8f/9d4bc3b）；集成收口：transport wasm
-      产物带 agent 导出重出（GOPTOP_TRANSPORT_AGENT=1）、agent-entry.js 翻转为启用面 +
-      降级回归路径、新增 agent-web.js（浏览器全链对局 e2e）、使用指南/TODO 同步。
-- [ ] 遗留二（phase ⑤ 后）：build-wasm/build-ohos 冒烟随产物轮重跑（goptop-transport
-      wasm 产物已带 agent feature，规则/AI wasm 与鸿蒙 .so 本轮零变化）；鸿蒙内置模式
-      仍在 R7（整页降级维持）。
+      产物带 agent 导出重出（单产物恒带 agent——7a5087c 翻默认并记录 footgun）、
+      agent-entry.js 翻转为启用面 + 降级回归路径、新增 agent-web.js（浏览器全链对局
+      e2e 18/18）、使用指南/TODO 同步。
+- [x] 遗留二（phase ⑤ 后产物与基线）：build-wasm RC=0 / build-ohos 双 ABI RC=0 且
+      重建后 git 零 tracked 变化（规则/AI wasm 与鸿蒙 .so 确证本轮零变化）；既有浏览器
+      基线 run.js 58/58 零回归。鸿蒙内置模式维持 R7 整页降级（agent-entry 已含
+      鸿蒙桥降级回归路径）。
 - [ ] 遗留三：MCP 服务器大厅注册（下一任务，registry scope 与 handler-state 已留缝）。
 - [ ] 既有遗留不动：A 方案（stable 态用原 offer 重建 peer）、壳/模拟器实测矩阵待
       内存宽裕重跑（见 2026-10-07 轮）。

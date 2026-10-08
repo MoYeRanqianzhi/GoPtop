@@ -128,14 +128,40 @@ feature 实际拼写 `server` + `transport-streamable-http-server`，实施首�
   9/9 PASS 退出码 0，终局截图目检（白胜横幅/连五盘面/双聊天/用量卡/[llm] HTTP 200）。
   run 1-4 迭代失败均非零退出并留诊断——门槛不是一次跑出来的。
 
+## 阶段⑤ Web 内置模式（R9 最高风险项的落法与实证）
+
+- **契约探路的三个证据性发现**（.agents/plan/2026-10-08-agent-battle-web.md）：
+  ① tokio-1.53.1 `sync` 在 wasm 白名单内、依赖链纯 std——watch 可用；**time 即 trap**
+  （本机 rustc cdylib 探针实测 `Instant::now()` 就崩）→ `time_compat.rs` 双臂
+  （wasm=JsFuture setTimeout，native=原语义），6 处 sleep+2 处 Instant 全部收口。
+  ② transport 原是**单全局 SESSION 槽**，14 处 IO 回调闭包捕获了 core 却没接线——
+  per-core 路由修复是 agent 导出能按 id 找到会话的前提（顺带修掉的结构性欠账）。
+  ③ wasm 首编报 getrandom，唯一来源是 webrtc 链——cfg 摘除即消，无需 `getrandom/js`。
+- **产物体积代价**：transport wasm 586KB→1.02MB（agent 进主产物，单产物策略恒带
+  agent——审查发现 env 门与契约矛盾后翻默认，footgun=无 agent 产物会让 /agent 整页
+  静默降级、e2e 全红，注释已记录）。
+- **Web e2e 18/18**（agent-web.js）：预置 localStorage→配对（黑 落子）→人类首手→
+  开场打招呼→幽灵子先现/提交消失→工具日志 llm 行→聊天往返→拦截面（goptopNotice
+  「Agent 对局进行中」）→4 手认输终局→用量 17 调用 824/202 tok。agent-entry 25/25
+  含鸿蒙桥（goptopHost）降级回归路径。vitest 117/117。
+- **防恒真第三犯（medium）**：拦截面断言第二腿对 `snapshot()` 的**字符串**返回值直接取
+  `.inviteUrl`——恒 undefined、恒真。与 2026-10-07「报告级必须实证」、③「先证明它能红」
+  同源：**断言要证的值必须先被真正取出来**。已修（JSON.parse 后取）。
+- **契约回写两处**（按 §6「改动须回写」）：agentWeb 并入 session.ts（落点偏差，不建
+  新文件——CLAUDE.md 优先编辑既有文件）；wait_until 不拆 TestPlayerExt——原案在
+  「src-tauri 一行不改」红线下不可落地（LogPlayer 实现了该方法，出 trait 即编译红），
+  cfg 门内保留是唯一两全，文档记为契约修正而非实现偏差。
+- **已知抖动**：loop_headless 5 跑 1 红（负载抖动，隔离复跑绿）——pair deadline 从
+  单调 Instant 换壁钟 now_ms（契约 R-w2 接受秒级回拨）；CI 复现率上升时先查此处。
+- **收尾基线**：build-wasm/build-ohos 冒烟 RC=0 且重建零 tracked 变化；run.js 58/58。
+
 ## 遗留（记录在案，未获指令不动工）
 
-1. **阶段⑤ Web 内置模式**：VfsStore web 后端（IndexedDB 经 agentVfs.ts 的
-   window.goptopVfs* 钩子）+ HttpChannel web 通道（window.goptopAgentHttp）+
-   循环 wasm 驱动（await 走 wasm-bindgen-futures，禁 tokio time）；当前 Web/鸿蒙
-   进 /agent 只见降级横幅。
-2. **phase ⑤ 后产物同步**：build-wasm/build-ohos 冒烟与既有 e2e 全量（本轮纯桌面
-   接线，wasm 产物零变化——goptop-transport/net/core 未动）。
+1. **MCP 服务器大厅注册**属下一任务（registry scope 枚举与 handler-state 已留缝）。
+2. **鸿蒙内置模式**维持 R7 整页降级（agent-entry 已含鸿蒙桥降级回归路径；落地需
+   OHOS 侧 HTTP/钩子通道，参照 Web 阶段⑤ 的契约先例）。
+3. **已知抖动**：loop_headless 偶发（见阶段⑤节）；壳/模拟器实测矩阵待内存宽裕重跑、
+   A 方案留观（见 2026-10-07 轮）。
 3. **MCP 服务器大厅注册**属下一任务（registry scope 枚举与 handler-state 已留缝）。
 4. 既有遗留不动：A 方案（stable 态用原 offer 重建 peer）、壳/模拟器实测矩阵待内存
    宽裕重跑（见 2026-10-07 轮）。
