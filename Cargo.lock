@@ -1973,6 +1973,8 @@ dependencies = [
 name = "goptop"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
+ "goptop-agent",
  "goptop-ai",
  "goptop-core",
  "goptop-net",

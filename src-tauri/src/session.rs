@@ -32,7 +32,9 @@ use tauri::State;
 /// 宿主句柄要**另外存一份**（`Arc` 共享，同一个对象也传给了 `NativeSession`）：
 /// 宿主动作队列是宿主自己的事，`NativeSession` 不暴露它的 host——那属于内部结构。
 pub struct SessionEntry {
-    session: NativeSession,
+    /// **Arc 而非值**：AgentHub 要把 pair() 产出的 A'（Arc 已被 goptop-agent 持有一份）
+    /// 接进本表——Arc 共享同一会话，drop 语义不变（最后一份引用释放时停机标志才置位）。
+    session: Arc<NativeSession>,
     host: Arc<TauriHost>,
     /// 上次**实际回给前端**的快照文本（`session_poll` 的「无变化」判定基准）。
     ///
@@ -74,7 +76,7 @@ pub struct TauriHost {
 }
 
 impl TauriHost {
-    fn new(app: tauri::AppHandle) -> Self {
+    pub(crate) fn new(app: tauri::AppHandle) -> Self {
         Self { app, actions: Mutex::new(Vec::new()) }
     }
 
@@ -149,8 +151,36 @@ pub fn session_new(
         .0
         .lock()
         .map_err(|_| "会话表已中毒".to_string())?
-        .insert(id, SessionEntry { session: s, host, last_served: None });
+        .insert(id, SessionEntry { session: Arc::new(s), host, last_served: None });
     Ok(Some(id))
+}
+
+/// 把一条**已建成**的会话接进会话表（AgentHub 专用——pair() 在 Rust 侧建的 A'
+/// 要经本函数才能被前端 `session_poll/session_cmd` 触达）。
+///
+/// - `at = None`：落到新 id（`agent_status.detail` 回给前端）；
+/// - `at = Some(id)`：**占位交换**（agent_bind 的「配对目标」）——该 id 的旧表项
+///   就地 drop（前端建的占位会话随停机标志收摊），前端对同一 id 的轮询无缝切到
+///   真 A' 的快照。
+///
+/// 后台泵照 `session_new` 的契约起：表里的每个原生会话都自转，前端轮询只是叠加泵。
+pub(crate) fn adopt_session(
+    sessions: &Sessions,
+    at: Option<u32>,
+    session: Arc<NativeSession>,
+    host: Arc<TauriHost>,
+) -> u32 {
+    session.start_pump();
+    let id = at.unwrap_or_else(|| NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    if let Ok(mut m) = sessions.0.lock() {
+        m.insert(id, SessionEntry { session, host, last_served: None });
+    }
+    id
+}
+
+/// 摘除一个表项（AgentHub 的停止清理；返回是否真的摘了）。
+pub(crate) fn remove_session(sessions: &Sessions, id: u32) -> bool {
+    sessions.0.lock().map(|mut m| m.remove(&id).is_some()).unwrap_or(false)
 }
 
 /// 释放会话（切页面/重开都要显式调，否则会话连同它的 tokio 任务一起常驻）。
@@ -218,7 +248,12 @@ fn null_poll() -> String {
 
 /// 一条 UI 命令。`cmd_json` 是 `UiCommand` 的 serde 形态（见 goptop-net 的说明）。
 #[tauri::command]
-pub fn session_cmd(sessions: State<'_, Sessions>, id: u32, cmd_json: String) -> String {
+pub fn session_cmd(
+    app: tauri::AppHandle,
+    sessions: State<'_, Sessions>,
+    id: u32,
+    cmd_json: String,
+) -> String {
     let cmd: UiCommand = match serde_json::from_str(&cmd_json) {
         Ok(c) => c,
         // 不回 Result：调用方是「点一下就发」的 UI，抛错只会变成没人接的 rejection。
@@ -226,6 +261,21 @@ pub fn session_cmd(sessions: State<'_, Sessions>, id: u32, cmd_json: String) -> 
         // 静默的表现是「这个按钮没反应」，在设备上极难归因。
         Err(e) => return serde_json::json!({ "ok": false, "error": format!("bad cmd: {e}") }).to_string(),
     };
+    // —— Agent 拦截面（计划「会话对」节第 4 条）：Agent 局存活期间，主会话的
+    // 开局类命令一律拒绝（单局互斥——进程内 BC hub 全局无局号，并行开局会互串）；
+    // 豁免 agent_bind 登记的 A' id。拒绝要回 notice：前端把它当提示条显示，
+    // 光有 ok:false 的 console 告警，用户看到的还是「按钮没反应」。
+    if is_opening_cmd(&cmd) && crate::agent::intercept(&app, id) {
+        if let Ok(m) = sessions.0.lock() {
+            if let Some(e) = m.get(&id) {
+                e.host.push(HostAction::Notice {
+                    text: Some("Agent 对局进行中".to_string()),
+                    ms: Some(2400),
+                });
+            }
+        }
+        return serde_json::json!({ "ok": false, "error": "Agent 对局进行中" }).to_string();
+    }
     let Ok(m) = sessions.0.lock() else {
         return serde_json::json!({ "ok": false, "error": "lock poisoned" }).to_string();
     };
@@ -282,6 +332,20 @@ pub fn session_parse_link(text: String) -> String {
 #[tauri::command]
 pub fn session_parse_answer(text: String) -> String {
     goptop_transport_native::session::parse_answer_json(&text)
+}
+
+/// 开局类命令（拦截面的对象清单照任务契约逐字）：这些命令会把一个**非 Agent**
+/// 的对局拉起来，在 Agent 局存活期间一律拒绝。落子/聊天/协商等对局内命令不拦
+/// ——人可以在 Agent 局进行时正常操作自己的其它会话，只是不能再开新局。
+fn is_opening_cmd(cmd: &UiCommand) -> bool {
+    matches!(
+        cmd,
+        UiCommand::CreateInvite
+            | UiCommand::AcceptInvite { .. }
+            | UiCommand::AcceptReceipt(_)
+            | UiCommand::ServerChallenge(_)
+            | UiCommand::AcceptChallenge
+    )
 }
 
 #[cfg(test)]
@@ -361,4 +425,55 @@ mod tests {
         // 之后继续空闲 → 回到无变化分支。
         assert_eq!(poll_once(&s, &mut last), None);
     }
+
+    /// 拦截面的对象清单（任务契约逐字）：五个开局类命令拦，对局内命令不拦。
+    #[test]
+    fn opening_cmd清单与对局内命令() {
+        use goptop_net::links::AnswerIntent;
+        use UiCommand as C;
+        let receipt = || {
+            Box::new(AnswerIntent {
+                inviter_id: "u-1".into(),
+                pwd: "abc123".into(),
+                rtc_ans: "v1".into(),
+                spectator: false,
+                game_id: None,
+                kind: None,
+                size: None,
+            })
+        };
+        for c in [
+            C::CreateInvite,
+            C::AcceptInvite {
+                inviter_id: "u-1".into(),
+                pwd: None,
+                kind: "gomoku".into(),
+                size: 15,
+                rtc: None,
+                spec: false,
+            },
+            C::AcceptReceipt(receipt()),
+            C::ServerChallenge("u-2".into()),
+            C::AcceptChallenge,
+        ] {
+            assert!(is_opening_cmd(&c), "{c:?} 应属开局类");
+        }
+        for c in [
+            C::Place { x: 7, y: 7 },
+            C::Pass,
+            C::Resign,
+            C::SendChat("hi".into()),
+            C::RequestUndo,
+            C::ConfirmApprove,
+            C::ConfirmScore,
+            C::BackHome,
+            C::AcceptSpecReceipt(receipt()),
+        ] {
+            assert!(!is_opening_cmd(&c), "{c:?} 不该拦（对局内/观战命令）");
+        }
+    }
+
+    // adopt_session / remove_session 的表操作语义不在此单测：TauriHost 需要真
+    // AppHandle（存储目录取自平台路径），无法在无头测试里构造；两条路径由
+    // agent.rs 的运行任务经编译器类型约束走通，端到端由 e2e（agent-builtin.js）覆盖。
 }

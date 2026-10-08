@@ -41,6 +41,13 @@ goptop-transport-native = { path = "../crates/goptop-transport-native" }
 # UI 命令的 serde 契约（`UiCommand`）：session.rs 的命令面只有 `session_cmd` 一个口子，
 # 线上形态就是本枚举的序列化结果——直接依赖它，而不是在宿主里再抄一份分派表。
 goptop-net = { path = "../crates/goptop-net" }
+# 「Agent 对战」的核心（pair 会话对 / agent_loop 决策循环 / vfs+registry 工具面 /
+# 三协议 LLM 客户端）。本 crate 只做接壳装配（src-tauri/src/agent.rs），
+# 决策与工具语义全部在那个 crate——一行不重做。
+goptop-agent = { path = "../crates/goptop-agent" }
+# HttpChannel 的日志包装（agent.rs 的 LogHttp）要与 trait 同一套 async-trait
+# 脱糖宏，否则 lifetime 形状对不上（E0195）——版本与 goptop-agent 对齐（0.1）。
+async-trait = "0.1"
 
 # Windows Snap Layouts 覆盖层（src-tauri/src/titlebar.rs）：透明子窗口 + HTMAXBUTTON。
 # 只需 Win32 最小面：Foundation/LibraryLoader/WindowsAndMessaging。

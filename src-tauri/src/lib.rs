@@ -16,6 +16,7 @@
 //! （`goptop.exe` / `libgoptop_lib.so`），没有理由绕道 WebView 去跑 wasm：
 //! 那既丢 SIMD，又多一层无谓的边界。原生平台一律直接链接 crate。
 
+mod agent;
 mod ai;
 mod commands;
 mod p2p;
@@ -31,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(rules::Games::default())
         .manage(session::Sessions::default())
+        .manage(agent::AgentHub::default())
         .setup(|app| {
             titlebar::init(app.handle().clone());
             Ok(())
@@ -64,7 +66,16 @@ pub fn run() {
             session::session_state_debug,
             session::session_ice_debug,
             session::session_parse_link,
-            session::session_parse_answer
+            session::session_parse_answer,
+            // —— Agent 对战（AgentHub；src-tauri/src/agent.rs） ——
+            agent::agent_start,
+            agent::agent_stop,
+            agent::agent_status,
+            agent::agent_events,
+            agent::agent_bind,
+            agent::agent_llm_test,
+            agent::agent_mcp_set,
+            agent::agent_mcp_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running GoPtop tauri application");
