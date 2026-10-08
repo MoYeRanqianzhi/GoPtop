@@ -162,3 +162,34 @@ feature 实际拼写 `server` + `transport-streamable-http-server`，实施首�
    OHOS 侧 HTTP/钩子通道，参照 Web 阶段⑤ 的契约先例）。
 3. **已知抖动**：loop_headless 偶发（见阶段⑤节）；壳/模拟器实测矩阵待内存宽裕重跑、
    A 方案留观（见 2026-10-07 轮）。
+
+## 验收反馈修复轮（2026-10-09，用户实测后六连反馈的根治）
+
+用户亲自验收发现四个深层问题，修复过程中又连带挖出两个。全部实测收口：
+transport-native 5+6（含新回归锁）、workspace 全量、MCP feature、
+agent-web 19/19、壳 23/23、reallm 真 LLM 8/8（3fc8a41 → a41eb77 → 3e59472）。
+
+1. **agent 执黑空盘直接终局（重大）**：模型 thinking「game already ended with
+   black (me) winning」——不是模型幻觉，是 **BC hub 全局串扰实锤**：旧局的认输/
+   离场广播被同进程新 agent 会话当成自己的对局消息。根治=per-game topic 主题化
+   （bc.rs Payload 三元组+主题允许集过滤；send_game 发 goptop-game-{gameId}，
+   不在对局静默丢；join_topic 收裸 gameId **transport 层拼前缀**——wasm 侧
+   bridge.rs:211 同构，第一版漏拼前缀→发送正常接收零投递，headless 三用例
+   红，trace 定位后补前缀转绿）。回归锁：跨局隔离测试钉进 bc.rs tests。
+2. **卡局+调用数上涨但无日志**：三因叠加——llm 行被过滤（本来就该滤）+模型
+   text-only/thinking 空转+**等待期循环烧调用**。根治=停车机制（用户拍板
+   Claude Code 机制）：等待期零 LLM 调用、150ms 一拍挂起、事件/轮次/终局唤醒。
+   修复中再挖出**暂存不 park** 缺口：write 完 in/chat 没 submit 就 park，回复
+   迟到 30 秒直到人落子才被顺带提交——park 谓词必须含「无未提交暂存」。
+3. **一直 Write 不 Edit**：Write 对已存在文件放行→模型反复覆盖。根治=Write
+   只建新（对 /memory 已存在与 in/ 槽已暂存均报错指路 edit），edit 放开 in/ 槽
+   （apply_edit 复用）。tests/memory 同步改（覆盖写断言报错）。
+4. **每步写记忆浪费**：prompt 加 Memory is SCARCE 段+submit 报错明示 /memory
+   即写即存永不需 submit。真 LLM 实测通过（24 调用 8393/6715 tok 完整对局）。
+5. **「开局聊天」降软指标**：deepseek-v4.1-flash 连续两局不寒暄直接应手——
+   真实模型社交遵从度不可强制，聊天链路正确性由 mock e2e 确定性覆盖（19/19+
+   23/23 均含聊天往返），reallm 该断言改只记录不 FAIL。
+6. **验证方法沉淀**：GOPTOP_TRACE_BC=1 抓 send/recv 行是 BC 链路故障的第一
+   诊断手段（哪条消息哪个主题发了没收，一屏定位）；mock-llm 桩决策日志
+   （[mock-llm] 决策：xxx）同样让剧本断言失败可归因到桩还是循环。
+
