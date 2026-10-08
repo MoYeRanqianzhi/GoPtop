@@ -432,7 +432,7 @@ async fn execute_submit(
     let path = arg_str(args, "path")?;
     let Some(file) = classify_in(path) else {
         return Err(respond(format!(
-            "submit only commits staged actions under /game/in/ (move/chat/request/confirm/score/resign), got \"{path}\". Write the slot first, then submit it."
+            "submit only commits staged actions under /game/in/ (move/chat/request/confirm/score/resign), got \"{path}\". Write the slot first, then submit it. Note: /memory is your persistent long-term memory that survives across games and sessions — writes there are already live the moment you write them, and never need submit."
         )));
     };
     vfs::dispatch_submit(file, &*ctx.player, &ctx.staging, SUBMIT_SETTLE_MS)

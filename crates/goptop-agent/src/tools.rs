@@ -74,7 +74,7 @@ pub const TOOL_WRITE: ToolDef = ToolDef {
 - /memory/<path> = persistent memory, survives across games (e.g. opponent style notes). Path rules: no "..", no empty segments, <=256 chars. Limits: 256KB per file, 8MB total — on quota errors delete old files first. Receipt: {ok:true, path, bytes, usage}.
 - everything else (/game/status, /game/board*, /game/rules, /game/history*, /game/chat, /game/events, /index) is read-only and rejected.
 Format errors (e.g. invalid move text) are rejected at write; game-rule errors (not your turn, occupied point) surface at submit."#,
-    input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"absolute virtual path: /game/in/move|chat|request|confirm|score|resign to stage an action (then submit(path) to commit — submit clears the slot), or /memory/<path> for persistent memory (takes effect immediately, no submit needed)"},"content":{"type":"string","description":"whole new file content"}},"required":["path","content"]}"#,
+    input_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"absolute virtual path: /game/in/move|chat|request|confirm|score|resign to stage an action (then submit(path) to commit — submit clears the slot), or /memory/<path> for your persistent long-term memory that survives across games and sessions (takes effect immediately, no submit needed)"},"content":{"type":"string","description":"whole new file content"}},"required":["path","content"]}"#,
     read_only: false,
     scope: ToolScope::Shared,
 };

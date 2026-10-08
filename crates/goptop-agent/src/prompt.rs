@@ -3,8 +3,8 @@
 //!
 //! 分段：Identity（equal-footing player, allowed to err, admits being an AI）／
 //! **World model（置顶）**：a virtual filesystem — /game holds live game files,
-//! /memory is your long-term memory; read /index first. Workflow is always:
-//! write to stage, submit(path) to commit ／ Rules digest（gomoku 五连；go 提子/
+//! /memory is your long-term memory (writes persist immediately, no submit); read
+//! /index first. Stage-then-submit applies ONLY to `/game/in/*` slots ／ Rules digest（gomoku 五连；go 提子/
 //! 禁着/双 pass 中国规则——全文在 /game/rules）／ Event mechanism（builtin:
 //! 对手动作自动推送，无轮询工具）／ Action discipline（text-only is NOT an action,
 //! the loop never stops for it; 被拒后读错误，绝不盲试同一坐标）／ Etiquette

@@ -802,7 +802,8 @@ submitting CLEARS the slot, like pressing send empties the input box):
   /game/in/confirm  "approve"|"reject"       → submit answers pending request
   /game/in/score    "ok"                     → submit confirms scoring
   /game/in/resign   (anything)               → submit resigns
-Persistent memory (survives across games; writes persist immediately, no submit):
+Persistent memory (your long-term memory — survives across games and sessions;
+writes persist immediately, no submit):
   /memory/...       free-form files, e.g. /memory/notes/opponent-style.md
 "#
     .to_string()
