@@ -11,7 +11,8 @@
 - [x] 阶段③：接壳 + 唯一入口 AgentPage（/agent）+ 壳级 e2e（agent-builtin/agent-entry）
       + 两轮审查修复（157fb86 等）。
 - [x] 阶段④：MCP 出口（rmcp 3.2 streamable HTTP，feature mcp 仅桌面编译）+ MCP 连接卡
-      + agent-mcp.js e2e（b1365f2）。
+      + agent-mcp.js e2e（b1365f2）+ 审查修复（6f9326b：token 轮换重启联动、MCP 开机自启、
+      reallm 门槛盘面口径、e2e 真点击）+ 真 LLM 实测门槛通过（agent-reallm.js 真实完整对局）。
 - [x] 回归：`cargo test -p goptop-agent --features mcp` 100 绿、vitest 94/94
       （本轮实测口径，见记忆文件「数字与基线」）。
 - [x] 文档与记忆同步：使用指南补「Agent 对战」章；本轮落地记录入 memory/。
