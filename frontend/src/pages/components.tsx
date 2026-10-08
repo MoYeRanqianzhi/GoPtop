@@ -232,6 +232,11 @@ export function ChatPanel(props: {
 export type Role = "idle" | "inviter" | "invitee" | "spectator";
 export type Phase = "home" | "waiting" | "playing";
 
+/** 棋盘 SVG 几何（幽灵子覆盖层与 BoardSvg 共用的同一套常数；BoardSvg 内联了
+ *  同值常数，两处必须一起改——统一进 BoardSvg 导出会牵动它的既有 import 面）。 */
+const PAD = 30;
+const CELL = 36;
+
 /** 设置页持久化的默认规则/尺寸。 */
 export function loadDefaults(): { kind: GameKind; size: Size } {
   try {
@@ -435,6 +440,10 @@ export function BoardPanel(props: {
   /** 围棋终局计分：已标死子（红叉）与「可点已有点」开关，透传给棋盘。 */
   dead?: Coord[];
   allowOccupied?: boolean;
+  /** Agent 对战：对手暂存未提交的着子（agent_status 的 stagedMove）——画「幽灵子」
+   *  （半透明 + 橙色描边虚线圈，与黑白实子/悬停高亮都不同），人能提前看到 Agent
+   *  打算下哪。终局后不再画。 */
+  pendingStone?: Coord | null;
   /** 胜率面板；缺省表示本页未启用 AI 分析，底部不出现胜率入口。 */
   odds?: OddsPanelData;
 }) {
@@ -507,8 +516,40 @@ export function BoardPanel(props: {
         </div>
       </div>
 
-      <div className="board-wrap">
+      {/* position:relative 只为幽灵子覆盖层定位（pendingStone 缺省时无视觉差异）。
+          覆盖层不复用 BoardSvg：BoardSvg 没有「叠一颗额外子」的口子，而它的 SVG
+          是 .board-wrap 直系子（CSS 用 > 选择器定尺寸），包一层就会破坏布局——
+          所以在 board-wrap 上叠一张同几何的透明 SVG。几何常数（pad 30 / cell 36 /
+          viewBox = pad*2 + (size-1)*cell）与 BoardSvg 的契约一致（scripts/e2e/device.js
+          的 BOARD_PAD/BOARD_CELL 同源），改那边必须三处同步。 */}
+      <div className="board-wrap" style={{ position: "relative" }}>
         <BoardSvg size={size} board={board} onPlace={onPlace} lastMove={lastMove} hover={hover} onHover={onHover} disabled={disabled} kind={kind} dead={props.dead} allowOccupied={props.allowOccupied} />
+        {props.pendingStone && (
+          <div
+            aria-hidden="true"
+            /* 与 .board-wrap > .brutal-card 同盒（min(100cqw,100cqh) 正方形、居中），
+               内衬 14 = 卡片 border 4 + padding 10（brutal.css --border / .board-wrap 规则），
+               覆盖层 SVG 的 viewBox 映射才与卡内棋盘逐点重合（实测校准） */
+            style={{
+              position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)",
+              width: "min(100cqw, 100cqh)", aspectRatio: "1 / 1", padding: 14, pointerEvents: "none",
+            }}
+          >
+            <svg
+              viewBox={`0 0 ${PAD * 2 + (size - 1) * CELL} ${PAD * 2 + (size - 1) * CELL}`}
+              width="100%" height="100%" style={{ display: "block" }}
+            >
+              <circle
+                cx={PAD + props.pendingStone.x * CELL}
+                cy={PAD + props.pendingStone.y * CELL}
+                r={15}
+                fill={toMove === "black" ? "#0A0A0A" : "#FFFFFF"}
+                opacity={0.38}
+                stroke="#FF8C1A" strokeWidth={2.5} strokeDasharray="5 4"
+              />
+            </svg>
+          </div>
+        )}
       </div>
 
       {/* 底部（用户拍板 2026-09-07 / 2026-09-19）：宽时「规则」＋「对局/胜率」两张卡；

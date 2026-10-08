@@ -39,6 +39,13 @@ export interface GameSession {
    * （Android 转屏 / dev 刷新）永久漏一个僵尸会话。
    */
   dispose(): Promise<void>;
+  /**
+   * 原生会话表 id（`session_new` 回执的那个 u32）。**可选**：仅原生后端实现——
+   * AgentPage 建专用会话 A' 后要经 `agent_bind` 把它登记给 AgentHub（配对目标 +
+   * 拦截面豁免），而门面此前把这个 id 藏成了私有实现细节；wasm 后端没有原生
+   * 会话表，整个方法缺省（调用方用 `s.nativeId?.()` 容错）。
+   */
+  nativeId?(): number | null;
 
   create_invite(): void;
   accept_invite(inviterId: string, pwd: string | null, kind: string, size: number, rtc: string | null, spec: boolean): void;
@@ -155,15 +162,31 @@ class NativeSessionAdapter implements GameSession {
   private constructor(
     private readonly call: NativeCall,
     private readonly id: number,
+    /**
+     * 「快照变了」的通知。**可注入**：缺省回落 `window.goptopOnChange` 单槽——
+     * 主会话路径零行为变化。AgentPage 的专用会话 A' 必须注入自己的回调：单槽是
+     * 模块级唯一坑位，A' 若也走 window 钩子，每拍都会把主会话的订阅顶掉
+     * （谁后挂载谁赢，另一边从此收不到任何更新）。
+     */
+    private readonly onChange: () => void,
   ) {}
 
-  static async create(call: NativeCall, cfgJson: string, href: string): Promise<NativeSessionAdapter> {
+  static async create(call: NativeCall, cfgJson: string, href: string, onChange?: () => void): Promise<NativeSessionAdapter> {
     const raw = await call("session_new", JSON.stringify({ cfgJson, href }));
     const id = JSON.parse(raw) as number | null;
     // 建会话失败就抛：静默给个哑会话，上层会以为「连上了但什么都没发生」。
     // 回执原文一并带上：鸿蒙侧的失败形态是 {"error": …}，没有原文设备上无法归因。
     if (typeof id !== "number") throw new Error(`原生会话创建失败: ${raw}`);
-    const a = new NativeSessionAdapter(call, id);
+    const a = new NativeSessionAdapter(
+      call,
+      id,
+      // 缺省钩子**动态读** window.goptopOnChange（不能在构造时把当时的函数抄死）：
+      // useGameSession 是在 createSession 返回**之后**才挂载钩子的，抄死的话
+      // 主会话首拍之后的所有通知都会打进 undefined。
+      onChange ?? (() => {
+        (window as unknown as Record<string, (() => void) | undefined>).goptopOnChange?.();
+      }),
+    );
     await a.pump();
     return a;
   }
@@ -191,7 +214,7 @@ class NativeSessionAdapter implements GameSession {
     const changed = r.snapshot !== this.cached;
     this.cached = r.snapshot;
     // 变了才通知，与 wasm 侧「有变化才 Emit」一致（上层 setSnap 会触发重渲染）
-    if (changed) (window as unknown as Record<string, (() => void) | undefined>).goptopOnChange?.();
+    if (changed) this.onChange();
   }
 
   /**
@@ -253,6 +276,7 @@ class NativeSessionAdapter implements GameSession {
   }
 
   snapshot() { return this.cached; }
+  nativeId() { return this.id; }
   async state_json() { return await this.call("session_state_json", JSON.stringify({ id: this.id })); }
   async state_debug() { return await this.call("session_state_debug", JSON.stringify({ id: this.id })); }
   async ice_debug() { return await this.call("session_ice_debug", JSON.stringify({ id: this.id })); }
@@ -348,12 +372,18 @@ function loadTransport(): Promise<typeof import("../wasm/transport/goptop_transp
 /**
  * 建会话：**能跑原生代码的平台就不该跑 wasm**（与 `game/rules.ts` 的 `pickBackend` 同口径）。
  *
+ * `onChange` **可选注入**：给了就用它当「快照变了」的通知，不给回落
+ * `window.goptopOnChange` 单槽（主会话调用点全部不传，零行为变化）。AgentPage
+ * 的专用会话 A' 传自己的回调，与主会话互不顶槽。wasm 分支不收这个参数——
+ * wasm 侧的 Emit 钩子在 Rust 胶水里硬接 window.goptopOnChange，注入不进去
+ * （Agent 对战本阶段桌面专属，Web 整页降级，见 AgentPage 的 isTauri 门）。
+ *
  * wasm 分支用**动态 import**：静态 import 会让三端都把 `goptop_transport_bg.wasm`
  * 拉下来——那正是本轮要消掉的东西（安卓实测的资源时间线里它一直在）。
  */
-export async function createSession(cfgJson: string, href: string): Promise<GameSession> {
+export async function createSession(cfgJson: string, href: string, onChange?: () => void): Promise<GameSession> {
   const call = nativeCall();
-  if (call) return await NativeSessionAdapter.create(call, cfgJson, href);
+  if (call) return await NativeSessionAdapter.create(call, cfgJson, href, onChange);
   const mod = await loadTransport();
   return new WasmSessionAdapter(new mod.WasmSession(cfgJson));
 }

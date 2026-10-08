@@ -1,10 +1,11 @@
 /**
  * App 壳（Phase 4 页面拆分后）——对局状态机与信令编排全部在 state/useGameSession.tsx，
- * 页面在 pages/*（Menu/Local/P2p/Users/Settings/User/Watch），跨页复用组件在
+ * 页面在 pages/*（Menu/Local/Ai/Agent/P2p/Users/Settings/User/Watch），跨页复用组件在
  * pages/components.tsx，共用小组件（指示灯/URL 行/棋种选择器/弹窗横幅）在 components/，
  * 棋盘规则在 game/board.ts。本文件只做 --stack-max 同步、header（棋种/尺寸选择器 +
  * 菜单按钮）、页面拼装、chatDock 组装、弹窗/横幅挂载与 footer。
  * 页面壳布局样式（header 三级降级、底部三卡容器查询）在 styles/brutal.css 末尾。
+ * 例外：AgentPage（/agent）自带对局栈与侧栏，直接挂在 game-layout 下（不经主 play-stack）。
  */
 import { useEffect, useRef, useState } from "react";
 import { useGameSession } from "./state/useGameSession";
@@ -12,6 +13,7 @@ import { nav } from "./net/links";
 import { ChatPanel } from "./pages/components";
 import { LocalPage } from "./pages/LocalPage";
 import { AiPage } from "./pages/AiPage";
+import { AgentPage } from "./pages/AgentPage";
 import { MenuPage } from "./pages/MenuPage";
 import { P2pPage } from "./pages/P2pPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -251,6 +253,12 @@ export default function App() {
       <main ref={mainRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: mode === "menu" ? "center" : "flex-start", padding: "clamp(6px, 1.2vh, 12px) 12px clamp(6px, 1vh, 10px)", width: "100%", maxWidth: "none", margin: "0 auto", overflow: "hidden" }}>
         <div className="game-layout">
         <ConfirmBanner req={confirmReq} onApprove={confirmApprove} onDecline={confirmDecline} />
+
+        {/* —— Agent 对战 `/agent`：自带对局栈与侧栏（聊天/Agent 状态与棋盘并行，
+            不占棋盘的纵向预算——塞进 play-stack 会把 --stack-max 的实测挤塌） —— */}
+        {mode === "agent" && <AgentPage />}
+
+        {mode !== "agent" && (
         <div className="play-stack">
 
           {/* —— 菜单页 `/` —— */}
@@ -277,6 +285,7 @@ export default function App() {
           {/* —— 观战 `/watch/<game>` —— */}
           {mode === "watch" && <WatchPage s={s} />}
         </div>
+        )}
         {chatDock}
         </div>
         {chatModal}

@@ -1,9 +1,10 @@
 /**
  * net/links — URL 模型（路径风格）、链接解析与站内导航。
  *
- * - `/`              菜单页（本地对战 / 人机对战 / P2P 对战 / 在线用户 / 设置）
+ * - `/`              菜单页（本地对战 / 人机对战 / Agent 对战 / P2P 对战 / 在线用户 / 设置）
  * - `/local`         本地对战
  * - `/ai`            人机对战（本地离线 AI 对手，引擎跑在 Web Worker 里）
+ * - `/agent`         Agent 对战（对面坐的是 LLM Agent / 外部 MCP Agent；仅桌面壳可用）
  * - `/p2p`           P2P 对战大厅
  * - `/users`         在线用户
  * - `/settings`      设置（含 STUN 线路：内置线路开关 + 自定义线路）
@@ -27,6 +28,7 @@ export type UrlIntent =
   | { mode: "menu" }
   | { mode: "local" }
   | { mode: "ai" }
+  | { mode: "agent" }
   | { mode: "p2p" }
   | { mode: "users" }
   | { mode: "settings" }
@@ -65,6 +67,7 @@ export function parseUrl(): UrlIntent {
     const [first, second] = segs;
     if (first === "local" && segs.length === 1) return { mode: "local" };
     if (first === "ai" && segs.length === 1) return { mode: "ai" };
+    if (first === "agent" && segs.length === 1) return { mode: "agent" };
     if (first === "p2p" && segs.length === 1) return { mode: "p2p" };
     if (first === "users" && segs.length === 1) return { mode: "users" };
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
@@ -255,6 +258,7 @@ export function parsePastedLink(text: string): UrlIntent | null {
     const [first, second] = segs;
     if (first === "local" && segs.length === 1) return { mode: "local" };
     if (first === "ai" && segs.length === 1) return { mode: "ai" };
+    if (first === "agent" && segs.length === 1) return { mode: "agent" };
     if (first === "p2p" && segs.length === 1) return { mode: "p2p" };
     if (first === "users" && segs.length === 1) return { mode: "users" };
     if (first === "settings" && segs.length === 1) return { mode: "settings" };
