@@ -62,7 +62,7 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
                     }
                 }
             }
-            Effect::JoinChannel(name) => io::bc::join(core, &name),
+            Effect::JoinChannel(name) => io::bc::join_topic(core, &name),
             // **有意为空**：native 只有一个进程内广播订阅（`start_presence` 建的），
             // 它同时承载 presence 与对局消息；wasm 侧 `LeaveChannel` 关的是独立的
             // `goptop-game-{gid}` channel，presence channel 不受影响。这里若跟着撤掉
@@ -113,10 +113,9 @@ pub fn run_effects(core: &SharedCore, host: &Arc<dyn Host>, effects: Vec<Effect>
             }
 
             Effect::Broadcast(msg) => {
-                let bc = core.lock().ok().and_then(|c| c.presence.as_ref().map(|b| b.clone_handle()));
-                if let Some(bc) = bc {
-                    bc.send(serde_json::to_value(&msg).unwrap_or(serde_json::Value::Null));
-                }
+                // BC 腿走**对局主题**（旧实现挂在 presence 主题上——全局收音，
+                // 旧局的离场广播会污染同进程新局，2026-10-08 重大 bug 的根因）。
+                io::bc::send_game(core, serde_json::to_value(&msg).unwrap_or(serde_json::Value::Null));
                 io::rtc::broadcast(core, &msg);
                 // 服务器 relay 兜底 —— 与 wasm 侧的三链路（BC + DC + relay）逐条对齐。
                 // **漏掉这一条不会报任何错**：服务器模式下 DC 建不起来（无 TURN 的 NAT

@@ -24,18 +24,32 @@ use tokio::sync::broadcast;
 
 use crate::SharedCore;
 
-/// 广播载荷：`(发送者 userId, 文本)`。
+/// 广播载荷：`(主题, 发送者 userId, 文本)`。
 ///
 /// **必须带发送者**：浏览器的 `BroadcastChannel` 不回送给发送者自己，状态机因此
 /// 从不自过滤。进程内广播若原样回送，发送端会把自己的消息再处理一遍、又发一次，
 /// 形成回路——实测表现为「A 同时发出 accept 与 reject」，对端刚进对局就被踢回主页。
-type Payload = (String, String);
+///
+/// **必须带主题**（用户拍板 2026-10-08 重大 bug 的根治）：旧实现全局单频道，
+/// 旧局的离场/认输广播会被同进程**新开的对局会话**当成自己的对局消息（空盘
+/// 「黑胜」直接终局）——正是 bc.rs 顶部记录过的跨局串扰缺口。主题=presence
+/// 常驻频道或 `goptop-game-{gameId}` 对局频道，投递按会话的主题允许集过滤
+/// （与 wasm 侧 per-game BroadcastChannel 同构）。
+type Payload = (String, String, String);
+
+/// presence 常驻主题（announce/challenge/peers——全大厅共享）。
+pub const PRESENCE_TOPIC: &str = "goptop-presence-v1";
+
+/// 对局主题名（与 wasm 侧 `goptop-game-{gameId}` 频道名同构）。
+fn game_topic(game_id: &str) -> String {
+    format!("goptop-game-{game_id}")
+}
 
 /// **进程内共享**的广播通道。
 ///
 /// 关键：不能每个 `Core` 各建一个——那样同进程里的两个会话（同机双窗口、无头测试的
 /// 两端）永远收不到对方的消息，而 wasm 侧 BroadcastChannel 恰恰是同源页面互通的。
-/// 用一个全局 channel 才能对等实现「同源广播」的语义。
+/// 用一个全局 channel 才能对等实现「同源广播」的语义。跨局隔离靠主题过滤（见上）。
 fn hub() -> &'static broadcast::Sender<Payload> {
     static HUB: OnceLock<broadcast::Sender<Payload>> = OnceLock::new();
     HUB.get_or_init(|| broadcast::channel::<Payload>(256).0)
@@ -43,6 +57,7 @@ fn hub() -> &'static broadcast::Sender<Payload> {
 
 /// 进程内广播通道句柄。
 pub struct Bc {
+    /// 本句柄的发送主题（presence 句柄=常驻主题）。
     name: String,
     /// 本会话的 userId：发送时带上，供订阅端过滤自己。
     me: String,
@@ -54,7 +69,7 @@ impl Bc {
         if std::env::var("GOPTOP_TRACE_BC").is_ok() {
             eprintln!("[bc {} send {}] {}", self.name, self.me, v.to_string().chars().take(160).collect::<String>());
         }
-        let _ = hub().send((self.me.clone(), v.to_string()));
+        let _ = hub().send((self.name.clone(), self.me.clone(), v.to_string()));
     }
 
     /// 关闭通道：**当前无调用点**（`bridge` 的 `LeaveChannel` 有意不再撤订阅，见那里的
@@ -66,19 +81,20 @@ impl Bc {
 
     /// 克隆一个发送端句柄（`Effect::Broadcast` 要在不持 Core 锁的情况下发）。
     pub fn clone_handle(&self) -> BcHandle {
-        BcHandle { me: self.me.clone() }
+        BcHandle { name: self.name.clone(), me: self.me.clone() }
     }
 }
 
 /// 脱离 Core 生命周期的发送句柄。
 #[derive(Clone)]
 pub struct BcHandle {
+    name: String,
     me: String,
 }
 
 impl BcHandle {
     pub fn send(&self, v: serde_json::Value) {
-        let _ = hub().send((self.me.clone(), v.to_string()));
+        let _ = hub().send((self.name.clone(), self.me.clone(), v.to_string()));
     }
 }
 
@@ -89,7 +105,9 @@ impl BcHandle {
 /// 「challenge 被受理 4 次」，而受理之后残留的重复处理又发 reject，
 /// 把刚进对局的受邀者踢回主页。
 ///
-/// `name` 目前只用于标识（native 单实例下无路由意义），保留是为了与 wasm 侧签名一致。
+/// `name` = 本会话的 presence 主题（常驻收信集的第一员）。对局主题经
+/// [`join_topic`] 在 `Effect::JoinChannel` 时追加——**只扩允许集，不新挂订阅者**：
+/// 订阅必须幂等（见下），主题集的增减天然幂等。
 pub fn join(core: &SharedCore, name: &str) {
     // 订阅拿到手就先占位，**登记与检查必须在同一把锁里**：分两步（先查、出锁、再登记）
     // 的话，两个并发泵（`cmd` 的同步泵与 50ms 后台泵同时跑）会各自通过检查、各挂一个
@@ -99,10 +117,17 @@ pub fn join(core: &SharedCore, name: &str) {
     let (me, stop) = {
         let Ok(mut c) = core.lock() else { return };
         if c.presence.is_some() {
+            // 重复 join：只补主题（JoinChannel 与 bind 并发到达时允许集不丢项）。
+            if let Ok(mut t) = c.bc_topics.lock() {
+                t.insert(name.to_string());
+            }
             return;
         }
         let me = c.session.user_id.clone();
         c.presence = Some(Bc { name: name.to_string(), me: me.clone() });
+        if let Ok(mut t) = c.bc_topics.lock() {
+            t.insert(name.to_string());
+        }
         (me, c.stop.clone())
     };
 
@@ -124,9 +149,18 @@ pub fn join(core: &SharedCore, name: &str) {
                 got = rx.recv() => got,
             };
             match got {
-                Ok((from, text)) => {
-                    // 不回送发送者自己——对齐 BroadcastChannel 语义（见 Payload 的说明）
+                Ok((topic, from, text)) => {
+                    // 不回送发送者自己——对齐 BroadcastChannel 语义（见 Payload 的说明）；
+                    // 主题不在允许集 → 别的局的流量，整条忽略（跨局串扰的根治点）。
                     if from == me {
+                        continue;
+                    }
+                    let allowed = sub
+                        .lock()
+                        .ok()
+                        .and_then(|c| c.bc_topics.lock().ok().map(|t| t.contains(&topic)))
+                        .unwrap_or(false);
+                    if !allowed {
                         continue;
                     }
                     presence::on_presence_text(&sub, &me, &text);
@@ -147,7 +181,43 @@ pub fn join(core: &SharedCore, name: &str) {
 
 /// 启动 presence（与 wasm 侧 `start_presence` 对应）。
 pub fn start_presence(core: &Arc<std::sync::Mutex<crate::Core>>) {
-    join(core, "goptop-presence-v1");
+    join(core, PRESENCE_TOPIC);
+}
+
+/// 追加收信主题（`Effect::JoinChannel` 的对局频道）——只扩允许集，不新挂订阅
+///（订阅幂等的理由见 [`join`]）。对局两端的 gameId 在握手后一致，主题一致。
+///
+/// `name` 是状态机给的**裸 gameId**，这里拼上 `goptop-game-` 前缀——与 wasm 侧
+/// `bridge`（`format!("goptop-game-{gid}")`）同构：transport 层负责频道名的
+/// 组装，[`send_game`] 发的主题同样经 [`game_topic`]，两侧必须逐字一致，
+/// 否则允许集过滤会把对局消息全部静默丢弃（实测：BC 主题化第一版漏拼前缀，
+/// 发送正常、接收零投递，headless 三用例超时/断言失败）。
+pub fn join_topic(core: &SharedCore, name: &str) {
+    let topic = game_topic(name);
+    if let Ok(c) = core.lock() {
+        if let Ok(mut t) = c.bc_topics.lock() {
+            t.insert(topic);
+        }
+    }
+}
+
+/// 对局消息发送（`Effect::Broadcast` 的 BC 腿）：主题=本局 gameId 频道。
+/// 不在对局（无 gameId）→ 静默丢弃——对局消息只该在对局主题上飞。
+pub fn send_game(core: &SharedCore, v: serde_json::Value) {
+    let Ok(c) = core.lock() else { return };
+    let Some(game_id) = c.session.game_id.as_deref().filter(|g| !g.is_empty()) else {
+        if std::env::var("GOPTOP_TRACE_BC").is_ok() {
+            eprintln!("[bc send_game] 丢弃：无 gameId");
+        }
+        return;
+    };
+    let topic = game_topic(game_id);
+    let me = c.session.user_id.clone();
+    drop(c);
+    if std::env::var("GOPTOP_TRACE_BC").is_ok() {
+        eprintln!("[bc {topic} send {me}] {}", v.to_string().chars().take(160).collect::<String>());
+    }
+    let _ = hub().send((topic, me, v.to_string()));
 }
 
 /// presence 文本 → 事件（与 wasm 侧 `io/mod.rs::start_presence` 的分类逐条对应）。
@@ -255,7 +325,7 @@ mod tests {
         // 同步连发 260 条噪声（hub 容量 256，必然制造 Lagged）。噪声既无 `t`
         // 也无 `kind`/`sender`，分类器整条忽略，不会污染队列。
         for i in 0..260u64 {
-            let _ = hub().send(("other".into(), i.to_string()));
+            let _ = hub().send((crate::io::bc::PRESENCE_TOPIC.to_string(), "other".into(), i.to_string()));
         }
         // 给订阅任务时间消化积压（经历 Lagged）
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -266,12 +336,47 @@ mod tests {
             "t": "challenge", "to": "u-lag", "from": "other", "fromName": "对手",
             "kind": "gomoku", "size": 15, "gameId": "g-lag",
         });
-        hub().send(("other".into(), challenge.to_string())).expect("订阅任务应仍在订阅");
+        hub().send((crate::io::bc::PRESENCE_TOPIC.to_string(), "other".into(), challenge.to_string())).expect("订阅任务应仍在订阅");
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let got = core.lock().unwrap().queue.iter().any(|ev| {
             matches!(ev, Event::Presence(PresenceEvt::Challenge { .. }))
         });
         assert!(got, "Lagged 之后订阅必须继续：challenge 应进队列");
+    }
+
+    /// 跨局隔离：别的局（主题不在允许集）的对局消息不得进本会话；本局主题
+    /// 加入后才收。这是 2026-10-08「空盘黑胜」串扰事故的回归锁——旧全局
+    /// hub 下任何一局广播全体会话都收，新局把旧局消息当成自己的对局消息。
+    ///
+    /// 顺带锁 `join_topic` 的**前缀拼装**：状态机给的是裸 gameId，允许集里存的
+    /// 必须是与 `send_game` 发送侧逐字一致的 `goptop-game-{gid}`（第一版漏拼
+    /// 前缀，发送正常、接收零投递）。
+    #[tokio::test]
+    async fn 对局消息按主题隔离_加入本局主题后才收() {
+        let core = test_support::core("u-iso");
+        join(&core, "goptop-presence-v1");
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        let game_msg = serde_json::json!({
+            "kind": { "type": "Chat", "text": "hi" },
+            "sender": "p-other", "seq": 1u32, "userId": "u-other",
+        })
+        .to_string();
+
+        // 别人的局的广播：主题不在允许集，必须整条丢弃（队列空）。
+        hub().send(("goptop-game-g-other".into(), "u-other".into(), game_msg.clone()))
+            .expect("发送应有订阅者");
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let leaked = core.lock().unwrap().queue.iter().any(|ev| matches!(ev, Event::Net(_)));
+        assert!(!leaked, "别局的对局消息不得进本会话（跨局串扰的根治点）");
+
+        // 加入本局主题（裸 gameId，与状态机 JoinChannel 的载荷一致）后再发：应进队列。
+        join_topic(&core, "g-mine");
+        hub().send(("goptop-game-g-mine".into(), "u-other".into(), game_msg))
+            .expect("发送应有订阅者");
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let got = core.lock().unwrap().queue.iter().any(|ev| matches!(ev, Event::Net(_)));
+        assert!(got, "本局主题的对局消息必须进队列——join_topic 漏拼前缀时此处失败");
     }
 }

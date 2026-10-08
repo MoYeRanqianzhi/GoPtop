@@ -68,6 +68,7 @@ impl NativeSession {
             queue: std::collections::VecDeque::new(),
             peers: Vec::new(),
             presence: None,
+            bc_topics: std::sync::Mutex::new(std::collections::HashSet::new()),
             ws: None,
             // 与 self.stop 同一个 Arc：会话释放时不止后台泵，bc 订阅与 ws 重连
             // 任务也得跟着退（它们各自的旧退出条件在这进程里等不到，见 Core.stop）。

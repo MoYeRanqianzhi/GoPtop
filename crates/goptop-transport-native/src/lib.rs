@@ -56,6 +56,10 @@ pub struct Core {
     pub peers: Vec<(String, io::rtc::RtcPeer)>,
     /// 同源 presence 通道（native 单实例下同进程广播，见 io/bc.rs）。
     pub presence: Option<io::bc::Bc>,
+    /// 本会话**允许收信的 BC 主题集**（presence 常驻 + JoinChannel 的对局频道）。
+    /// 投递按集过滤——跨局串扰（R5/2026-10-08 重大 bug：旧局的认输广播被新局
+    /// 当成自己的对局消息，空盘「黑胜」）的根治就是 per-game topic。
+    pub bc_topics: std::sync::Mutex<std::collections::HashSet<String>>,
     /// 服务器 WS。
     pub ws: Option<io::ws::ServerSocket>,
     /// 会话停机标志，与 `NativeSession::drop` 置位的是**同一个** `Arc`。
@@ -179,6 +183,7 @@ pub(crate) mod test_support {
             queue: VecDeque::new(),
             peers: Vec::new(),
             presence: None,
+            bc_topics: std::sync::Mutex::new(std::collections::HashSet::new()),
             ws: None,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
