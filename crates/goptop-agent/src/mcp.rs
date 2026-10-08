@@ -454,6 +454,7 @@ impl McpHandler {
             driver: Driver::Mcp,
             subagent_enabled: false,
             subagent: None,
+            on_tool: None, // MCP 出口的回执面在 tools/call 响应上；环由宿主按需接
         };
         let mut g = self.shared.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         g.live = Some(LiveGame { front: paired.front, ctx, pump });

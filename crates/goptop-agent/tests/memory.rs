@@ -45,6 +45,7 @@ fn ctx() -> ToolCtx {
         driver: goptop_agent::Driver::Builtin,
         subagent_enabled: false,
         subagent: None,
+        on_tool: None,
     }
 }
 

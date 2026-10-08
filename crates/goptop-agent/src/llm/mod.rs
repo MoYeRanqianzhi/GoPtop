@@ -368,6 +368,15 @@ pub(crate) fn classify_status(status: u16, body: &str) -> LlmError {
     if status == 400 && is_context_overflow(body) {
         return LlmError::ContextWindowExceeded { model_limit: parse_model_limit(body) };
     }
+    // 404 几乎总是「路径拼错」而非服务不存在：三协议的版本段都在 base_url 里
+    // （Anthropic 约定 base 含 /v1，PATH 只是 /messages）——实测网关会把裸 host 的
+    // /messages 打到自家网页路由上回整页 HTML，这里直接把排查方向写给人看。
+    if status == 404 {
+        return LlmError::Fatal(format!(
+            "HTTP 404：端点不存在——检查 baseURL 是否含版本段（如 …/v1）与路径拼接：{}",
+            excerpt(body)
+        ));
+    }
     LlmError::Fatal(format!("HTTP {status}: {}", excerpt(body)))
 }
 

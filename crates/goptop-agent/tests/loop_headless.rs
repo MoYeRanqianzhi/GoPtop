@@ -162,6 +162,7 @@ async fn rig(kind: &str, size: u16, my_color: SeatColor) -> Rig {
         driver: Driver::Builtin,
         subagent_enabled: false,
         subagent: None,
+        on_tool: None,
     };
     Rig { front, ctx, queue }
 }
@@ -192,6 +193,7 @@ fn home_ctx() -> ToolCtx {
         driver: Driver::Builtin,
         subagent_enabled: false,
         subagent: None,
+        on_tool: None,
     }
 }
 
@@ -207,6 +209,7 @@ fn clone_ctx(c: &ToolCtx) -> ToolCtx {
         driver: c.driver,
         subagent_enabled: c.subagent_enabled,
         subagent: c.subagent.clone(),
+        on_tool: c.on_tool.clone(),
     }
 }
 

@@ -229,17 +229,19 @@ async function diagDump(ep) {
     check("提交后实子上盘（手数=2）", mc2, `手数=${await moveCount(ep)}`);
     check("提交后幽灵子消失", ghostGone);
 
-    // 工具日志与用量：日志有 llm 行、调用计数 > 0
+    // 工具日志与用量：操作式日志（Read/Submit）在案、llm HTTP 行不上屏、调用计数 > 0
     const stat = await ep.page.evaluate(() => {
       const t = document.body.innerText;
       return {
         calls: Number(t.match(/LLM 调用 (\d+)/)?.[1] ?? -1),
-        llmLog: /\[llm\]/.test(t),
-        moveLog: /\[submit:move\]/.test(t),
-        chatLog: /\[submit:chat\]/.test(t),
+        opLog: /(Read|Write|Wait)\(/.test(t),
+        llmLineGone: !/\[llm\]/.test(t),
+        moveLog: /Submit\(落子/.test(t),
+        chatLog: /Submit\(发送消息/.test(t),
       };
     });
-    check("工具日志增长（llm 行）", stat.calls > 0 && stat.llmLog, `LLM 调用=${stat.calls} llm行=${stat.llmLog}`);
+    check("工具日志为操作式（Read/Write/Wait 在案）", stat.calls > 0 && stat.opLog, `LLM 调用=${stat.calls} 操作行=${stat.opLog}`);
+    check("llm HTTP 行不再上屏", stat.llmLineGone, `llmLineGone=${stat.llmLineGone}`);
     check("工具日志含落子/聊天动作行", stat.moveLog || stat.chatLog, JSON.stringify(stat));
 
     // 聊天往返：人发一句，Agent 剧本回一句

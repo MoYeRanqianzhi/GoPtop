@@ -178,9 +178,13 @@ describe("agentStateLabel / formatAgentEvent", () => {
     expect(agentStateLabel("future_state")).toBe("future_state");
   });
 
-  it("日志行：失败带标记、正常带耗时", () => {
-    expect(formatAgentEvent({ ts: 1, tool: "submit", ok: true, ms: 412, summary: "落子 (7,7)" })).toBe("[submit] 落子 (7,7) · 412ms");
-    expect(formatAgentEvent({ ts: 2, tool: "write", ok: false, ms: 3, summary: "(7,7) 已被占" })).toBe("[write] (7,7) 已被占 · 失败 · 3ms");
+  it("日志行：操作式排版 Read/Write/Submit，失败缀 ×，耗时与 llm 行不上屏", () => {
+    expect(formatAgentEvent({ ts: 1, tool: "submit:move", ok: true, ms: 412, summary: "落子 (7,7)" })).toBe("Submit(落子 (7,7))");
+    expect(formatAgentEvent({ ts: 2, tool: "read", ok: true, ms: 3, summary: "/game/board" })).toBe("Read(/game/board)");
+    expect(formatAgentEvent({ ts: 3, tool: "write", ok: true, ms: 3, summary: "/memory/notes/style.md" })).toBe("Write(/memory/notes/style.md)");
+    expect(formatAgentEvent({ ts: 4, tool: "edit", ok: false, ms: 3, summary: "/memory/x" })).toBe("Edit(/memory/x) ×");
+    expect(formatAgentEvent({ ts: 5, tool: "grep", ok: true, ms: 3, summary: "● @ /game/history" })).toBe("Grep(● @ /game/history)");
+    expect(formatAgentEvent({ ts: 6, tool: "wait_events", ok: true, ms: 3000, summary: "timeout=25" })).toBe("Wait(timeout=25)");
   });
 });
 

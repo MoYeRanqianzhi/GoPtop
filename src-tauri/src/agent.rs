@@ -778,6 +778,14 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
         driver: Driver::Builtin,
         subagent_enabled,
         subagent: None,
+        on_tool: {
+            // 注册表工具（read/write/edit/grep/wait_events/delegate）进同一份环；
+            // submit 不走这里（LogPlayer 的 cmd 落账已覆盖，重复即两行一动作）。
+            let ring = Arc::clone(&run.events);
+            Some(Arc::new(move |tool: &str, ok: bool, ms: u64, summary: &str| {
+                ring.push(tool, ok, ms, summary.to_string());
+            }) as Arc<dyn Fn(&str, bool, u64, &str) + Send + Sync>)
+        },
     };
     // 子代理的 ctx 先建（subagent=None——深度 1 的结构保证）；主 ctx 持 runner。
     let sub_ctx = make_ctx();

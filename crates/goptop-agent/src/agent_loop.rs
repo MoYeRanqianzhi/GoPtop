@@ -307,7 +307,17 @@ limit, so its arguments may be truncated. Re-issue the tool call with complete a
         let mut blocks: Vec<Block> = Vec::new();
         let mut resigned = false;
         for call in &resp.tool_calls {
-            match registry::execute(&call.name, &call.arguments, &tools).await {
+            let t0 = crate::time_compat::now_ms();
+            let res = registry::execute(&call.name, &call.arguments, &tools).await;
+            if let Some(hook) = &tools.on_tool {
+                // submit 不回调：它落成的 UiCommand 已由宿主侧 LogPlayer 记账
+                //（ToolCtx.on_tool 的 doc）；llm 调用走 LogHttp，也不经这里。
+                if call.name != crate::tools::TOOL_SUBMIT.name {
+                    let ms = crate::time_compat::now_ms() - t0;
+                    hook(&call.name, res.is_ok(), ms, &registry::args_summary(&call.arguments));
+                }
+            }
+            match res {
                 Ok(v) => {
                     if is_resign_submit(call) {
                         resigned = true;

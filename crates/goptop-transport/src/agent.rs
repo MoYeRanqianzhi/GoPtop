@@ -877,6 +877,13 @@ async fn run_builtin_task(run: Arc<Run>, cfg: StartCfg, seat: SeatColor) {
         driver: Driver::Builtin,
         subagent_enabled,
         subagent: None,
+        on_tool: {
+            // 与桌面 AgentHub 同款：注册表工具进同一份环；submit 由 LogPlayer 记账。
+            let ring = Arc::clone(&run.events);
+            Some(Arc::new(move |tool: &str, ok: bool, ms: u64, summary: &str| {
+                ring.push(tool, ok, ms, summary.to_string());
+            }) as Arc<dyn Fn(&str, bool, u64, &str) + Send + Sync>)
+        },
     };
     let sub_ctx = make_ctx();
     let mut ctx = make_ctx();

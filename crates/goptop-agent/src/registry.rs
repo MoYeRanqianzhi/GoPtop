@@ -128,7 +128,15 @@ pub struct ToolCtx {
     /// delegate 的执行体（见 [`SubagentRunner`]；`None`=开关虽开但未装配——回模型
     /// 而非 Fatal，装配缺口不该炸掉整局）。
     pub subagent: Option<Arc<dyn SubagentRunner>>,
+    /// 工具调用日志钩子：主循环每次 execute 后回调 (工具名, 是否成功, 耗时 ms,
+    /// 参数摘要)。宿主接它进 agent_events 环——**submit 不回调**：submit 落成的
+    /// UiCommand 已由宿主侧 LogPlayer 记账，两边都记就是同一个动作两行日志。
+    /// `None`=静默（测试 / MCP 出口自有自己的记账面）。
+    pub on_tool: Option<ToolLogHook>,
 }
+
+/// [`ToolCtx::on_tool`] 的类型（clippy 复杂类型告警的整形别名）。
+pub type ToolLogHook = Arc<dyn Fn(&str, bool, u64, &str) + Send + Sync>;
 
 impl Clone for ToolCtx {
     /// 字段全是 `Arc`/句柄/`&'static str`：克隆廉价且**共享同一局**（同一会话、
@@ -145,8 +153,39 @@ impl Clone for ToolCtx {
             driver: self.driver,
             subagent_enabled: self.subagent_enabled,
             subagent: self.subagent.clone(),
+            on_tool: self.on_tool.clone(),
         }
     }
+}
+
+/// 参数摘要（工具日志用）：优先语义字段（path/pattern/task），其余压成短 JSON。
+/// 这是给人看的进度条，不是参数回放——全文模型自己刚发过。
+pub(crate) fn args_summary(args: &serde_json::Value) -> String {
+    fn clip(s: &str) -> String {
+        let t = s.trim();
+        if t.chars().count() > 40 {
+            format!("{}…", t.chars().take(40).collect::<String>())
+        } else {
+            t.to_string()
+        }
+    }
+    if let Some(p) = args["pattern"].as_str() {
+        // grep：pattern + 搜索范围（它的第二个参数也叫 path，组合才有意义）
+        return match args["path"].as_str() {
+            Some(scope) => clip(&format!("{p} @ {scope}")),
+            None => clip(p),
+        };
+    }
+    if let Some(p) = args["path"].as_str() {
+        return clip(p);
+    }
+    if let Some(t) = args["task"].as_str() {
+        return clip(t);
+    }
+    if let Some(n) = args["timeout_secs"].as_u64() {
+        return format!("timeout={n}");
+    }
+    clip(&args.to_string())
 }
 
 /// 工具执行的一口分发。

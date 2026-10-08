@@ -232,9 +232,24 @@ export function agentStateLabel(state: string): string {
 /** `agent_events` 的一条工具日志。 */
 export type AgentEventItem = { ts: number; tool: string; ok: boolean; ms: number; summary: string };
 
-/** 日志行的统一排版（mono 一行：工具 摘要 失败标记 耗时）。 */
+/** 日志行的操作式排版（pi / claude code 风格）：Read(/game/board)、Write(/memory/x)、
+ *  Submit(落子 (7,7))。llm HTTP 行不进日志（是噪音，次数在统计行——过滤在渲染处）；
+ *  耗时也不上屏（数据里在）。失败一律缀 ×。 */
+const OP_LABEL: Record<string, string> = {
+  read: "Read",
+  write: "Write",
+  edit: "Edit",
+  grep: "Grep",
+  wait_events: "Wait",
+  delegate: "Delegate",
+  game_start: "Start",
+  game_leave: "Leave",
+};
 export function formatAgentEvent(e: AgentEventItem): string {
-  return `[${e.tool}] ${e.summary}${e.ok ? "" : " · 失败"} · ${e.ms}ms`;
+  const op = OP_LABEL[e.tool];
+  const mark = e.ok ? "" : " ×";
+  if (op) return `${op}(${e.summary})${mark}`;
+  return `Submit(${e.summary})${mark}`;
 }
 
 /** .mcp.json 连接串（一键复制给外部 MCP 客户端）。 */
@@ -362,6 +377,8 @@ export function AgentPage() {
   const [snap, setSnap] = useState<AgentSnap | null>(null);
   const [status, setStatus] = useState<AgentStatus>(EMPTY_STATUS);
   const [events, setEvents] = useState<AgentEventItem[]>([]);
+  const [logOpen, setLogOpen] = useState(true);
+  const logRef = useRef<HTMLDivElement | null>(null);
   const [err, setErr] = useState<string | null>(null);
   /** 过程提示（停止成功等中性信息；err 专司失败，红色）。 */
   const [notice, setNotice] = useState<string | null>(null);
@@ -761,6 +778,13 @@ export function AgentPage() {
   const errNote = status.state === "error" && status.detail ? status.detail.split("\n")[0].slice(0, 80) : "";
   const statusNote = errNote || `执${myColor === "black" ? "黑" : "白"}`;
   const running = phase !== "setup";
+  /* 工具日志显示面：llm HTTP 行不上屏（次数在统计行）；只渲染尾部 60 条。 */
+  const logEvents = useMemo(() => events.filter((e) => e.tool !== "llm").slice(-60), [events]);
+  // 新事件自动置底：人只关心最新动作（无此逻辑时滚动条停原位，最新内容在视口外）
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logEvents.length, logOpen]);
   /* 页面启用态：桌面原生或 web 后端其一就绪即可用；横幅只在两头都不可用时出
      （鸿蒙壳 / web 产物未带 agent 导出）。 */
   const { enabled, banner } = agentPageMode(native, webOk);
@@ -1039,6 +1063,9 @@ export function AgentPage() {
           </span>
         )}
         <span style={{ flex: 1 }} />
+        <button className="brutal-btn brutal-btn--sm" aria-pressed={logOpen} title="收起/展开 Agent 的操作日志" onClick={() => setLogOpen((v) => !v)}>
+          {logOpen ? "收日志" : "日志"}
+        </button>
         <button
           className="brutal-btn brutal-btn--sm"
           title="认输并终止 Agent（后端先 resign 再清理）"
@@ -1062,17 +1089,21 @@ export function AgentPage() {
         <span>输出 {status.tokensOut} tok</span>
         <span>压缩 {status.compactions} 次</span>
       </div>
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)", maxHeight: 130, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
-        {events.length === 0 ? (
-          <span>暂无工具日志</span>
-        ) : (
-          events.map((e, i) => (
-            <span key={`${e.ts}-${i}`} style={{ overflowWrap: "anywhere", color: e.ok ? "var(--muted)" : "#b00020" }}>
-              {formatAgentEvent(e)}
-            </span>
-          ))
-        )}
-      </div>
+      {logOpen && (
+        /* 滚动条隐藏（.agent-log）；新事件自动置底——人只关心最新动作。
+           只渲染尾部 60 条：环有界但 DOM 无界一样会拖慢页面。llm 行不进日志。 */
+        <div ref={logRef} className="agent-log" style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: "var(--muted)", maxHeight: 130, display: "flex", flexDirection: "column", gap: 2 }}>
+          {logEvents.length === 0 ? (
+            <span>暂无操作日志</span>
+          ) : (
+            logEvents.map((e, i) => (
+              <span key={`${e.ts}-${i}`} style={{ overflowWrap: "anywhere", color: e.ok ? "var(--muted)" : "#b00020" }}>
+                {formatAgentEvent(e)}
+              </span>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 

@@ -326,3 +326,8 @@ html.app-tauri .poster-strip { padding-right: 138px; }
    切换瞬间棋盘跳 50px。以「规则」卡为准压低，压出来的空间全归棋盘。
    宽屏两卡并排时同样受此约束（flex stretch 只管等高，管不了整体多高）。 */
 .bp-wide, .bp-swap { height: var(--bp-h, 130px); }
+
+/* Agent 工具日志（用户拍板 2026-10-08）：滚动条不上屏——视觉噪音且新内容靠 JS
+   自动置底（AgentPage 的 logRef effect），滚轮/触控板仍可回看历史。 */
+.agent-log { overflow-y: auto; scrollbar-width: none; }
+.agent-log::-webkit-scrollbar { display: none; }
