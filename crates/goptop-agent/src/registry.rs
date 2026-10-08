@@ -49,6 +49,11 @@ const MAX_GREP_MATCHES: usize = 200;
 /// grep 单行回传的字符上限（grid/history 行可能极长，模型要的是定位不是全文）。
 const MAX_GREP_LINE_CHARS: usize = 240;
 
+/// game_start 在「既无活局也无待局」时的业务错误文案（计划语义：人侧未就绪是
+/// 正常流程，回业务错误文本、非 Fatal）。工具面（[`execute_game_start`]）与
+/// mcp 出口的 handler 前置（mcp.rs）共用这一份，两处永不漂移。
+pub const GAME_START_NO_GAME: &str = "no game to claim yet — the user starts the pairing from the AgentPage (kind/size/color are chosen there). Retry game_start once a game is being set up.";
+
 /// 工具执行错误的两型。
 #[derive(Debug, Clone)]
 pub enum ToolError {
@@ -117,6 +122,25 @@ pub struct ToolCtx {
     /// delegate 的执行体（见 [`SubagentRunner`]；`None`=开关虽开但未装配——回模型
     /// 而非 Fatal，装配缺口不该炸掉整局）。
     pub subagent: Option<Arc<dyn SubagentRunner>>,
+}
+
+impl Clone for ToolCtx {
+    /// 字段全是 `Arc`/句柄/`&'static str`：克隆廉价且**共享同一局**（同一会话、
+    /// 同一暂存区、同一事件队列）。mcp 出口每次 tools/call 从活局槽重建一份
+    /// （槽里的 ToolCtx 不外借，借用跨不过 await），内置循环单份直用。
+    fn clone(&self) -> Self {
+        Self {
+            player: Arc::clone(&self.player),
+            watch: EmitWatch::new(self.watch.clone_rx()),
+            events: Arc::clone(&self.events),
+            staging: Arc::clone(&self.staging),
+            memory: Arc::clone(&self.memory),
+            memory_ns: self.memory_ns,
+            driver: self.driver,
+            subagent_enabled: self.subagent_enabled,
+            subagent: self.subagent.clone(),
+        }
+    }
 }
 
 /// 工具执行的一口分发。
@@ -710,9 +734,7 @@ async fn execute_game_start(ctx: &ToolCtx) -> Result<serde_json::Value, ToolErro
             "note": "pairing in progress — the human side is connecting; call again shortly.",
         })),
         // 计划：人侧未就绪 → 业务错误文本（不是 Fatal——等用户点开始是正常流程）。
-        _ => Err(respond(
-            "no game to claim yet — the user starts the pairing from the AgentPage (kind/size/color are chosen there). Retry game_start once a game is being set up.",
-        )),
+        _ => Err(respond(GAME_START_NO_GAME.to_string())),
     }
 }
 

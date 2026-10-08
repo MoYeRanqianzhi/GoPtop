@@ -48,3 +48,30 @@ png = "0.17"
 # 图像回执的 base64（承载能力矩阵：Anthropic tool_result 原生 image block）。
 # base64 0.22 已在 lock 里（reqwest/rustls 链路的传递依赖），同款取舍零新增条目。
 base64 = "0.22"
+
+# ---- MCP 出口（feature "mcp"，阶段④）----
+# 条件编译（计划「MCP 模式」节·用户拍板）：`mcp` feature 只在桌面目标启用——
+# src-tauri 按 [target.'cfg(desktop)'.dependencies] 挂 feature；安卓/鸿蒙与 wasm
+# 完全不编译本 feature 的代码（不是「编译了但禁用」）。以下两项 optional，
+# 只有 mcp feature 拉进来。
+# rmcp 3.2.0 的 feature 实际拼写（实施首日 cargo add + 范本双重验证）：server +
+# transport-streamable-http-server，与 .ref/codex tui 的挂法逐字一致；default-features
+# 由 workspace 统一全关（auth/schemars/client 不进树）。
+rmcp = { workspace = true, optional = true, features = ["server", "transport-streamable-http-server"] }
+# StreamableHttpService 是 tower Service：Router/serve/Bearer 中间件由本仓 axum 供，
+# 与 goptop-server 同一条 0.8（default-features 关掉，按需 http1/json/tokio）。
+axum = { workspace = true, optional = true }
+
+[features]
+# dep: 前缀（而非裸名）：optional 依赖只在被本 feature 拉起时启用，不再隐式
+# 生成同名 feature 面（edition 2024 / cargo 现代惯用形）。
+mcp = ["dep:rmcp", "dep:axum"]
+
+[dev-dependencies]
+# MCP 测试（tests/mcp_server.rs，--features mcp 下跑）的裸 JSON-RPC over HTTP
+# 客户端：不引 rmcp client——JSON-RPC 消息与 streamable HTTP 头（Accept 双形态/
+# mcp-session-id 回传/Bearer）全按规范手搓，reqwest 只是 HTTP 搬运工。
+reqwest = { workspace = true }
+# rustls 0.23 的进程级 crypto provider 要显式安装（与 native_http.rs 同款幂等
+# 安装），reqwest Client 构造期就要 provider；ring 与主依赖同一份零新增。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

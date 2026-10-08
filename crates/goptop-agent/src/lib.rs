@@ -18,7 +18,9 @@
 //! - [`llm`]：三协议统一客户端（enum 免 async-trait 分发）与统一消息类型；
 //! - [`agent_loop`]：内置模式决策循环（事件自动推送 / TextOnly 提醒 / 五退出条件）；
 //! - [`compact`]：上下文压缩（RESERVE/KEEP_RECENT 参数语义移植 pi compaction.ts）；
-//! - [`prompt`]：系统提示词（Claude Code 风格简化版）。
+//! - [`prompt`]：系统提示词（Claude Code 风格简化版）；
+//! - [`mcp`]（feature "mcp"，仅桌面）：rmcp Streamable HTTP 出口——外部 Agent
+//!   经内嵌 MCP 服务器认领 B 席（`McpServer::start(cfg)` / `stop()`）。
 //!
 //! 范围红线（务必维持）：goptop-net / goptop-transport-native / src-tauri / frontend /
 //! harmony 一行不改——机制靠「装饰 Host」与「调 UiCommand / 读 snapshot」复用。
@@ -26,6 +28,8 @@
 pub mod agent_loop;
 pub mod compact;
 pub mod llm;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod pair;
 pub mod player;
 pub mod prompt;

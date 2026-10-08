@@ -58,6 +58,11 @@ impl SeatColor {
 
 /// 配对参数。棋种/路数/执色以用户 UI 配置为权威（MCP 模式下外部 Agent 的
 /// `game_start` 无权改——它只有「认领席位」的份）。
+///
+/// `Clone`：mcp 出口的认领段把配置按值喂 `pair()`，失败时要把待局**原样还回**
+/// 槽里供外部 Agent 重试——克隆一份进去，原件留槽（字段全是 String/数值/Arc
+/// 宿主句柄，克隆廉价且共享同一宿主）。
+#[derive(Clone)]
 pub struct PairConfig {
     /// 棋种（`"gomoku"` / `"go"`；非法组合由状态机按 make_engine_kind 回退默认，
     /// 与真人主页选棋种同一套守卫）。

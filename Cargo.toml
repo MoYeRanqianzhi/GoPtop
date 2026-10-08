@@ -36,6 +36,14 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # （aws-lc-rs 在 Windows MSVC 上要 NASM/CMake 现场编 C 源，ring 已在 lock 里零增；
 # 详见 crates/goptop-agent/Cargo.toml 的说明）。
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+# MCP 出口（goptop-agent 的 `mcp` feature，阶段④，仅桌面目标）：
+# rmcp 3.2.0 锁死小版本（codex 范本同款）；default-features 全关——auth/schemars/
+# client 等一概不进树，feature 侧由 goptop-agent 开 server + transport-streamable-http-server
+#（3.2 的实际拼写经 .ref/codex tui/Cargo.toml 与 cargo add 双重验证，见 mcp.rs 头注）。
+rmcp = { version = "=3.2.0", default-features = false }
+# axum 0.8 与 goptop-server 对齐（同一 lock 条目零增）；rmcp 的 StreamableHttpService
+# 是 tower Service，HTTP 骨架（Router/serve/中间件）由本仓自己的 axum 供。
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 
 # Tauri 相关由 src-tauri/Cargo.toml 自行声明版本，workspace 仅收敛通用库。
 
