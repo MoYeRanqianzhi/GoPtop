@@ -20,21 +20,54 @@ const transport = vi.hoisted(() => ({
   initCalls: 0,
   freeCalls: 0,
   cfgs: [] as string[],
+  /** 阶段⑤：替身产物是否带 agent_* 导出（webAgentAvailable 的「产物未带 agent」用例翻转它）。 */
+  hasAgent: true,
+  /** new_agent 的入参台账（cfg / 注入回调 / suppressNav）。 */
+  detached: [] as { cfg: string; onChange: (() => void) | null; suppressNav: boolean }[],
+  /** webAgentCall 的调用台账（cmd + 位置参数）。 */
+  agentCalls: [] as { cmd: string; args: unknown[] }[],
+  /** 按 cmd 脚本化回执；缺省回 '{"ok":true}'。 */
+  agentReplies: {} as Record<string, string>,
+  /** 非 null：导出以 rejected Promise 失败（异步导出的折叠用例）。 */
+  agentReject: null as string | null,
 }));
 
-vi.mock("../wasm/transport/goptop_transport.js", () => ({
-  default: async () => {
-    transport.initCalls++;
-  },
-  WasmSession: class {
-    constructor(cfgJson: string) {
-      transport.cfgs.push(cfgJson);
+vi.mock("../wasm/transport/goptop_transport.js", () => {
+  const agentExport = (cmd: string) => (...args: unknown[]) => {
+    transport.agentCalls.push({ cmd, args });
+    if (transport.agentReject !== null) return Promise.reject(new Error(transport.agentReject));
+    return transport.agentReplies[cmd] ?? '{"ok":true}';
+  };
+  // getter 而非求值好的属性：vi.mock 的工厂只跑一遍（resetModules 不重建 mock），
+  // 「产物未带 agent」的用例翻转 transport.hasAgent 时必须在**访问时**见 undefined。
+  const agent = (cmd: string) => (transport.hasAgent ? agentExport(cmd) : undefined);
+  class MockWasmSession {
+    constructor(cfgJson: string | null) {
+      // new_agent 建的 detached 会话不占主会话的 cfg 台账（null = 结构同型即可）
+      if (cfgJson !== null) transport.cfgs.push(cfgJson);
+    }
+    static new_agent(cfgJson: string, onChange: () => void, suppressNav: boolean) {
+      transport.detached.push({ cfg: cfgJson, onChange, suppressNav });
+      return new MockWasmSession(null);
     }
     snapshot() { return "null"; }
+    agent_id() { return "11"; }
     start_pump() { /* 单测不泵 */ }
     free() { transport.freeCalls++; }
-  },
-}));
+  }
+  return {
+    default: async () => {
+      transport.initCalls++;
+    },
+    get agent_start() { return agent("agent_start"); },
+    get agent_stop() { return agent("agent_stop"); },
+    get agent_status() { return agent("agent_status"); },
+    get agent_events() { return agent("agent_events"); },
+    get agent_bind() { return agent("agent_bind"); },
+    get agent_llm_test() { return agent("agent_llm_test"); },
+    WasmSession: MockWasmSession,
+  };
+});
 
 /* ---------------- 伪 Tauri 宿主（与 rules.host-timing.test.ts 同款） ---------------- */
 
@@ -110,6 +143,11 @@ beforeEach(() => {
   transport.initCalls = 0;
   transport.freeCalls = 0;
   transport.cfgs = [];
+  transport.hasAgent = true;
+  transport.detached = [];
+  transport.agentCalls = [];
+  transport.agentReplies = {};
+  transport.agentReject = null;
   delete (globalThis as { window?: unknown }).window;
 });
 
@@ -208,5 +246,75 @@ describe("wasm 分派", () => {
     expect(transport.freeCalls).toBe(0);
     await s.dispose();
     expect(transport.freeCalls).toBe(1);
+  });
+});
+
+/* ---------------- 阶段⑤：Agent 出口的 wasm 面（createDetachedSession / agentId / webAgentAvailable / webAgentCall） ---------------- */
+
+/** 纯 web 宿主：无 Tauri、无鸿蒙桥（extra 追加钩子/导出探测所需的面）。 */
+function installWeb(extra: Record<string, unknown> = {}) {
+  (globalThis as unknown as { window: unknown }).window = { ...extra };
+}
+
+describe("createDetachedSession（web 的 A' 专用会话）", () => {
+  it("new_agent 承接 cfg/onChange/suppressNav；agentId 供 agent_bind 登记", async () => {
+    const { createDetachedSession } = await freshSession();
+    const onChange = vi.fn();
+    const s = await createDetachedSession("{}", "http://x/", onChange, { suppressNav: true });
+    expect(transport.detached).toEqual([{ cfg: "{}", onChange, suppressNav: true }]);
+    expect(s.agentId?.(), "wasm A' 在 FRONT 注册表的 id（十进制串）").toBe("11");
+    transport.detached[0].onChange?.();
+    expect(onChange, "快照通知走注入回调，与原生 A' 同语义").toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("webAgentAvailable（web 后端可用判定，契约 §5.3.2 四道缺一不可）", () => {
+  it("产物带 agent 导出且 Vfs 钩子已装 → true", async () => {
+    installWeb({ goptopVfsCall: () => "" });
+    const { webAgentAvailable } = await freshSession();
+    await expect(webAgentAvailable()).resolves.toBe(true);
+  });
+
+  it("缺 Vfs 钩子（agentVfs.ts 未装载）→ false", async () => {
+    installWeb();
+    const { webAgentAvailable } = await freshSession();
+    await expect(webAgentAvailable()).resolves.toBe(false);
+  });
+
+  it("产物未带 agent 导出（旧 wasm 产物）→ false", async () => {
+    installWeb({ goptopVfsCall: () => "" });
+    transport.hasAgent = false;
+    const { webAgentAvailable } = await freshSession();
+    await expect(webAgentAvailable()).resolves.toBe(false);
+  });
+
+  it("桌面壳与鸿蒙壳恒 false（钩子装了也不行：桌面走原生路，鸿蒙壳未验收）", async () => {
+    installWeb({ goptopVfsCall: () => "", __TAURI_INTERNALS__: {} });
+    const { webAgentAvailable } = await freshSession();
+    await expect(webAgentAvailable()).resolves.toBe(false);
+    installWeb({ goptopVfsCall: () => "", goptopHost: { call: () => "", aiPost: () => "" } });
+    await expect(webAgentAvailable()).resolves.toBe(false);
+  });
+});
+
+describe("webAgentCall（wasm 导出通道，跨边界不 throw）", () => {
+  it("位置参数原样下发、回执原样上交", async () => {
+    const { webAgentCall } = await freshSession();
+    transport.agentReplies.agent_events = '{"next":3,"items":[]}';
+    await expect(webAgentCall("agent_events", ["7", 5])).resolves.toBe('{"next":3,"items":[]}');
+    expect(transport.agentCalls).toEqual([{ cmd: "agent_events", args: ["7", 5] }]);
+  });
+
+  it("异步导出 rejected 折成 ok:false 回执后 resolve（不向调用方 reject）", async () => {
+    const { webAgentCall } = await freshSession();
+    transport.agentReject = "循环已终止";
+    await expect(webAgentCall("agent_stop", [7])).resolves.toBe('{"ok":false,"error":"循环已终止"}');
+  });
+
+  it("产物缺该导出：折 ok:false 回执（wasm 产物未带 agent 时的兜底形态）", async () => {
+    installWeb();
+    transport.hasAgent = false;
+    const { webAgentCall } = await freshSession();
+    await expect(webAgentCall("agent_start", ["{}"])).resolves.toBe('{"ok":false,"error":"wasm 产物未导出 agent_start"}');
   });
 });

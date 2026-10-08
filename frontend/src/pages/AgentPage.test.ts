@@ -14,6 +14,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentBoardDisabled,
+  agentCmdArgs,
+  agentPageMode,
   agentStateLabel,
   buildMcpJson,
   buildStartCfg,
@@ -23,6 +25,7 @@ import {
   extractInviteLink,
   formatAgentEvent,
   normalizeLlmConfig,
+  parseAgentReply,
   parseAgentSnap,
 } from "./AgentPage";
 import { parsePastedLink, parseUrl } from "../net/links";
@@ -190,6 +193,61 @@ describe("buildMcpJson", () => {
     };
     expect(parsed.mcpServers.goptop.url).toBe("http://127.0.0.1:9537/mcp");
     expect(parsed.mcpServers.goptop.headers.Authorization).toBe("Bearer tok123");
+  });
+});
+
+/* ---------------- 阶段⑤ Web 启用态（native / webOk 双路翻转） ---------------- */
+
+describe("agentPageMode：启用与降级横幅", () => {
+  it("桌面原生或 web 后端其一就绪即整页可用", () => {
+    expect(agentPageMode(true, false)).toEqual({ enabled: true, banner: false });
+    expect(agentPageMode(false, true)).toEqual({ enabled: true, banner: false });
+    expect(agentPageMode(true, true)).toEqual({ enabled: true, banner: false });
+  });
+
+  it("两头都不可用才降级：横幅在场、全部禁用（鸿蒙壳 / 产物未带 agent）", () => {
+    expect(agentPageMode(false, false)).toEqual({ enabled: false, banner: true });
+  });
+});
+
+describe("agentCmdArgs：wasm 导出的位置参数表（契约 §5.3.1 命令映射）", () => {
+  it("六命令逐一映射；MCP 命令折空参（web 永不该走到）", () => {
+    const args = { cfgJson: "{}", id: 7, since: 5, sessionId: "11" };
+    expect(agentCmdArgs("agent_start", args)).toEqual(["{}"]);
+    expect(agentCmdArgs("agent_stop", args)).toEqual([7]);
+    expect(agentCmdArgs("agent_status", args)).toEqual([7]);
+    expect(agentCmdArgs("agent_events", args)).toEqual([7, 5]);
+    expect(agentCmdArgs("agent_bind", args)).toEqual(["11"]);
+    expect(agentCmdArgs("agent_llm_test", args)).toEqual([]);
+    expect(agentCmdArgs("agent_mcp_set", args)).toEqual([]);
+  });
+});
+
+describe("parseAgentReply：web 回执归一成桌面 invoke 等价值", () => {
+  it("agent_start：ok 回执抽 id；失败与缺 id 上抛", () => {
+    expect(parseAgentReply<number>("agent_start", '{"ok":true,"id":9}')).toBe(9);
+    expect(() => parseAgentReply("agent_start", '{"ok":false,"error":"cfg 解析失败"}')).toThrow("cfg 解析失败");
+    expect(() => parseAgentReply("agent_start", '{"ok":true}')).toThrow(/缺 id/);
+  });
+
+  it("agent_bind：ok 回执 resolve、失败形态上抛", () => {
+    expect(parseAgentReply("agent_bind", '{"ok":true}')).toBeUndefined();
+    expect(() => parseAgentReply("agent_bind", '{"ok":false,"error":"run not found"}')).toThrow("run not found");
+    expect(() => parseAgentReply("agent_bind", "不是 JSON")).toThrow(/回执异常/);
+  });
+
+  it("agent_status / agent_events：成功回执原串透传（与桌面逐字同形）；被折的失败上抛", () => {
+    const status = '{"state":"thinking","detail":null,"llmCalls":3,"tokensIn":10,"tokensOut":20,"compactions":0}';
+    expect(parseAgentReply<string>("agent_status", status)).toBe(status);
+    const events = '{"next":4,"items":[{"ts":1,"tool":"read","ok":true,"ms":2,"summary":"x"}]}';
+    expect(parseAgentReply<string>("agent_events", events)).toBe(events);
+    expect(() => parseAgentReply("agent_status", '{"ok":false,"error":"run not found"}')).toThrow("run not found");
+  });
+
+  it("agent_llm_test：人话文本原样；导出异常折成的 ok:false 抽 error 当文本（桌面展示契约）", () => {
+    expect(parseAgentReply<string>("agent_llm_test", "ok")).toBe("ok");
+    expect(parseAgentReply<string>("agent_llm_test", "HTTP 401：key 无效")).toBe("HTTP 401：key 无效");
+    expect(parseAgentReply<string>("agent_llm_test", '{"ok":false,"error":"wasm 循环未初始化"}')).toBe("wasm 循环未初始化");
   });
 });
 

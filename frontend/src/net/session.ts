@@ -46,6 +46,13 @@ export interface GameSession {
    * 会话表，整个方法缺省（调用方用 `s.nativeId?.()` 容错）。
    */
   nativeId?(): number | null;
+  /**
+   * wasm 侧 Agent 专用会话（A'）在 Rust FRONT 注册表里的 id（u32 十进制串）。
+   * **可选**：仅 web 后端实现——AgentPage 建完 A' 后经 `agent_bind` 登记给 wasm
+   * Hub，与原生后端的 `nativeId` 同一用途；native 后端没有这个概念，整个方法
+   * 缺省（调用方按后端二选一容错取值）。
+   */
+  agentId?(): string;
 
   create_invite(): void;
   accept_invite(inviterId: string, pwd: string | null, kind: string, size: number, rtc: string | null, spec: boolean): void;
@@ -86,6 +93,9 @@ class WasmSessionAdapter implements GameSession {
   constructor(private readonly s: import("../wasm/transport/goptop_transport.js").WasmSession) {}
 
   snapshot() { return this.s.snapshot(); }
+  /** agent_id 的 d.ts 由 wasm-bindgen 在产物重建时生成；产物带回 agent 导出前
+   *  用结构化窄化兜住类型面（形状按契约 §5.2 冻结，重建后 cast 依旧成立）。 */
+  agentId() { return (this.s as unknown as { agent_id(): string }).agent_id(); }
   async state_json() { return this.s.state_json(); }
   async state_debug() { return this.s.state_debug(); }
   async ice_debug() { return this.s.ice_debug(); }
@@ -383,8 +393,8 @@ function loadTransport(): Promise<typeof import("../wasm/transport/goptop_transp
  * `onChange` **可选注入**：给了就用它当「快照变了」的通知，不给回落
  * `window.goptopOnChange` 单槽（主会话调用点全部不传，零行为变化）。AgentPage
  * 的专用会话 A' 传自己的回调，与主会话互不顶槽。wasm 分支不收这个参数——
- * wasm 侧的 Emit 钩子在 Rust 胶水里硬接 window.goptopOnChange，注入不进去
- * （Agent 对战本阶段桌面专属，Web 整页降级，见 AgentPage 的 isTauri 门）。
+ * wasm 主会话的 Emit 钩子在 Rust 胶水里硬接 window.goptopOnChange；A' 的 web
+ * 路径不走本函数，走下面按契约另开的 [`createDetachedSession`]。
  *
  * wasm 分支用**动态 import**：静态 import 会让三端都把 `goptop_transport_bg.wasm`
  * 拉下来——那正是本轮要消掉的东西（安卓实测的资源时间线里它一直在）。
@@ -399,4 +409,80 @@ export async function createSession(
   if (call) return await NativeSessionAdapter.create(call, cfgJson, href, onChange, opts);
   const mod = await loadTransport();
   return new WasmSessionAdapter(new mod.WasmSession(cfgJson));
+}
+
+/**
+ * 建 **Agent 专用会话 A'**（仅 web 后端有意义；native 调用点不存在——AgentPage
+ * 的 A' 在原生走既有 [`createSession`] 路径）。
+ *
+ * 与 [`createSession`] 的差别在 Rust 侧：`WasmSession::new_agent`（契约 §2.2b）
+ * 不写全局 SESSION 槽（A' 与主会话并存，被顶槽即失联）、emit 走注入的 onChange、
+ * Nav 受 suppressNav 拦（与原生 A' 的 suppressNav 同一款理由：状态机的页面级
+ * Nav 对常驻 /agent 的 A' 全是错误导航）。
+ *
+ * `href` 与 [`createSession`] 签名对齐（bootFront 同参调用），wasm 导出
+ * `new_agent(cfg, on_change, suppress_nav)` 不收它——链接的 Boot 消化在 Rust 侧
+ * new_agent 内部完成。
+ */
+export async function createDetachedSession(
+  cfgJson: string,
+  href: string,
+  onChange: () => void,
+  opts: { suppressNav: boolean },
+): Promise<GameSession> {
+  void href;
+  const mod = await loadTransport();
+  type NewAgent = (cfg: string, onChange: () => void, suppressNav: boolean) => import("../wasm/transport/goptop_transport.js").WasmSession;
+  const s = (mod.WasmSession as unknown as { new_agent: NewAgent }).new_agent(cfgJson, onChange, opts.suppressNav);
+  return new WasmSessionAdapter(s);
+}
+
+/* ---------------- Agent 出口的 wasm 通道（阶段⑤ Web 内置模式） ---------------- */
+
+/**
+ * 「web 后端可用」的最终判定（契约 §5.3.2，冻结面）。四道缺一不可：
+ * 非桌面壳（桌面走 Tauri invoke 原路）、非鸿蒙壳（ArkWeb 壳内钩子通道/存储面
+ * 未验收，主计划 R7 维持整页降级）、wasm 产物在且**带 agent 导出**（旧产物没有
+ * agent_* 命令）、agentVfs.ts 已装好 Vfs 存储钩子。
+ *
+ * AgentPage 挂载时异步评估一次并置 webOk——判定含 wasm 装载，只能异步。
+ */
+export async function webAgentAvailable(): Promise<boolean> {
+  if (isTauri() || harmonyHost()) return false;
+  try {
+    const mod = await loadTransport();
+    if (typeof (mod as unknown as Record<string, unknown>).agent_start !== "function") return false;
+  } catch {
+    return false; // 产物缺失/初始化失败
+  }
+  return typeof window !== "undefined"
+    && typeof (window as unknown as { goptopVfsCall?: unknown }).goptopVfsCall === "function";
+}
+
+/**
+ * Agent 命令的 web 通道：桌面这些命令走 Tauri invoke（Result→reject），web 走
+ * wasm 导出的同名自由函数。命令映射冻结（契约 §5.3.1）：agent_start/agent_stop/
+ * agent_status/agent_events/agent_bind/agent_llm_test，全部 JSON 进出、跨边界
+ * 不 throw——同步导出的异常与异步导出的 rejected Promise 一律折成
+ * `{"ok":false,"error"}` 后 resolve（与 Rust 导出自身的折叠同形，这里是对 wasm
+ * 产物没带上该命令时的兜底：折 JSON 让上层解析路径只有一种）。
+ *
+ * 回执原样上交，桌面等价值的归一（`{"ok":true,"id"}` → id、`{"ok":false}` →
+ * throw）在 AgentPage 的 per-command 解析层做——两边形状契约不同，归一处必须
+ * 知道命令语义。
+ */
+export async function webAgentCall(cmd: string, args: unknown[]): Promise<string> {
+  let fn: unknown;
+  try {
+    const mod = await loadTransport();
+    fn = (mod as unknown as Record<string, unknown>)[cmd];
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
+  if (typeof fn !== "function") return JSON.stringify({ ok: false, error: `wasm 产物未导出 ${cmd}` });
+  try {
+    return await Promise.resolve((fn as (...a: unknown[]) => unknown)(...args) as string);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
 }

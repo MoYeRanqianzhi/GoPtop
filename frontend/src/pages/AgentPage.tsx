@@ -26,16 +26,20 @@
  *   agent_events(id, since)->JSON / agent_bind(sessionId) / agent_llm_test()->string /
  *   agent_mcp_set(enabled)->JSON / agent_mcp_info()->JSON
  *
- * 平台降级：Agent 局走原生会话表与后端 Hub，**仅桌面壳可用**——非 Tauri（Web /
- * 鸿蒙壳）整页横幅降级、功能禁用。
+ * 平台矩阵（阶段⑤起）：**桌面原生路**——Agent 局走 src-tauri 的原生会话表与
+ * AgentHub；**Web 内置路**——A' 走 wasm 的 detached 会话（createDetachedSession）、
+ * 命令走 wasm 导出的 agent_*（webAgentCall），B 席与循环在 wasm 侧 Hub。web 后端
+ * 可用由 webAgentAvailable 判定（产物带 agent 导出 + Vfs 存储钩子已装），不满足
+ * （鸿蒙壳 / 产物未带 agent）整页横幅降级。MCP 依赖内嵌 TCP 服务器，**仅桌面**。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageCircle } from "lucide-react";
 import type { Coord, GameKind, Size, StoneColor } from "../net/protocol";
 import { emptyBoard } from "../game/board";
 import { isTauri, nav, shareOrigin } from "../net/links";
-import { createSession } from "../net/session";
+import { createDetachedSession, createSession, webAgentAvailable, webAgentCall } from "../net/session";
 import type { GameSession } from "../net/session";
+import { agentVfsReady } from "../net/agentVfs";
 import { myName } from "../net/identity";
 import { storeGet, storeSet, storeSetAsync } from "../net/store";
 import { ConfirmBanner } from "../components/ConfirmBanner";
@@ -255,6 +259,70 @@ export async function agentInvoke<T>(cmd: string, args?: Record<string, unknown>
   return await invoke<T>(cmd, args ?? {});
 }
 
+/** 页面启用判定（阶段⑤ Web 启用翻转的核心布尔）：桌面原生路或 web 后端路，
+ *  其一就绪即整页可用；降级横幅只在两头都不可用时出现（鸿蒙壳 / wasm 产物
+ *  未带 agent）。设置卡控件、开始按钮、start 守卫全部吃 `enabled`。 */
+export function agentPageMode(native: boolean, webOk: boolean): { enabled: boolean; banner: boolean } {
+  return { enabled: native || webOk, banner: !native && !webOk };
+}
+
+/** web 通道的位置参数表（契约 §5.3.1 命令映射，与 wasm 导出签名逐字对应）。
+ *  桌面 invoke 吃命名参数对象，wasm 导出吃位置参数——映射只此一处。MCP 两命令
+ *  仅桌面（web 连卡都不渲染），默认臂永远不该被走到，折空参让它撞导出缺失的
+ *  error 回执而非静默。 */
+export function agentCmdArgs(cmd: string, args: Record<string, unknown>): unknown[] {
+  switch (cmd) {
+    case "agent_start": return [args.cfgJson];
+    case "agent_stop":
+    case "agent_status": return [args.id];
+    case "agent_events": return [args.id, args.since];
+    case "agent_bind": return [args.sessionId];
+    case "agent_llm_test": return [];
+    default: return [];
+  }
+}
+
+/** web 回执 → 桌面 invoke 等价值（两边形状契约不同，归一后组件逻辑只有一份）：
+ * - agent_start：`{"ok":true,"id":N}` → N；`{"ok":false,"error"}` → 上抛（同
+ *   桌面 Result 的 reject）；
+ * - agent_bind：`{"ok":true}` → resolve，否则上抛；
+ * - agent_status / agent_events：成功回执与桌面逐字同形，原串透传；被折成
+ *   `{"ok":false,"error"}` 的失败上抛（run 不存在等，同桌面 reject 语义）；
+ * - agent_llm_test：桌面契约是「"ok"=通，其余原样展示的人话文本」——web 导出
+ *   内部异常被折成 `{"ok":false,"error"}` 时把 error 抽出来当文本，其余原样；
+ * - agent_stop：回执无消费者，原样。
+ */
+export function parseAgentReply<T>(cmd: string, raw: string): T {
+  const folded = ((): { ok: false; error: string } | null => {
+    try {
+      const d = JSON.parse(raw) as { ok?: unknown; error?: unknown };
+      if (d && typeof d === "object" && d.ok === false && typeof d.error === "string") {
+        return { ok: false, error: d.error };
+      }
+    } catch { /* 非 JSON（agent_llm_test 的人话文本走这里） */ }
+    return null;
+  })();
+  if (folded) {
+    if (cmd === "agent_llm_test") return folded.error as T;
+    throw new Error(folded.error);
+  }
+  if (cmd === "agent_start") {
+    const d = JSON.parse(raw) as { id: number };
+    if (typeof d.id !== "number") throw new Error(`agent_start 回执缺 id: ${raw}`);
+    return d.id as T;
+  }
+  if (cmd === "agent_bind") {
+    try {
+      const d = JSON.parse(raw) as { ok?: unknown };
+      if (!(d && typeof d === "object" && d.ok === true)) throw new Error(`agent_bind 回执异常: ${raw}`);
+    } catch {
+      throw new Error(`agent_bind 回执异常: ${raw}`);
+    }
+    return undefined as T;
+  }
+  return raw as T;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -274,7 +342,10 @@ type RunPhase = "setup" | "pairing" | "playing";
 const inputStyle = { border: "3px solid var(--ink)", padding: "6px 9px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, background: "#fff" } as const;
 
 export function AgentPage() {
-  const desktop = useMemo(() => isTauri(), []);
+  const native = useMemo(() => isTauri(), []);
+  /** web 后端（wasm agent 导出 + Vfs 钩子）就绪标记：挂载时异步评估一次。
+   *  桌面恒 false（走原生路，探测纯浪费一次 wasm 装载）；鸿蒙壳由判定内部排除。 */
+  const [webOk, setWebOk] = useState(false);
   /* ---------- 设置卡 ---------- */
   const [setup, setSetup] = useState<Setup>({ kind: "gomoku", size: 15, myColor: "black", driver: "builtin", agentName: "" });
   const [llm, setLlm] = useState<LlmConfig>(() => normalizeLlmConfig(storeGet(KEY_LLM_CONFIG)));
@@ -305,6 +376,16 @@ export function AgentPage() {
   const sinceRef = useRef(0);
   const disposedRef = useRef(false);
 
+  /** Agent 命令双通道（契约 §5.3.1）：桌面走 Tauri invoke（原路，零变化）；web
+   *  走 wasm 导出。通道只看 native（useMemo([]) 稳定）——unmount cleanup 捕获的
+   *  首帧闭包因此安全。web 回执经 parseAgentReply 归一成桌面等价值后，组件其余
+   *  逻辑对通道无感。 */
+  async function agentCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    if (native) return agentInvoke<T>(cmd, args);
+    const raw = await webAgentCall(cmd, agentCmdArgs(cmd, args ?? {}));
+    return parseAgentReply<T>(cmd, raw);
+  }
+
   /** 拆局：agent_stop（后端先 resign 再终止并清理）+ 释放 A'，全部容错——
    *  停止路径是收尾动作，后端已结束/壳重启时失败不该打断 UI 复位。 */
   async function teardown(errText: string | null) {
@@ -312,7 +393,7 @@ export function AgentPage() {
     runIdRef.current = null;
     if (id !== null) {
       try {
-        await agentInvoke("agent_stop", { id });
+        await agentCall("agent_stop", { id });
       } catch {
         /* 已结束 / 壳重启：忽略 */
       }
@@ -341,14 +422,31 @@ export function AgentPage() {
       disposedRef.current = true;
       const id = runIdRef.current;
       // 卸载路径不 await：组件已亡，fire-and-forget 即可
-      if (id !== null) void agentInvoke("agent_stop", { id }).catch(() => {});
+      if (id !== null) void agentCall("agent_stop", { id }).catch(() => {});
       void aPrimeRef.current?.dispose();
     };
   }, []);
 
+  /* ---------- web 后端探测（仅非桌面）：先等 Vfs 镜像从 IndexedDB 装载完毕
+      （契约：agentVfsReady 之后才许 agent_start），再评 webAgentAvailable 四道
+      判定。装载失败不拦判定——钩子仍在，只是没有持久记忆，webOk 照常成立。 ---------- */
+  useEffect(() => {
+    if (native) return;
+    let dead = false;
+    void agentVfsReady().catch(() => {}).then(() => {
+      if (dead) return;
+      void webAgentAvailable().then((ok) => {
+        if (!dead) setWebOk(ok);
+      });
+    });
+    return () => {
+      dead = true;
+    };
+  }, [native]);
+
   /* ---------- MCP 连接卡：进页拉一次服务器状态（仅桌面；老壳无此命令则静默） ---------- */
   useEffect(() => {
-    if (!desktop) return;
+    if (!native) return;
     let dead = false;
     void agentInvoke<string>("agent_mcp_info")
       .then((raw) => {
@@ -363,7 +461,7 @@ export function AgentPage() {
     return () => {
       dead = true;
     };
-  }, [desktop]);
+  }, [native]);
 
   /* ---------- 侧栏宽度实测（同 App 的 measureChat 口径）：对局栈旁放得下就走停靠栏，
       放不下（<240）退聊天弹窗。--chat-w 归 App 管（写 main 元素），本页只量自己的
@@ -400,7 +498,7 @@ export function AgentPage() {
       const id = runIdRef.current;
       if (id === null || dead) return;
       try {
-        const st = JSON.parse(await agentInvoke<string>("agent_status", { id })) as AgentStatus;
+        const st = JSON.parse(await agentCall<string>("agent_status", { id })) as AgentStatus;
         if (dead) return;
         setStatus(st);
         // pairing 一旦离开（进入思考/等待/终局/出错）就切对局视图
@@ -409,7 +507,7 @@ export function AgentPage() {
         /* 单拍失败容忍（切页竞态/壳忙），下一拍再取 */
       }
       try {
-        const r = JSON.parse(await agentInvoke<string>("agent_events", { id, since: sinceRef.current })) as {
+        const r = JSON.parse(await agentCall<string>("agent_events", { id, since: sinceRef.current })) as {
           next: number;
           items: AgentEventItem[];
         };
@@ -499,7 +597,7 @@ export function AgentPage() {
     await persistSettings();
     setLlmTest({ busy: true, ok: false, text: null });
     try {
-      const r = await agentInvoke<string>("agent_llm_test");
+      const r = await agentCall<string>("agent_llm_test");
       // 契约："ok"=通；其余一律是人话错误文本，原样展示
       setLlmTest({ busy: false, ok: r === "ok", text: r === "ok" ? "连接成功" : r || "连接失败" });
     } catch (e) {
@@ -536,7 +634,12 @@ export function AgentPage() {
     // onChange 注入：A' 的快照变化只喂本页（单槽详见 session.ts 注）。
     // suppressNav：状态机在受理回执/挑战时会发 Nav("/p2p")——那是「页面级」导航，
     // 对常驻 /agent 的 A' 是错误导航，执行了会把整页拖离、随卸载拆掉整局。
-    const s = await createSession(cfg, href, () => setSnap(parseAgentSnap(aPrimeRef.current?.snapshot() ?? null)), { suppressNav: true });
+    // 桌面走原生路（原样零变化）；web 走 wasm 的 detached 会话（不占全局槽，
+    // emit 走注入回调，同参同语义）。
+    const onReady = () => setSnap(parseAgentSnap(aPrimeRef.current?.snapshot() ?? null));
+    const s = native
+      ? await createSession(cfg, href, onReady, { suppressNav: true })
+      : await createDetachedSession(cfg, href, onReady, { suppressNav: true });
     // A' 自管 poll 立刻起泵：我执黑方向随后要在 waitInviteReady 里读快照缓存，
     // 没有泵就永远是 createSession 首拍那份旧缓存（inviteUrl 永远等不到 rtc=）
     s.start_pump();
@@ -562,7 +665,7 @@ export function AgentPage() {
     while (Date.now() < deadline && !disposedRef.current) {
       let st: AgentStatus;
       try {
-        st = JSON.parse(await agentInvoke<string>("agent_status", { id: runId })) as AgentStatus;
+        st = JSON.parse(await agentCall<string>("agent_status", { id: runId })) as AgentStatus;
       } catch {
         await sleep(500);
         continue;
@@ -577,7 +680,7 @@ export function AgentPage() {
   }
 
   async function start() {
-    if (busy || !desktop || runIdRef.current !== null) return;
+    if (busy || !agentPageMode(native, webOk).enabled || runIdRef.current !== null) return;
     setBusy(true);
     setErr(null);
     setPhase("pairing");
@@ -585,11 +688,13 @@ export function AgentPage() {
     setEvents([]);
     sinceRef.current = 0;
     await persistSettings();
+    /** bind 的会话 id 按通道取：原生是会话表 id，web 是 FRONT 注册表 id（十进制串）。 */
+    const bindId = (s: GameSession) => (native ? String(s.nativeId?.() ?? "") : String(s.agentId?.() ?? ""));
     try {
       const cfgJson = buildStartCfg({ ...setup, uiLang: UI_LANG });
       if (setup.myColor === "white") {
         // 我执白：B 先建局出链接 → A' 携链 Boot 入局 → 登记 → 后端收尾配对
-        const runId = await agentInvoke<number>("agent_start", { cfgJson });
+        const runId = await agentCall<number>("agent_start", { cfgJson });
         runIdRef.current = runId;
         const link = await waitAgentLink(runId);
         const created = await bootFront(link);
@@ -599,7 +704,7 @@ export function AgentPage() {
         }
         aPrimeRef.current = created;
         try {
-          await agentInvoke("agent_bind", { sessionId: String(created.nativeId?.() ?? "") });
+          await agentCall("agent_bind", { sessionId: bindId(created) });
         } catch (e) {
           throw new Error(`登记 A' 会话失败: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -614,12 +719,12 @@ export function AgentPage() {
         }
         aPrimeRef.current = created;
         try {
-          await agentInvoke("agent_bind", { sessionId: String(created.nativeId?.() ?? "") });
+          await agentCall("agent_bind", { sessionId: bindId(created) });
         } catch (e) {
           throw new Error(`登记 A' 会话失败: ${e instanceof Error ? e.message : String(e)}`);
         }
         await waitInviteReady(created);
-        const runId = await agentInvoke<number>("agent_start", { cfgJson });
+        const runId = await agentCall<number>("agent_start", { cfgJson });
         runIdRef.current = runId;
         adopt(created);
       }
@@ -653,11 +758,12 @@ export function AgentPage() {
         : `${snap?.toMove === "black" ? "黑" : "白"} 落子`;
   const statusNote = status.state === "error" && status.detail ? status.detail : `执${myColor === "black" ? "黑" : "白"}`;
   const running = phase !== "setup";
+  /* 页面启用态：桌面原生或 web 后端其一就绪即可用；横幅只在两头都不可用时出
+     （鸿蒙壳 / web 产物未带 agent 导出）。 */
+  const { enabled, banner } = agentPageMode(native, webOk);
 
   /* ============================ 渲染 ============================ */
 
-  /* 非桌面（Web / 鸿蒙壳）：整页降级。Agent 局依赖原生会话表与后端 AgentHub，
-     wasm 分支的 onChange 单槽也注不进去——功能全部禁用，只留横幅说明。 */
   const setupCard = (
     <div className="brutal-card" style={{ padding: "16px 14px", background: "#fff", display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
@@ -665,7 +771,7 @@ export function AgentPage() {
         <button className="brutal-btn brutal-btn--sm" onClick={() => nav("/")}>回菜单页</button>
       </div>
 
-      {!desktop && (
+      {banner && (
         <div style={{ border: "3px solid var(--ink)", background: "#fffbeb", padding: "8px 10px", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800 }}>
           内置 Agent 对战仅桌面版可用
         </div>
@@ -679,7 +785,7 @@ export function AgentPage() {
               key={k}
               className={`brutal-btn brutal-btn--sm${setup.kind === k ? " brutal-btn--active" : ""}`}
               aria-pressed={setup.kind === k}
-              disabled={!desktop}
+              disabled={!enabled}
               onClick={() =>
                 setSetup((prev) => ({
                   ...prev,
@@ -698,7 +804,7 @@ export function AgentPage() {
               key={s}
               className={`brutal-btn brutal-btn--sm${setup.size === s ? " brutal-btn--active" : ""}`}
               aria-pressed={setup.size === s}
-              disabled={!desktop}
+              disabled={!enabled}
               onClick={() => setSetup((prev) => ({ ...prev, size: s as Size }))}
             >
               {s}×{s}
@@ -715,7 +821,7 @@ export function AgentPage() {
               key={c}
               className={`brutal-btn brutal-btn--sm${setup.myColor === c ? " brutal-btn--active" : ""}`}
               aria-pressed={setup.myColor === c}
-              disabled={!desktop}
+              disabled={!enabled}
               onClick={() => setSetup((prev) => ({ ...prev, myColor: c }))}
             >
               {c === "black" ? "我执黑（先行）" : "我执白"}
@@ -730,13 +836,13 @@ export function AgentPage() {
           <button
             className={`brutal-btn brutal-btn--sm${setup.driver === "builtin" ? " brutal-btn--active" : ""}`}
             aria-pressed={setup.driver === "builtin"}
-            disabled={!desktop}
+            disabled={!enabled}
             onClick={() => setSetup((prev) => ({ ...prev, driver: "builtin" }))}
           >
             内置（LLM 循环）
           </button>
           {/* MCP 依赖内嵌 TCP 服务器（桌面固有）；Web 连卡都不出（计划 R7） */}
-          {desktop && (
+          {native && (
             <button
               className={`brutal-btn brutal-btn--sm${setup.driver === "mcp" ? " brutal-btn--active" : ""}`}
               aria-pressed={setup.driver === "mcp"}
@@ -748,7 +854,7 @@ export function AgentPage() {
         </div>
       </div>
 
-      {setup.driver === "mcp" && desktop ? (
+      {setup.driver === "mcp" && native ? (
         <div style={{ border: "3px solid var(--ink)", padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
           <div className="brutal-label">MCP 服务器（外部 Agent 经此认领对手席）</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -811,7 +917,7 @@ export function AgentPage() {
                 key={v}
                 className={`brutal-btn brutal-btn--sm${llm.protocol === v ? " brutal-btn--active" : ""}`}
                 aria-pressed={llm.protocol === v}
-                disabled={!desktop}
+                disabled={!enabled}
                 onClick={() => updateLlm({ protocol: v })}
               >
                 {label}
@@ -822,7 +928,7 @@ export function AgentPage() {
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>Base URL</span>
             <input
               value={llm.baseUrl}
-              disabled={!desktop}
+              disabled={!enabled}
               placeholder="https://your-gateway.example（留空用协议默认）"
               style={{ ...inputStyle, flex: 1, minWidth: 200 }}
               onChange={(e) => updateLlm({ baseUrl: e.target.value })}
@@ -832,7 +938,7 @@ export function AgentPage() {
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>模型</span>
             <input
               value={llm.model}
-              disabled={!desktop}
+              disabled={!enabled}
               placeholder="如 claude-sonnet-4-5"
               style={{ ...inputStyle, flex: 1, minWidth: 200 }}
               onChange={(e) => updateLlm({ model: e.target.value })}
@@ -843,7 +949,7 @@ export function AgentPage() {
             <input
               type="password"
               value={llmKey}
-              disabled={!desktop}
+              disabled={!enabled}
               placeholder="sk-…"
               style={{ ...inputStyle, flex: 1, minWidth: 200 }}
               onChange={(e) => updateLlmKey(e.target.value)}
@@ -854,14 +960,14 @@ export function AgentPage() {
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>上下文上限</span>
-            <input value={ctxLimit} inputMode="numeric" disabled={!desktop} style={{ ...inputStyle, width: 110 }} onChange={(e) => updateCtxLimit(e.target.value)} />
+            <input value={ctxLimit} inputMode="numeric" disabled={!enabled} style={{ ...inputStyle, width: 110 }} onChange={(e) => updateCtxLimit(e.target.value)} />
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>tokens（8000 – 1000000，超出按边界取）</span>
           </div>
           <label style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>回复语言</span>
             <input
               value={llm.replyLang}
-              disabled={!desktop}
+              disabled={!enabled}
               placeholder="留空跟随界面语言（可填任意文字）"
               style={{ ...inputStyle, flex: 1, minWidth: 200 }}
               onChange={(e) => updateLlm({ replyLang: e.target.value })}
@@ -872,14 +978,14 @@ export function AgentPage() {
             <button
               className={`brutal-btn brutal-btn--sm${llm.enableSubagent ? " brutal-btn--active" : ""}`}
               aria-pressed={llm.enableSubagent}
-              disabled={!desktop}
+              disabled={!enabled}
               onClick={() => updateLlm({ enableSubagent: !llm.enableSubagent })}
             >
               {llm.enableSubagent ? "已开启（深思更费 token）" : "已关闭"}
             </button>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <button className="brutal-btn brutal-btn--sm" disabled={!desktop || llmTest.busy} onClick={() => void runLlmTest()}>
+            <button className="brutal-btn brutal-btn--sm" disabled={!enabled || llmTest.busy} onClick={() => void runLlmTest()}>
               {llmTest.busy ? "测试中…" : "测试连接"}
             </button>
             {llmTest.text && (
@@ -895,7 +1001,7 @@ export function AgentPage() {
         <div className="brutal-label" style={{ marginBottom: 6 }}>对手名字（仅聊天展示）</div>
         <input
           value={setup.agentName}
-          disabled={!desktop}
+          disabled={!enabled}
           placeholder="Agent"
           style={{ ...inputStyle, width: 220 }}
           onChange={(e) => setSetup((prev) => ({ ...prev, agentName: e.target.value }))}
@@ -905,7 +1011,7 @@ export function AgentPage() {
       {err && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, color: "#b00020", overflowWrap: "anywhere" }}>{err}</div>}
       {notice && <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, color: "#0a7a2e" }}>{notice}</div>}
 
-      <button className="brutal-btn brutal-btn--accent" style={{ padding: "14px 8px" }} disabled={!desktop || busy} onClick={() => void start()}>
+      <button className="brutal-btn brutal-btn--accent" style={{ padding: "14px 8px" }} disabled={!enabled || busy} onClick={() => void start()}>
         {busy ? "正在开局…" : "开始对局"}
       </button>
     </div>
