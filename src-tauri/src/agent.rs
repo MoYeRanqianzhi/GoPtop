@@ -1,26 +1,32 @@
 //! AgentHub —— 「Agent 对战」的桌面壳接缝（权威规格 `.agents/plan/2026-10-08-agent-battle.md`
 //! 「F1 内置 Agent / AgentPage / Tauri 命令」节；阶段③ F 路）。
 //!
-//! 职责只有「装配」：`pair::pair` 结会话对、`agent_loop::run` 跑决策循环，全部在
-//! tokio 任务里转；本模块持有运行表（run id → [`Run`]）并把循环侧的状态/统计/暂存
-//! 着法/工具日志翻译成 `agent_*` 命令的线上契约（前端 AgentPage 的唯一 IPC 面）。
-//! 决策与工具的全部语义都在 crates/goptop-agent（阶段①+② 已收口），这里一行不重做。
+//! 职责只有「装配」：结会话对、跑 `agent_loop::run` 决策循环，全部在 tokio 任务里
+//! 转；本模块持有运行表（run id → [`Run`]）并把循环侧的状态/统计/暂存着法/工具
+//! 日志翻译成 `agent_*` 命令的线上契约（前端 AgentPage 的唯一 IPC 面）。决策与
+//! 工具的全部语义都在 crates/goptop-agent（阶段①+② 已收口），这里一行不重做。
 //!
-//! **A'（人的专用会话）的落位**：pair() 在 Rust 侧同时创建 A' 与 B（这是 headless.rs
-//! 验证过的路径，两个方向都绕不开它），而前端要经 `session_poll/session_cmd` 渲染和
-//! 操纵 A'——所以配对完成后把 pair() 产出的 A' 接进会话表（[`crate::session::adopt_session`]）。
-//! 落位 id 的来源（按 [`agent_bind`] 契约）：
-//! - 前端先 `session_new` 建一个占位会话（自管 poll，同计划「会话对」节第 1 条）、
-//!   再 `agent_bind(id)` 登记——配对完成后**该 id 的表项被换成真 A'**，前端对同一 id
-//!   的轮询无缝切到真快照（这就是「配对目标」）；
-//! - 没绑定时落到新 id，并在 `agent_status.detail` 里以「A' 会话 id=N」回给前端。
-//!   该 id 同时是拦截面（[`crate::session::is_opening_cmd`]）的豁免对象。
+//! **会话拓扑（与 AgentPage 的开局流程逐拍互锁）**：A'（人的专用会话）由**前端**
+//! 经 `session_new` 创建（固定 serverMode:false，onChange 注入自管 poll——计划
+//! 「会话对」节第 1 条）并 `agent_bind(id)` 登记给本 Hub；Hub 只创建 B（无头席，
+//! HookHost 包 TauriHost）并把 A'、B 结对。方向随执色（与 goptop-agent pair.rs
+//! 同一条已验证路径，仅「谁创建 A'」不同——A' 的表项归前端所有，Hub 不落位不摘除）：
+//! - **我执黑**：A' 邀请。`agent_bind` 时若 A' 还空置（phase=home）就代发
+//!   `CreateInvite`（前端流程是 bind → 等 inviteUrl 含 rtc → agent_start，而 A'
+//!   建在 /p2p 基座上不会自发邀请——bind 是链路里唯一能替 A' 按下「开启对战」的
+//!   点）；`agent_start` 后 Hub 读 A' 的邀请链接、携链创建 B，泵到双端 playing。
+//! - **我执白**：B 先建局邀请，邀请链接经 `agent_status.detail` 送回前端（前端
+//!   `extractInviteLink` 取含 rtc= 的 URL）；前端以该链接经 Boot 路径 `session_new`
+//!   创建 A'（本就是 session_new 的 href 参数，无需扩展）并 bind——A' 的回执经
+//!   进程内 presence 自动送达 B，Hub 泵到双端 playing。
 //!
-//! **MCP 模式（本阶段）**：`agent_start(driver="mcp")` 只建 A' 并置 `waiting_mcp`
-//! ——外部 Agent 经 `game_start` 认领席位的接线留阶段④，这里不预做。
+//! **MCP 模式（本阶段）**：等 bind 接驳 A' 后置 `waiting_mcp`——外部 Agent 经
+//! `game_start` 认领席位的接线留阶段④，这里不预做。
 //!
 //! **范围红线**：goptop-net / goptop-transport-native / crates/goptop-agent 一行不改；
-//! 接线全部走它们的公开 API。
+//! 接线全部走它们的公开 API。goptop-agent 的 `pair()` 不经手：它自建 A'（PairConfig
+//! 的 front 宿主由它内部消费），而本壳的 A' 归前端——配对步骤按 pair.rs 同款原语
+//! （CreateInvite / 等 rtc / 泵到 playing）在本文件落地，约 60 行，语义一致。
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -31,15 +37,16 @@ use goptop_agent::agent_loop::{LoopConfig, LoopDeps, LoopStop, SubagentLoop, DEF
 use goptop_agent::llm::{
     Block, ChatRequest, HttpChannel, LlmClient, LlmConfig, Msg, NativeHttp, Protocol, Role,
 };
-use goptop_agent::pair::{PairConfig, SeatColor, pair};
+use goptop_agent::pair::SeatColor;
 use goptop_agent::player::{
-    EmitWatch, EventQueue, NativePlayer, PlayerHandle, event_baseline, run_event_pump,
+    EmitWatch, EventQueue, HookHost, NativePlayer, PlayerHandle, event_baseline, run_event_pump,
 };
 use goptop_agent::prompt::{PromptCfg, build_system_prompt};
 use goptop_agent::registry::ToolCtx;
 use goptop_agent::store::{NativeStore, VfsStore};
 use goptop_agent::vfs::{InFile, Staging};
 use goptop_agent::Driver;
+use goptop_net::session::UiCommand;
 use goptop_transport_native::{Host, NativeSession, SessionConfig, enter_runtime, now_ms, rand4};
 use tauri::{AppHandle, Manager};
 
@@ -63,8 +70,6 @@ const KEY_MCP_ENABLED: &str = "goptop:agent-mcp-enabled";
 const KEY_MCP_PORT: &str = "goptop:agent-mcp-port";
 /// MCP Bearer token（首次置 enabled 时生成并持久化）。
 const KEY_MCP_TOKEN: &str = "goptop:agent-mcp-token";
-/// 用户的展示名（A' 的会话名；与 `net/identity.ts` 的 myName 同一键）。
-const KEY_NAME: &str = "goptop:name";
 
 /// MCP 缺省端口（计划拍板 9537；占用回退随机口是阶段④ server 启动时的事）。
 const MCP_DEFAULT_PORT: u32 = 9537;
@@ -124,20 +129,18 @@ pub fn agent_start(app: AppHandle, cfg_json: String) -> Result<u32, String> {
     tokio::spawn(async move {
         match cfg.driver {
             Driver::Builtin => run_builtin_task(app2, run2, cfg, seat).await,
-            // 本阶段只建 A' 并置 waiting_mcp；game_start 认领接线留阶段④。
+            // 本阶段只接驳 A' 并置 waiting_mcp；game_start 认领接线留阶段④。
             Driver::Mcp => run_mcp_task(app2, run2, cfg).await,
         }
     });
     Ok(run.id)
 }
 
-
 /// `agent_stop(id) -> null`：局中先 resign 再终止并清理。
 ///
 /// 顺序有契约（不可换）：认输先落地（对面要看到终局有因，而不是看到断线），
 /// 再取消配对/循环任务——`select!` 的取消就是 drop 那个 future，会话对随局部
-/// 变量一起就地清理（pair.rs 的失败路径同一手法）；最后摘掉 A' 的会话表项，
-/// 前端的轮询按既有语义（poll 失败即停泵）自然收摊。
+/// 变量一起就地清理（pair.rs 的失败路径同一手法）。
 #[tauri::command]
 pub async fn agent_stop(app: AppHandle, id: u32) -> Result<(), String> {
     let run = app.state::<AgentHub>().run(id).ok_or("run not found")?;
@@ -152,7 +155,7 @@ pub async fn agent_stop(app: AppHandle, id: u32) -> Result<(), String> {
                     snap.get("phase").and_then(|v| v.as_str()) == Some("playing")
                         && snap.get("winner").is_none_or(serde_json::Value::is_null);
                 if live {
-                    p.cmd(goptop_net::session::UiCommand::Resign);
+                    p.cmd(UiCommand::Resign);
                 }
                 live
             }
@@ -168,12 +171,9 @@ pub async fn agent_stop(app: AppHandle, id: u32) -> Result<(), String> {
     run.abort.store(true, Ordering::Relaxed);
     run.cancel.notify_one();
     run.set_terminal("done", Some("已停止".into()));
-    // 3) 清理：A' 表项摘除（前端轮询自然停）、运行表摘除（此后 status/events 报
-    //    not found——停止后的运行没有可读状态，属契约外调用）。
-    let front_id = { run.inner.lock().unwrap_or_else(|e| e.into_inner()).front_id };
-    if let Some(fid) = front_id {
-        crate::session::remove_session(&app.state::<crate::session::Sessions>(), fid);
-    }
+    // 3) 清理：运行表摘除（此后 status/events 报 not found——停止后的运行没有
+    //    可读状态）。A' 的会话表项**不动**——它归前端所有，由 AgentPage 的
+    //    teardown 走 dispose（session_drop）收摊，两边都摘只会互相竞争。
     app.state::<AgentHub>().remove(id);
     Ok(())
 }
@@ -220,8 +220,16 @@ pub fn agent_events(app: AppHandle, id: u32, since: u64) -> Result<String, Strin
 
 /// `agent_bind(sessionId) -> null`：登记人类侧 A' 会话 id（配对目标 + 拦截面豁免）。
 ///
-/// **配对目标**：配对完成前登记的 id，是 pair() 产出的 A' 在会话表里的落位
-/// （占位表项被换成真 A'，前端轮询无缝切换）；配对完成后登记的 id 只承担豁免。
+/// **配对目标**：登记的 id 就是配对用的那条 A'（Hub 从会话表取它结对 B）——
+/// A' 的表项归前端所有，Hub 不落位、不摘除。
+///
+/// **开局邀请代发**：登记时若该会话还空置（phase=home）就代发一次 `CreateInvite`。
+/// 前端流程（AgentPage.start 我执黑分支）是 bind → 等 inviteUrl 含 rtc →
+/// agent_start，而 A' 建在 /p2p 基座上、Boot 对 P2p 意图无动作（lobby.rs 的
+/// process_intent 空 branch）——不会自发邀请，本命令是链路里唯一能替 A' 按下
+/// 「开启对战」的点。**仅在 home 时发**：我执白方向的 A' 是携链 Boot 的受邀席，
+/// bind 时已进入受理过程，而 `create_invite` 没有任何 phase/role 守卫（lobby.rs
+/// 无条件重置为 Inviter/Waiting），误发会拆掉它正在进行的受理。
 #[tauri::command]
 pub fn agent_bind(app: AppHandle, session_id: String) -> Result<(), String> {
     let id: u32 = session_id
@@ -232,6 +240,18 @@ pub fn agent_bind(app: AppHandle, session_id: String) -> Result<(), String> {
         .bound
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(id);
+    let Some(sess) =
+        crate::session::session_handle(&app.state::<crate::session::Sessions>(), id)
+    else {
+        // 会话不在表里（wasm 后端 / 竞态释放）：登记值照存（豁免语义仍成立），
+        // 邀请代发无从谈起，不报错——配对任务取不到会话时再给人话错误。
+        return Ok(());
+    };
+    let _g = enter_runtime();
+    let front = NativePlayer::new(sess);
+    if front.snapshot().get("phase").and_then(serde_json::Value::as_str) == Some("home") {
+        front.cmd(UiCommand::CreateInvite);
+    }
     Ok(())
 }
 
@@ -368,20 +388,13 @@ impl AgentHub {
             .any(|r| r.is_live())
     }
 
-    /// 拦截面豁免的 A' 会话 id：优先存活局已落位的表 id，退回未消费的绑定值
-    /// （配对中 A' 还没落位，此时豁免的就是前端登记的占位 id）。
+    /// 拦截面豁免的 A' 会话 id：agent_bind 登记的绑定值（A' 归前端所有、id 即
+    /// 配对目标，绑定值就是豁免对象；局终了后 any_live 已放行，残留无碍）。
     pub(crate) fn exempt_session(&self) -> Option<u32> {
-        let live = self
-            .runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .find(|r| r.is_live())
-            .and_then(|r| r.inner.lock().unwrap_or_else(|e| e.into_inner()).front_id);
-        live.or(*self.bound.lock().unwrap_or_else(|e| e.into_inner()))
+        *self.bound.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 取走绑定值（配对任务的落位输入；取走即消费，避免影响后续运行）。
+    /// 取走绑定值（配对任务的接驳输入；取走即消费，避免影响后续运行）。
     fn take_bound(&self) -> Option<u32> {
         self.bound.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
@@ -419,8 +432,6 @@ struct RunInner {
     staging: Option<Arc<Staging>>,
     /// B 的执色（ticker 的 thinking/waiting 判定：轮到 B = thinking）。
     agent_color: Option<String>,
-    /// A' 在会话表的落位 id（拦截面豁免 + agent_stop 的清理对象）。
-    front_id: Option<u32>,
 }
 
 /// 一次 Agent 对局的运行时记录。任务持有它的 Arc，命令面经 AgentHub 查它。
@@ -459,7 +470,6 @@ impl Run {
                 player: None,
                 staging: None,
                 agent_color: None,
-                front_id: None,
             }),
         }
     }
@@ -548,62 +558,44 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
     });
 
     // —— 配对（select 硬取消：drop 配对 future = 半途的会话就地清理）。
-    let front_tauri = Arc::new(crate::session::TauriHost::new(app.clone()));
+    // A' 是前端登记的会话（bind），B 在这里创建；方向随执色（模块注的互锁流程）。
     let agent_tauri = Arc::new(crate::session::TauriHost::new(app.clone()));
-    let pair_cfg = PairConfig {
-        kind: cfg.kind.clone(),
-        size: cfg.size,
-        my_color: seat,
-        front_name: stored_name(&app),
-        agent_name: agent_name.clone(),
-        share_origin: SHARE_ORIGIN.into(),
-        front_host: front_tauri.clone() as Arc<dyn Host>,
-        agent_host: agent_tauri as Arc<dyn Host>,
-    };
     let paired = tokio::select! {
-        p = pair(pair_cfg) => match p {
+        p = pair_seats(&app, &run, &hub, &cfg, seat, agent_tauri.clone()) => match p {
             Ok(p) => p,
             Err(e) => {
                 run.set_terminal(ST_ERROR, Some(format!("配对失败：{e}")));
                 return;
             }
         },
-        // 用户在配对期点了停止：future 被 drop，半途建的两席随局部变量收摊。
+        // 用户在配对期点了停止：future 被 drop，半途建的会话随局部变量收摊。
         _ = run.cancel.notified() => {
             run.set_terminal(ST_DONE, Some("已停止".into()));
             return;
         }
     };
-
-    // —— 事件物化（player.rs 的纪律：基线在 spawn 前本任务同步取定）。
-    let queue = Arc::new(EventQueue::new());
-    paired.agent_hook.bind_events(&queue);
-    let baseline = event_baseline(&paired.agent_watch);
-    tokio::spawn(run_event_pump(EmitWatch::new(paired.agent_watch.clone_rx()), queue.clone(), baseline));
-
-    // —— A' 落位：占位 id（agent_bind）或新 id；真 A' 的后台泵自己转（前端轮询
-    //    叠加泵是幂等的，与 session_new 建的每个原生会话同款）。
-    let front_arc = paired.front.session().clone();
-    front_arc.start_pump();
-    let front_id = {
-        let sessions = app.state::<crate::session::Sessions>();
-        crate::session::adopt_session(&sessions, hub.take_bound(), front_arc, front_tauri)
-    };
+    let Seats { agent, agent_watch, agent_hook, front_id } = paired;
     let agent_color = seat.opponent().as_str().to_string();
     {
         let mut g = run.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.front_id = Some(front_id);
-        g.player = Some(paired.agent.clone());
+        g.player = Some(agent.clone());
         g.agent_color = Some(agent_color.clone());
     }
-    run.set_detail(Some(format!("已配对，A' 会话 id={front_id}")));
+    run.set_detail(Some(format!("已配对（A' 会话 id={front_id}），Agent 开始思考")));
+
+    // —— 事件物化（player.rs 的纪律：基线在 spawn 前本任务同步取定，晚起的泵
+    //    也吞不掉基线之后的事件）。
+    let queue = Arc::new(EventQueue::new());
+    agent_hook.bind_events(&queue);
+    let baseline = event_baseline(&agent_watch);
+    tokio::spawn(run_event_pump(EmitWatch::new(agent_watch.clone_rx()), queue.clone(), baseline));
 
     // —— 工具面：主循环与子代理各持一份 ToolCtx，Arc 底座共享同一局
     //    （Staging 尤其不能有两份——暂存区的一致性建立在单实例上）。
     let staging = Arc::new(Staging::new());
     let make_ctx = || ToolCtx {
-        player: Arc::new(LogPlayer { inner: paired.agent.clone(), ring: run.events.clone() }),
-        watch: EmitWatch::new(paired.agent_watch.clone_rx()),
+        player: Arc::new(LogPlayer { inner: agent.clone(), ring: run.events.clone() }),
+        watch: EmitWatch::new(agent_watch.clone_rx()),
         events: queue.clone(),
         staging: staging.clone(),
         memory: memory.clone(),
@@ -640,7 +632,7 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
     // —— 状态 ticker：轮到 B=thinking、轮到对手=waiting（循环本体是一口阻塞调用，
     //    内部相位它不外报；用快照的 toMove 反推是最诚实的近似）。
     let ticker_run = run.clone();
-    let ticker_player = paired.agent.clone();
+    let ticker_player = agent.clone();
     let ticker_color = agent_color;
     tokio::spawn(async move {
         loop {
@@ -697,57 +689,256 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
     }
 }
 
-/// MCP 模式任务（本阶段）：只建 A' 并置 waiting_mcp。
+/// MCP 模式任务（本阶段）：等 bind 接驳 A' 后置 waiting_mcp。
 ///
-/// 外部 Agent 的 `game_start` 认领、以 B 的邀请链接经 Boot 路径重配（我执白方向
-/// 时 A' 要携链创建）都属阶段④的 handler 接线；这里先把「人这席」立起来——
-/// 会话表落位与内置模式同一套（bind 落位 / 新 id + detail 回报）。
-async fn run_mcp_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg) {
+/// 外部 Agent 的 `game_start` 认领（含我执白方向 B 出链的接线）都属阶段④的
+/// handler 接线；这里先把「人这席」接好——A' 归前端（bind 登记），本任务只确认
+/// 它在表里可寻址，然后把状态交给 waiting_mcp 等 B 出现。
+async fn run_mcp_task(app: AppHandle, run: Arc<Run>, _cfg: StartCfg) {
     let hub = app.state::<AgentHub>();
-    let host = Arc::new(crate::session::TauriHost::new(app.clone()));
-    // 无服务器的 p2p 基座链接：on_boot 只认意图不落页，纯 base 即「坐等开局」。
-    let base = format!("{}/p2p", SHARE_ORIGIN.trim_end_matches('/'));
-    let session = {
-        let _g = enter_runtime();
-        Arc::new(NativeSession::new(
-            SessionConfig {
-                name: stored_name(&app),
-                server_mode: false,
-                share_origin: SHARE_ORIGIN.into(),
-                kind: cfg.kind.clone(),
-                size: cfg.size,
-            },
-            host.clone() as Arc<dyn Host>,
-            &base,
-        ))
+    let front_id = match wait_bound(&run, &hub, BIND_WAIT_SECS).await {
+        Some(id) => id,
+        None => {
+            run.set_terminal(ST_ERROR, Some("等待 agent_bind 超时：请先在前端登记 A' 会话".into()));
+            return;
+        }
     };
-    session.start_pump();
-    let front_id = {
-        let sessions = app.state::<crate::session::Sessions>();
-        crate::session::adopt_session(&sessions, hub.take_bound(), session, host)
-    };
+    if crate::session::session_handle(&app.state::<crate::session::Sessions>(), front_id).is_none()
     {
-        // A' 是人这席：认输/清理的落点在 A'（本阶段 B 还不存在）。
-        // player 留空——局都还没结，agent_stop 的认输分支自然跳过。
-        let mut g = run.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.front_id = Some(front_id);
+        run.set_terminal(
+            ST_ERROR,
+            Some(format!("登记的 A' 会话（id={front_id}）不在会话表里")),
+        );
+        return;
     }
+    // player 留空：本阶段 B 还不存在，agent_stop 的认输分支自然跳过；
+    // A' 的收尾归前端（它自己的会话它自己 dispose）。
     run.set_running(ST_WAITING_MCP);
     run.set_detail(Some(format!("等待 MCP Agent 接入…（A' 会话 id={front_id}）")));
+}
+
+/* ---------------- 会话对接线（pair.rs 同款原语；A' 归前端，B 由本壳创建） ---------------- */
+
+/// 配对成功后的 B 席与其事件源头（goptop-agent pair::Paired 的本壳变体——
+/// A' 归前端，不在此列；front_id 只是拦截面豁免的登记值）。
+struct Seats {
+    /// B（Agent 的无头会话；决策循环与工具层经 PlayerHandle 用它）。
+    agent: NativePlayer,
+    /// B 的快照推送流（事件物化的源头）。
+    agent_watch: EmitWatch,
+    /// B 的装饰宿主（bind 事件队列用；生命周期与整局同长）。
+    agent_hook: Arc<HookHost>,
+    /// A' 的会话表 id（= agent_bind 的登记值；拦截面豁免对象）。
+    front_id: u32,
+}
+
+/// 等 agent_bind 登记值出现的时长（覆盖前端的等待/建会话/登记全链路：
+/// 我执白方向前端 waitAgentLink 50s 后才 bind，本值留足余量）。
+const BIND_WAIT_SECS: u64 = 90;
+
+/// 等 agent_bind 的登记值（轮询 hub 的绑定槽；取消经 run.cancel 传播）。
+async fn wait_bound(run: &Run, hub: &AgentHub, secs: u64) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(id) = hub.take_bound() {
+            return Some(id);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            _ = run.cancel.notified() => return None,
+        }
+    }
+}
+
+/// 结对两席（内置模式）。
+///
+/// **我执黑**：A'（前端登记）已由 agent_bind 代发邀请——等它的 inviteUrl 含 rtc
+/// （未发则补发一次），携链创建 B；**我执白**：B 先建局邀请，链接经 `detail` 送
+/// 前端，等 agent_bind 接驳 A'（携链 Boot 的回执经进程内 presence 自动到 B）。
+/// 两个方向最后都泵到双端 `phase=="playing" && peerConnected`（headless.rs 验证
+/// 过的同一条路径；在此之前落子会被 can_place 静默拒绝）。
+async fn pair_seats(
+    app: &AppHandle,
+    run: &Run,
+    hub: &AgentHub,
+    cfg: &StartCfg,
+    seat: SeatColor,
+    agent_tauri: Arc<crate::session::TauriHost>,
+) -> Result<Seats, String> {
+    // B 席的宿主基座进 HookHost（临时 userId / stun 空 / emit 推 watch）——
+    // 与 pair.rs 同一纪律：调用方不预包，wrap 的临时 ID 才生效。
+    let (agent_hook, agent_watch) = HookHost::wrap(agent_tauri as Arc<dyn Host>);
+    let agent_cfg = SessionConfig {
+        name: cfg.agent_name.clone().unwrap_or_else(|| "Agent".into()),
+        server_mode: false,
+        share_origin: SHARE_ORIGIN.into(),
+        kind: cfg.kind.clone(),
+        size: cfg.size,
+    };
+
+    // 方向决定先后（模块注的互锁流程；每分支自取 A' 的登记值并建 B 会话）：
+    // Black 先等登记（bind 先于 agent_start），White 先出链（bind 后于 agent_start）
+    // ——两段 wait_bound 不能对调，否则就是「等一个只有出链才会发生的登记」死锁。
+    let (front, front_id, agent_session) = match seat {
+        SeatColor::Black => {
+            let front_id = wait_bound(run, hub, BIND_WAIT_SECS)
+                .await
+                .ok_or_else(|| "等待 agent_bind 超时：请先在前端登记 A' 会话".to_string())?;
+            let front = take_front(app, front_id)?;
+            // 邀请方是 A'：agent_bind 已代发（空置时）；这里兜底补发并等 rtc 编入链接。
+            if invite_link(&front).is_none() {
+                front.cmd(UiCommand::CreateInvite);
+            }
+            run.set_detail(Some("等待 A' 的邀请链接就绪…".into()));
+            wait_invite(&front, run).await?;
+            let link =
+                invite_link(&front).ok_or_else(|| "A' 的邀请链接未就绪（缺 rtc=）".to_string())?;
+            let s = Arc::new(NativeSession::new(agent_cfg, agent_hook.clone(), &link));
+            s.start_pump();
+            (front, front_id, s)
+        }
+        SeatColor::White => {
+            // B 先建局邀请（基座 /p2p），链接经 detail 送前端（AgentPage 的
+            // extractInviteLink 取含 rtc= 的 URL），前端携链 session_new 创建 A'
+            //（Boot 路径，session_new 的 href 参数本就支持）后 agent_bind 接驳；
+            // A' 的回执经进程内 presence 自动到 B，无需本任务转发。
+            let base = format!("{}/p2p", SHARE_ORIGIN.trim_end_matches('/'));
+            let s = Arc::new(NativeSession::new(agent_cfg, agent_hook.clone(), &base));
+            s.start_pump();
+            let bp = NativePlayer::new(s.clone());
+            run.set_detail(Some("Agent 席生成邀请中…".into()));
+            bp.cmd(UiCommand::CreateInvite);
+            wait_invite(&bp, run).await?;
+            let link =
+                invite_link(&bp).ok_or_else(|| "B 的邀请链接未就绪（缺 rtc=）".to_string())?;
+            run.set_detail(Some(format!(
+                "B 已就绪，请以此邀请链接创建 A'（携链 Boot 入局）：{link}"
+            )));
+            let front_id = wait_bound(run, hub, BIND_WAIT_SECS)
+                .await
+                .ok_or_else(|| "等待前端携链创建 A' 并 agent_bind 超时（90 秒）".to_string())?;
+            (take_front(app, front_id)?, front_id, s)
+        }
+    };
+
+    let agent = NativePlayer::new(agent_session);
+    wait_playing(&front, &agent, run).await?;
+    // A'（front）不进 Seats：它的表项与泵都归前端，结对完成即可放手。
+    Ok(Seats { agent, agent_watch, agent_hook, front_id })
+}
+
+/// 从会话表取登记的 A'（配对目标；表项归前端，这里只借句柄）。
+fn take_front(app: &AppHandle, front_id: u32) -> Result<NativePlayer, String> {
+    let arc = crate::session::session_handle(&app.state::<crate::session::Sessions>(), front_id)
+        .ok_or_else(|| format!("登记的 A' 会话（id={front_id}）不在会话表里"))?;
+    Ok(NativePlayer::new(arc))
+}
+
+/// 等一条会话的 inviteUrl 编入 rtc（≤40s；pair.rs 同口径同文案）。边泵边等。
+async fn wait_invite(p: &NativePlayer, run: &Run) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        p.pump();
+        if invite_link(p).is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            // 取消竞窗：停止与超时同时到时，停止优先（不再报一条误导性的超时）。
+            if run.state() == ST_DONE {
+                return Err("已停止".into());
+            }
+            return Err("40 秒内未生成含 rtc 的邀请链接（ICE gathering 未完成？）".into());
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = run.cancel.notified() => return Err("已停止".into()),
+        }
+    }
+}
+
+/// 泵两席到双双进入对局态（≤40s；pair.rs 的 wait_playing 同款与同文案）。
+async fn wait_playing(front: &NativePlayer, agent: &NativePlayer, run: &Run) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        front.pump();
+        agent.pump();
+        let (fs, as_) = (front.snapshot(), agent.snapshot());
+        if str_of(&fs, "phase") == "playing"
+            && str_of(&as_, "phase") == "playing"
+            && connected(&fs)
+            && connected(&as_)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            if run.state() == ST_DONE {
+                return Err("已停止".into());
+            }
+            // 失败带两席现场：卡在 waiting=信令没走到、playing 但未连=ICE 没通。
+            return Err(format!(
+                "40 秒内未双双进入对局态：front phase={} connected={} / agent phase={} connected={}",
+                str_of(&fs, "phase"),
+                connected(&fs),
+                str_of(&as_, "phase"),
+                connected(&as_),
+            ));
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = run.cancel.notified() => return Err("已停止".into()),
+        }
+    }
+}
+
+/// 邀请链接是否就绪（`rtc=` 参数在场——同源链接一开始就有，但不含 rtc 不算就绪）。
+fn invite_link(p: &NativePlayer) -> Option<String> {
+    p.snapshot()
+        .get("inviteUrl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|u| u.contains("rtc="))
+        .map(str::to_string)
+}
+
+fn str_of(s: &serde_json::Value, key: &str) -> String {
+    s.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string()
+}
+
+fn connected(s: &serde_json::Value) -> bool {
+    s.get("peerConnected").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /* ---------------- 配置装载（store → llm 层类型；纯函数便于单测） ---------------- */
 
 /// store 里 goptop:llm-config 的 JSON 形态（与前端设置卡同键同形）。
+/// protocol 先收字符串再归一（见 [`parse_protocol`]——拼写变体在线上出现过）。
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LlmCfgJson {
-    protocol: Protocol,
+    protocol: String,
     base_url: String,
     model: String,
     max_output_tokens: Option<u32>,
     reply_lang: Option<String>,
     enable_subagent: Option<bool>,
+}
+
+/// 协议拼写归一：goptop-agent 的 Protocol serde 值域是 snake_case
+/// （`anthropic` / `open_ai_responses` / `open_ai_chat`），而前端 AgentPage 写入的
+/// 拼写是 kebab 风格（`openai-responses` / `openai-chat`）——两路同键同字段不同拼，
+/// 归一在读取侧做（唯一读者），分隔符与大小写一律抹平后比对。
+fn parse_protocol(raw: &str) -> Result<Protocol, String> {
+    let t: String = raw.trim().to_lowercase().chars().filter(|c| *c != '-' && *c != '_').collect();
+    match t.as_str() {
+        "anthropic" => Ok(Protocol::Anthropic),
+        "openairesponses" => Ok(Protocol::OpenAiResponses),
+        "openaichat" => Ok(Protocol::OpenAiChat),
+        _ => Err(format!(
+            "LLM 配置的 protocol 无法识别：{raw:?}（可选 anthropic / openai-responses / openai-chat）"
+        )),
+    }
 }
 
 /// 上下文上限的合法区间（计划：用户可设，clamp [8k, 1M]）。
@@ -790,7 +981,7 @@ fn parse_llm_cfg(
         .unwrap_or(DEFAULT_CTX_LIMIT)
         .clamp(CTX_MIN, CTX_MAX);
     let cfg = LlmConfig {
-        protocol: j.protocol,
+        protocol: parse_protocol(&j.protocol)?,
         base_url: j.base_url.trim().trim_end_matches('/').to_string(),
         model: j.model.trim().to_string(),
         max_output_tokens: j.max_output_tokens.unwrap_or(1024).max(64),
@@ -805,13 +996,6 @@ fn parse_llm_cfg(
         return Err("LLM 配置不完整：端点与模型都不能为空".into());
     }
     Ok((cfg, key, ctx_limit, j.enable_subagent.unwrap_or(false)))
-}
-
-/// 用户的展示名（A' 会话名 = 聊天记录里人的名字；缺省「玩家」）。
-fn stored_name(app: &AppHandle) -> String {
-    let map = crate::store::store_load(app.clone()).unwrap_or_default();
-    let name = map.get(KEY_NAME).map(String::as_str).map(str::trim).filter(|s| !s.is_empty());
-    name.unwrap_or("玩家").to_string()
 }
 
 /// 暂存着法文本 → `(x, y)`（agent_status 的 stagedMove；pass/残缺 → None——
@@ -1101,6 +1285,26 @@ mod tests {
         let incomplete =
             cfg_map(&[(KEY_LLM_CONFIG, r#"{"protocol":"anthropic","baseUrl":" ","model":"m"}"#), (KEY_LLM_KEY, "k")]);
         assert!(parse_llm_cfg(&incomplete, "zh").unwrap_err().contains("不完整"));
+    }
+
+    /* ---- 协议拼写归一（F/G store 缝：前端 kebab、crate serde snake_case） ---- */
+
+    #[test]
+    fn 协议拼写归一_kebab与snake与大小写() {
+        assert!(matches!(parse_protocol("anthropic"), Ok(Protocol::Anthropic)));
+        assert!(matches!(parse_protocol("Anthropic"), Ok(Protocol::Anthropic)));
+        assert!(matches!(parse_protocol("openai-responses"), Ok(Protocol::OpenAiResponses)));
+        assert!(matches!(parse_protocol("openai_responses"), Ok(Protocol::OpenAiResponses)));
+        assert!(matches!(parse_protocol("openai-chat"), Ok(Protocol::OpenAiChat)));
+        assert!(matches!(parse_protocol("open_ai_chat"), Ok(Protocol::OpenAiChat)));
+        assert!(parse_protocol("claude").is_err(), "未知协议要给人话错误");
+        // 走全链路：前端写的 kebab 拼在 parse_llm_cfg 里也能吃下。
+        let map = cfg_map(&[
+            (KEY_LLM_CONFIG, r#"{"protocol":"openai-chat","baseUrl":"http://h","model":"m"}"#),
+            (KEY_LLM_KEY, "k"),
+        ]);
+        let (cfg, ..) = parse_llm_cfg(&map, "zh").expect("kebab 拼写应可解析");
+        assert!(matches!(cfg.protocol, Protocol::OpenAiChat));
     }
 
     /* ---- agent_start 的 cfg JSON（前端契约形状） ---- */

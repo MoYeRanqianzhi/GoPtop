@@ -155,32 +155,10 @@ pub fn session_new(
     Ok(Some(id))
 }
 
-/// 把一条**已建成**的会话接进会话表（AgentHub 专用——pair() 在 Rust 侧建的 A'
-/// 要经本函数才能被前端 `session_poll/session_cmd` 触达）。
-///
-/// - `at = None`：落到新 id（`agent_status.detail` 回给前端）；
-/// - `at = Some(id)`：**占位交换**（agent_bind 的「配对目标」）——该 id 的旧表项
-///   就地 drop（前端建的占位会话随停机标志收摊），前端对同一 id 的轮询无缝切到
-///   真 A' 的快照。
-///
-/// 后台泵照 `session_new` 的契约起：表里的每个原生会话都自转，前端轮询只是叠加泵。
-pub(crate) fn adopt_session(
-    sessions: &Sessions,
-    at: Option<u32>,
-    session: Arc<NativeSession>,
-    host: Arc<TauriHost>,
-) -> u32 {
-    session.start_pump();
-    let id = at.unwrap_or_else(|| NEXT_ID.fetch_add(1, Ordering::Relaxed));
-    if let Ok(mut m) = sessions.0.lock() {
-        m.insert(id, SessionEntry { session, host, last_served: None });
-    }
-    id
-}
-
-/// 摘除一个表项（AgentHub 的停止清理；返回是否真的摘了）。
-pub(crate) fn remove_session(sessions: &Sessions, id: u32) -> bool {
-    sessions.0.lock().map(|mut m| m.remove(&id).is_some()).unwrap_or(false)
+/// 取一条已建会话的句柄（AgentHub 专用——agent_bind 登记的 A' 归前端所有，
+/// Hub 只读句柄去结对 B；`None` = id 不在表里（竞态释放 / 非 原生端调用）。
+pub(crate) fn session_handle(sessions: &Sessions, id: u32) -> Option<Arc<NativeSession>> {
+    sessions.0.lock().ok()?.get(&id).map(|e| e.session.clone())
 }
 
 /// 释放会话（切页面/重开都要显式调，否则会话连同它的 tokio 任务一起常驻）。
