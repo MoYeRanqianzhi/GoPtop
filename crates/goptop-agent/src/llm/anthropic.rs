@@ -65,13 +65,15 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
         "max_tokens": req.max_output_tokens,
         "messages": merge_same_role(messages),
     });
-    // effort → extended thinking：预算给思考，max_tokens 必须盖住「思考+正文」，
-    // 否则思考吃光预算、正文零输出（stop=max_tokens 空手而归——实测卡住形态之一）。
+    // effort → extended thinking：预算表逐字对齐 pi DEFAULT_THINKING_BUDGETS
+    //（low 2048 / medium 8192 / high 16384，另有 MIN_ANSWER_TOKENS=1024 恒留给正文）。
+    // max_tokens 必须盖住「思考+正文」，否则思考吃光预算、正文零输出
+    //（stop=max_tokens 空手而归——实测卡住形态之一）。
     if let Some(level) = super::sanitize_effort(&cfg.effort) {
         let budget = match level.as_str() {
-            "low" => 1024,
-            "medium" => 4096,
-            _ => 10240,
+            "low" => 2048,
+            "medium" => 8192,
+            _ => 16384,
         };
         body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
         body["max_tokens"] = json!(req.max_output_tokens.max(1024) + budget);

@@ -334,11 +334,16 @@ html.app-tauri .poster-strip { padding-right: 138px; }
 
 /* —— 全局自设计滚动条（用户拍板 2026-10-08）：新粗野主义同款——墨色方块滑块、
    描边轨道；所有滚动区统一此风格（.agent-log 例外：自动置底不需要看见滚动条）。
-   对局页面整体不出滚动条（棋盘尺寸由 play-stack 自适应消化，页面级溢出是 bug）。 */
-* { scrollbar-width: thin; scrollbar-color: var(--ink) var(--bg-2); }
+   **只写 ::-webkit-scrollbar，不写 scrollbar-width/color 标准属性**——Chromium 里
+   一旦设置标准属性就会禁用 webkit 伪元素自定义，全站回退原生细条（第一版踩过）。
+   对局视图整体不出滚动条（棋盘尺寸由 play-stack 自适应消化）；设置卡等内容页
+   照常滚动、吃到自风格滚动条（:has 判「视图里有没有棋盘」，而不是按页面名硬编码）。 */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
-::-webkit-scrollbar-track { background: var(--bg-2); border: 2px solid var(--ink); }
-::-webkit-scrollbar-thumb { background: var(--ink); border: 2px solid var(--bg-2); }
+/* 白底墨轨（轨道不吃 --bg-2 红色——实测一条橙红粗条压过所有页面，2026-10-08 目检） */
+::-webkit-scrollbar-track { background: #fff; border: 2px solid var(--ink); }
+::-webkit-scrollbar-thumb { background: var(--ink); border: 2px solid #fff; }
 ::-webkit-scrollbar-thumb:hover { background: #3d3d3d; }
-::-webkit-scrollbar-corner { background: var(--bg-2); }
-.game-layout, .play-stack { overflow: hidden; }
+::-webkit-scrollbar-corner { background: #fff; }
+.game-layout { overflow: hidden; }
+.play-stack { overflow-x: hidden; overflow-y: auto; }
+.play-stack:has(.board-wrap) { overflow: hidden; }
