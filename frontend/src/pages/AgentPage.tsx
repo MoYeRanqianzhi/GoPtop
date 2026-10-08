@@ -621,17 +621,17 @@ export function AgentPage() {
   const kind = snap?.kind ?? setup.kind;
   const size = snap?.size ?? setup.size;
   const myColor = (snap?.myColor ?? setup.myColor) as "black" | "white";
-  const agentName = setup.agentName.trim() || "Agent";
+  /* 状态行文案与 P2P 同款极短式（useGameSession 的 statusText 就是「黑 落子」/「黑 胜」）：
+     这行在 BoardPanel 里是 18px 大字，长了必折行、卡片长高直接吃棋盘高度——
+     紧凑红线（2026-09-18 挤压教训）。「谁在行动」的语义由执色+侧栏状态卡表达。 */
   const statusText = snap?.winner
     ? `${snap.winner === "black" ? "黑" : "白"} 胜`
     : status.state === "error"
       ? "对局中止"
       : phase === "pairing"
         ? "配对中…"
-        : snap?.toMove === myColor
-          ? "轮到你落子"
-          : "Agent 行动中…";
-  const statusNote = status.state === "error" && status.detail ? status.detail : `对手 ${agentName} · 你执${myColor === "black" ? "黑" : "白"}`;
+        : `${snap?.toMove === "black" ? "黑" : "白"} 落子`;
+  const statusNote = status.state === "error" && status.detail ? status.detail : `执${myColor === "black" ? "黑" : "白"}`;
   const running = phase !== "setup";
 
   /* ============================ 渲染 ============================ */

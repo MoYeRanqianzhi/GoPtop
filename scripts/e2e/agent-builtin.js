@@ -116,7 +116,7 @@ async function sendChat(ep, text) {
   await ep.page.locator("button:visible", { hasText: "发送" }).first().click();
 }
 
-/** 落一手并等手数推进到 expect。statusText「轮到你落子」不含 peerConnected 判据，
+/** 落一手并等手数推进到 expect。statusText「黑/白 落子」不含 peerConnected 判据，
  *  配对刚收口时的点击会被 disabled 棋盘静默吞掉——以手数推进为准，未推进就重点。 */
 async function placeAndWait(ep, x, y, expect, timeoutPerTry = 12000) {
   for (let i = 0; i < 3; i++) {
@@ -237,7 +237,7 @@ async function diagDump(ep) {
     // —— 5) 开局 ——
     await ep.page.locator("button:visible", { hasText: "开始对局" }).first().click();
     console.log("[game] 已点开始，等配对…");
-    const playing = await waitText(ep, "轮到你落子", 120000, "配对完成（轮到你落子）");
+    const playing = await waitText(ep, "黑 落子", 120000, "配对完成（黑 落子）");
     check("配对完成、轮到人类（我执黑先行）", playing);
     if (!playing) {
       await diagDump(ep);
