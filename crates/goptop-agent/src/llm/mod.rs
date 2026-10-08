@@ -81,12 +81,15 @@ pub struct LlmConfig {
     pub debug: bool,
 }
 
-/// effort 档位防呆：只认 low/medium/high，其余（含空/未知）归 None。
-/// 宿主解析配置时调用——非法值打到 API 上是 4xx，防在这里比在运行面便宜。
+/// effort 档位归一（codex Custom(String) 模式）：**档位原值即接口**——
+/// low/medium/high/xhigh/max（乃至模型自定义值）原样透传给 API，未知值不该在
+/// 客户端被拒（codex 对不认识的档位走 Custom 照发）。空/空白归 None。
+/// 仅 Anthropic 预算路径需要「已知档位→预算」的映射（见 anthropic.rs，xhigh/max
+/// 按 pi clampReasoning 折到 high 档预算）。
 pub fn sanitize_effort(v: &Option<String>) -> Option<String> {
     v.as_ref()
         .map(|s| s.trim().to_lowercase())
-        .filter(|s| matches!(s.as_str(), "low" | "medium" | "high"))
+        .filter(|s| !s.is_empty())
 }
 
 /// 工具面在请求里的形态（由 tools.rs 的 `ToolDef` 装配而来）。

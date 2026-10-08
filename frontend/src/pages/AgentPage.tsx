@@ -111,10 +111,11 @@ export type LlmConfig = {
   replyLang: string;
   /** delegate 子代理开关（默认关）。 */
   enableSubagent: boolean;
-  /** 思考档位（用户拍板「设置 agent effort」）：""=无（不发思考参数）、
-   *  low/medium/high 按协议映射（Anthropic thinking 预算 / Responses reasoning /
-   *  Chat reasoning_effort）。打给不支持的模型会 4xx——描述里写明。 */
-  effort: "" | "low" | "medium" | "high";
+  /** 思考档位（用户拍板「设置 agent effort」，codex Custom(String) 模式）：
+   *  ""=无（不发思考参数）；档位原值即接口——low/medium/high/xhigh/max（乃至
+   *  模型自定义值）原样透传，Responses/Chat 直发，Anthropic 按预算表映射。
+   *  不支持的值模型 4xx—— Fatal 提示带排查向导。 */
+  effort: string;
   /** 测试模式（默认关）：思维链与输出全文进工具日志——诊断「Agent 疑似卡住」。 */
   debug: boolean;
 };
@@ -145,7 +146,7 @@ export function normalizeLlmConfig(raw: string | null): LlmConfig {
           : DEFAULT_LLM_CONFIG.maxOutputTokens,
       replyLang: typeof d.replyLang === "string" ? d.replyLang : "",
       enableSubagent: d.enableSubagent === true,
-      effort: d.effort === "low" || d.effort === "medium" || d.effort === "high" ? d.effort : "",
+      effort: typeof d.effort === "string" ? d.effort.trim().toLowerCase() : "",
       debug: d.debug === true,
     };
   } catch {
@@ -1019,7 +1020,7 @@ export function AgentPage() {
           </label>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>思考档位</span>
-            {(["", "low", "medium", "high"] as const).map((v) => (
+            {(["", "low", "medium", "high", "xhigh", "max"] as const).map((v) => (
               <button
                 key={v || "off"}
                 className={`brutal-btn brutal-btn--sm${llm.effort === v ? " brutal-btn--active" : ""}`}
@@ -1027,15 +1028,15 @@ export function AgentPage() {
                 disabled={!enabled}
                 title={
                   v === ""
-                    ? "不发思考参数（现状行为）"
-                    : "Anthropic=thinking 预算 / Responses=reasoning.effort / Chat=reasoning_effort；不支持的模型可能报错"
+                    ? "不发思考参数"
+                    : "原值直发：Responses=reasoning.effort / Chat=reasoning_effort；Anthropic 按 pi 预算表映射（xhigh/max 折 high 档预算）。不支持的模型会报错"
                 }
                 onClick={() => updateLlm({ effort: v })}
               >
-                {v === "" ? "无" : v === "low" ? "低" : v === "medium" ? "中" : "高"}
+                {v === "" ? "无" : v}
               </button>
             ))}
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>更深思考更费 token 与时间</span>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>原值直发，更高更费 token 与时间</span>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 800, width: 96 }}>测试模式</span>

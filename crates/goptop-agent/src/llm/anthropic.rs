@@ -65,12 +65,15 @@ fn build_body(cfg: &LlmConfig, req: &ChatRequest) -> Value {
         "max_tokens": req.max_output_tokens,
         "messages": merge_same_role(messages),
     });
-    // effort → extended thinking：预算表逐字对齐 pi DEFAULT_THINKING_BUDGETS
-    //（low 2048 / medium 8192 / high 16384，另有 MIN_ANSWER_TOKENS=1024 恒留给正文）。
+    // effort → extended thinking（预算路径，旧模型通吃）：预算表对齐 pi
+    // DEFAULT_THINKING_BUDGETS（minimal 1024 / low 2048 / medium 8192 / high 16384），
+    // xhigh/max 按 pi clampReasoning 折到 high 档预算；未知档位宁多不少同落 16384。
     // max_tokens 必须盖住「思考+正文」，否则思考吃光预算、正文零输出
-    //（stop=max_tokens 空手而归——实测卡住形态之一）。
+    //（stop=max_tokens 空手而归——实测卡住形态之一）。新模型的 adaptive+effort
+    // 直传路径需要模型代次表才判得准，v1 不做（配错就是 4xx Fatal，提示已带排查向导）。
     if let Some(level) = super::sanitize_effort(&cfg.effort) {
         let budget = match level.as_str() {
+            "minimal" => 1024,
             "low" => 2048,
             "medium" => 8192,
             _ => 16384,
