@@ -199,7 +199,7 @@ pub(crate) fn now_ms() -> u64;        // native = SystemTime 差值或既有口�
 | `vfs.rs:1179`（settle_and_reread 拍） | `tokio::time::sleep(50ms)` | `delay(50)` |
 | `agent_loop.rs:392`（空转限速拍） | `tokio::time::sleep(50ms)` | `delay(50)` |
 | `llm/mod.rs:330`（退避） | `tokio::time::sleep` | `delay(RETRY_BACKOFF_MS[i])` |
-| `player.rs:100,107,110` | Instant + `thread::sleep`（wait_until） | 随 trait 拆分移入 native-only 扩展（§3.3） |
+| `player.rs:100,107,110` | Instant + `thread::sleep`（wait_until） | cfg(not(wasm32)) 门内保留（§3.3/§8.9） |
 | `store.rs:325`（NativeStore::now_ms） | `SystemTime::now()` | 不改（随 rusqlite 留在 native 表） |
 
 ### 3.3 trait 面：PlatformHost 泛化 + wait_until 拆分
@@ -214,10 +214,14 @@ pub(crate) fn now_ms() -> u64;        // native = SystemTime 差值或既有口�
     钩子（store.ts:207-217 安装；缺钩子回落 localStorage——与 transport lib.rs:62-94 同款五
     行）；notice/copy 走 `window.goptopNotice/Copy`；nav 对 B 席恒吞（Hub 场景 B 不该导航）；
     emit no-op（B 的 emit 由 HookHost 覆写推 watch，内层无人消费）。
-- **`PlayerHandle::wait_until` 拆出**：生产代码零调用（只有 pair.rs/player.rs 测试在用，grep
-  证据 §探路）——从 trait 挪进 `pub trait TestPlayerExt: PlayerHandle`（native-only 默认实现，
-  保留 Instant+thread::sleep 现文），`NativePlayer` impl 它；wasm 的 WebPlayer 不需要。
-  trait 其余三方法（cmd/snapshot/pump）签名不变。
+- **`PlayerHandle::wait_until` 的 wasm 切割（原案拆 `TestPlayerExt`，落地修正见 §8.9）**：
+  生产代码零调用（只有 pair.rs/player.rs 测试在用，grep 证据 §探路）。拆独立 trait 无法在
+  「src-tauri 一行不改」红线下落地——src-tauri 的 LogPlayer 在 `impl PlayerHandle` 块内实现
+  wait_until 委托（src-tauri/src/agent.rs:1502-1508），方法出 trait 即编译错误。落地为：
+  wait_until 以 `#[cfg(not(target_arch = "wasm32"))]` 门保留在 trait 内（Instant+
+  thread::sleep 现文不变，理由见 player.rs 方法注）——**wasm 面仍是三方法**
+  （cmd/snapshot/pump），§6 冻结面的「拆后三方法」在 wasm 目标逐字成立；native 面四方法
+  照旧（NativePlayer/src-tauri LogPlayer 零改动）。
 - **pair.rs 整体 cfg(not(target_arch="wasm32"))**：web 侧配对原语在 transport 的 agent 模块
   镜像 src-tauri `pair_seats/claim_seats` 的形态（A' 归前端、B 由 Hub 建；`create_invite/
   wait_invite/wait_playing` ~80 行）。理由：pair.rs 以 `NativeSession` 为硬类型，而 web 的
@@ -322,9 +326,11 @@ pub(crate) fn now_ms() -> u64;        // native = SystemTime 差值或既有口�
 | 659-672 | `!desktop` 整页降级横幅 | 横幅仅 `!native && !webOk`（鸿蒙壳/产物未带 agent）；webOk 时不渲染横幅 |
 | 各处 `disabled={!desktop}` | 设置卡控件 | `disabled={!(native \|\| webOk)}`；MCP 连接卡/驱动按钮的门保持 `native`（仅桌面） |
 
-**5.3.1 双通道包装**：新 `frontend/src/net/agentWeb.ts`（新建）——
-`agentCall(cmd, args): Promise<string>`：`native`（isTauri）→ tauri invoke；web →
-`loadTransport()` 后 `mod[cmd](...)`。命令映射冻结（与 §5.3 的导出面一一对应）：
+**5.3.1 双通道包装（落点修正见 §8.8）**：落地为 `frontend/src/net/session.ts` 的
+`webAgentCall(cmd, args): Promise<string>`（与 `createDetachedSession`/`createSession`
+同文件，不另建 agentWeb.ts；web-only 语义以 `web` 前缀自名）——`native`（isTauri）→
+tauri invoke；web → `loadTransport()` 后 `mod[cmd](...)`。命令映射冻结（与 §5.3 的
+导出面一一对应）：
 
 ```
 agent_start(cfgJson) -> String   // {"ok":true,"id":N} | {"ok":false,"error"}
@@ -389,14 +395,16 @@ agent_llm_test() -> Promise<String>
 `build-transport.sh --features agent`。
 
 - **W1（crates/goptop-agent/** 独占）**：Cargo 目标表切割；`time_compat`（delay/now_ms）六+三
-  替换点；`PlatformHost` 泛化 + native blanket；`wait_until` 拆 `TestPlayerExt`；pair.rs
+  替换点；`PlatformHost` 泛化 + native blanket；`wait_until` cfg(not(wasm32)) 门内保留
+  （§8.9）；pair.rs
   cfg(not(wasm))；wait_events cfg(mcp) 门；`llm/web_http.rs`；`store_web.rs` + store.rs 配额
   helper 抽取；`src/wasm.rs`（WebHost/now_ms/rand）。验证：`cargo check -p goptop-agent
   --target wasm32-unknown-unknown` + `cargo test -p goptop-agent`（native 全绿）→ commit。
 - **W2（crates/goptop-transport/**、frontend/**、scripts/e2e/**、scripts/build-transport.sh
   独占）**：per-core 路由修复 + Core.on_change/suppress_nav；`new_agent/agent_id`；
   FRONT 注册表；`src/agent.rs`（WebPlayer/Hub/配对原语/拦截面/导出面）；
-  build-transport.sh；`agentVfs.ts`+`agentWeb.ts`+`createDetachedSession`+AgentPage 翻转；
+  build-transport.sh；`agentVfs.ts`+`session.ts` 的 webAgent 通道（§8.8）+
+  `createDetachedSession`+AgentPage 翻转；
   e2e 三脚本与 vitest。验证：`cargo build -p goptop-transport --features agent --target
   wasm32-unknown-unknown` + vitest/tsc + agent-entry/agent-builtin(web) 绿 → commit。
 - 时序：W2 的 transport Rust 部分只依赖 §冻结面里 W1 已存在的 API（HookHost/EventQueue/
@@ -439,3 +447,13 @@ agent_llm_test() -> Promise<String>
    transport 一行」仅对阶段①-④成立；双会话是阶段⑤的硬前提（§2.2a）。
 7. **Hub/Run/事件环在 transport 内复刻而非共享**：src-tauri 红线不可动，桌面与 web 的 Hub 是
    两份镜像实现，以 §5.3.1 的 JSON 契约为唯一冻结点（§2.2b/§3.4 末条）。
+8. **webAgent 双通道包装并入 `session.ts`，不建 `agentWeb.ts`**（§5.3.1 原写新建文件、
+   预写函数名 `agentCall`）：`webAgentAvailable`/`webAgentCall` 与 `createDetachedSession`/
+   `createSession` 同文件落地，函数名加 `web` 前缀——纯落点/命名偏差，签名与行为照
+   冻结面逐字（webAgentAvailable 四道判定 §5.3.2、webAgentCall 折叠不 throw §5.3.1），
+   vitest 用例与 AgentPage 导入同源。
+9. **`wait_until` 不拆 `TestPlayerExt`，以 `#[cfg(not(target_arch = "wasm32"))]` 门保留在
+   `PlayerHandle` 内**（§3.3 原案）：拆独立 trait 会迫使 src-tauri 的 LogPlayer（
+   `impl PlayerHandle` 块含 wait_until 委托，src-tauri/src/agent.rs:1502-1508）同步删方法，
+   违反「src-tauri 一行不改」红线；cfg 门下 wasm 面仍为三方法（§6 冻结面形状不变），
+   native 面多一个 native-only 必实现方法（NativePlayer 与 LogPlayer 均已实现，零改动）。

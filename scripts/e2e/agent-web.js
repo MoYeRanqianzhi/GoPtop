@@ -7,8 +7,8 @@
  * 真实 LLM 端点/key 一律不入库——本脚本只认 127.0.0.1 随机口的本地桩。
  *
  * 流程：
- *   1) 前置：frontend/dist 已构建（wasm 产物须带 agent 导出，见 build-transport.sh
- *      的 GOPTOP_TRANSPORT_AGENT=1）；本脚本自起 serve.js（5173，占用自动换 5174）；
+ *   1) 前置：frontend/dist 已构建（wasm 产物须带 agent 导出——build-transport.sh
+ *      默认带 agent feature）；本脚本自起 serve.js（5173，占用自动换 5174）；
  *   2) 起本地 mock 桩（127.0.0.1 随机口，CORS 全开）；
  *   3) 开浏览器：addInitScript 预置 localStorage（浏览器后端 = localStorage，store.ts）
  *      的 llm-config/llm-key/server-sel → 直达 /agent。**key 必须 ASCII**：浏览器
@@ -249,11 +249,17 @@ async function diagDump(ep) {
     // 拦截面：Agent 局存活期间，主会话（window.__session）的开局命令必须被拒。
     // Web 的 wasm 导出不回值——断言两路：goptopNotice 收到「Agent 对局进行中」提示
     // （拦截面契约文案），且主会话快照不产生含 rtc 的邀请链接（命令确未入队）。
+    // snapshot() 在 web 是 JSON 串（WasmSessionAdapter 直通 wasm 导出），必须
+    // 解析后取 inviteUrl——对串直取属性恒 undefined，「未入队」一腿会恒真。
     const intercepted = await ep.page.evaluate(async () => {
       const s = window.__session;
       if (!s) return { ok: false, error: "__session 不在场" };
-      const before = s.snapshot();
-      const hadInvite = !!(before && before.inviteUrl && String(before.inviteUrl).includes("rtc="));
+      const parseSnap = (t) => { try { return JSON.parse(t); } catch { return null; } };
+      const hasInvite = (snap) => {
+        const u = snap && typeof snap === "object" ? snap.inviteUrl : null;
+        return !!u && String(u).includes("rtc=");
+      };
+      const hadInvite = hasInvite(parseSnap(s.snapshot()));
       let noticed = null;
       const w = window;
       const orig = w.goptopNotice;
@@ -263,8 +269,7 @@ async function diagDump(ep) {
       };
       try { s.create_invite(); } finally { w.goptopNotice = orig; }
       await new Promise((r) => setTimeout(r, 300));
-      const after = s.snapshot();
-      const gainedInvite = !hadInvite && !!(after && after.inviteUrl && String(after.inviteUrl).includes("rtc="));
+      const gainedInvite = !hadInvite && hasInvite(parseSnap(s.snapshot()));
       return { ok: !gainedInvite && (noticed ?? "").includes("Agent 对局进行中"), noticed, gainedInvite };
     });
     check("拦截面：局中主会话 createInvite 被拒（notice 文案 + 未入队）",
