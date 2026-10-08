@@ -10,9 +10,10 @@
  *   经 net/session 门面 createSession 的 onChange 注入自管 poll（window.goptopOnChange
  *   是单槽，A' 再挂上去会把主会话的订阅顶掉）。
  * - A' 经 `agent_bind` 登记给后端 AgentHub（配对目标 + 拦截面豁免），`agent_start`
- *   起 B 席并在后端结对。方向随执子：我执黑=A' 先邀请（前端驱动 create_invite，
- *   链含 rtc 后交 Hub）；我执白=B 先邀请（`agent_start` 先行，邀请链接经
- *   `agent_status` 的 detail 送回，A' 以 Boot 路径携链创建）。
+ *   起 B 席并在后端结对。方向随执子：我执黑=A' 先邀请（bind 登记时后端代发
+ *   create_invite，链含 rtc 后再 agent_start 交 Hub）；我执白=B 先邀请
+ *  （`agent_start` 先行，邀请链接经 `agent_status` 的 detail 送回，A' 以 Boot
+ *   路径携链创建）。
  * - 本页渲染 A' 的棋盘/聊天/协商横幅，另加 Agent 状态卡（agent_status + agent_events）。
  *
  * 布局（与 P2P 页的「棋盘栈 + 聊天停靠栏」同构）：本组件挂在 App 的 game-layout 下
@@ -510,8 +511,10 @@ export function AgentPage() {
       size: setup.size,
     });
     const href = link ?? `${shareOrigin().replace(/\/$/, "")}/p2p`;
-    // onChange 注入：A' 的快照变化只喂本页（单槽详见 session.ts 注）
-    const s = await createSession(cfg, href, () => setSnap(parseAgentSnap(aPrimeRef.current?.snapshot() ?? null)));
+    // onChange 注入：A' 的快照变化只喂本页（单槽详见 session.ts 注）。
+    // suppressNav：状态机在受理回执/挑战时会发 Nav("/p2p")——那是「页面级」导航，
+    // 对常驻 /agent 的 A' 是错误导航，执行了会把整页拖离、随卸载拆掉整局。
+    const s = await createSession(cfg, href, () => setSnap(parseAgentSnap(aPrimeRef.current?.snapshot() ?? null)), { suppressNav: true });
     // A' 自管 poll 立刻起泵：我执黑方向随后要在 waitInviteReady 里读快照缓存，
     // 没有泵就永远是 createSession 首拍那份旧缓存（inviteUrl 永远等不到 rtc=）
     s.start_pump();
@@ -580,19 +583,20 @@ export function AgentPage() {
         }
         adopt(created);
       } else {
-        // 我执黑：A' 先建局邀请 → 链含 rtc → 登记 → agent_start 让后端携 B 入局
+        // 我执黑：A' 建局 → bind 登记（后端代发 CreateInvite——A' 建在 /p2p 基座上
+        // 不会自发邀请，先等 rtc 再 bind 会互相等死）→ 链含 rtc → agent_start 结对
         const created = await bootFront(null);
         if (disposedRef.current) {
           await created.dispose();
           return;
         }
         aPrimeRef.current = created;
-        await waitInviteReady(created);
         try {
           await agentInvoke("agent_bind", { sessionId: String(created.nativeId?.() ?? "") });
         } catch (e) {
           throw new Error(`登记 A' 会话失败: ${e instanceof Error ? e.message : String(e)}`);
         }
+        await waitInviteReady(created);
         const runId = await agentInvoke<number>("agent_start", { cfgJson });
         runIdRef.current = runId;
         adopt(created);

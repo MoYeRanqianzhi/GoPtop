@@ -593,6 +593,9 @@ async fn run_builtin_task(app: AppHandle, run: Arc<Run>, cfg: StartCfg, seat: Se
     // —— 工具面：主循环与子代理各持一份 ToolCtx，Arc 底座共享同一局
     //    （Staging 尤其不能有两份——暂存区的一致性建立在单实例上）。
     let staging = Arc::new(Staging::new());
+    // agent_status 的 stagedMove 读数必须挂在**同一份** Staging 上：这里的本地
+    // Arc 只喂了 ToolCtx 的话，状态回执永远读不到暂存着法，棋盘的幽灵子不画。
+    run.inner.lock().unwrap_or_else(|e| e.into_inner()).staging = Some(staging.clone());
     let make_ctx = || ToolCtx {
         player: Arc::new(LogPlayer { inner: agent.clone(), ring: run.events.clone() }),
         watch: EmitWatch::new(agent_watch.clone_rx()),

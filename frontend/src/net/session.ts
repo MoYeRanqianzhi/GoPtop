@@ -169,9 +169,16 @@ class NativeSessionAdapter implements GameSession {
      * （谁后挂载谁赢，另一边从此收不到任何更新）。
      */
     private readonly onChange: () => void,
+    /**
+     * 吞掉宿主 Nav 动作。AgentPage 的 A' 必须开：状态机的 Nav 目标永远是 /p2p、/
+     * 这类「页面级」路径（受邀回执受理、挑战受理都会发 Nav，lobby.rs:476/793），
+     * 对常驻 /agent 的 A' 全是错误导航——执行了会把整页拖离 Agent 对战、随卸载
+     * 拆掉整局（2026-10-08 壳级 e2e 实测）。主会话缺省 false，行为零变化。
+     */
+    private readonly suppressNav: boolean,
   ) {}
 
-  static async create(call: NativeCall, cfgJson: string, href: string, onChange?: () => void): Promise<NativeSessionAdapter> {
+  static async create(call: NativeCall, cfgJson: string, href: string, onChange?: () => void, opts?: { suppressNav?: boolean }): Promise<NativeSessionAdapter> {
     const raw = await call("session_new", JSON.stringify({ cfgJson, href }));
     const id = JSON.parse(raw) as number | null;
     // 建会话失败就抛：静默给个哑会话，上层会以为「连上了但什么都没发生」。
@@ -186,6 +193,7 @@ class NativeSessionAdapter implements GameSession {
       onChange ?? (() => {
         (window as unknown as Record<string, (() => void) | undefined>).goptopOnChange?.();
       }),
+      opts?.suppressNav === true,
     );
     await a.pump();
     return a;
@@ -229,8 +237,8 @@ class NativeSessionAdapter implements GameSession {
     } else if (a.t === "copy") {
       (w.goptopCopy as ((s: string) => void) | undefined)?.(JSON.stringify({ text: a.text, ok: "已复制" }));
     } else if (a.t === "nav") {
-      // 与 wasm 侧 `Effect::Nav` 同款：pushState + popstate
-      nav(a.path);
+      // 与 wasm 侧 `Effect::Nav` 同款：pushState + popstate（suppressNav 见构造注）
+      if (!this.suppressNav) nav(a.path);
     } else if (a.t === "store") {
       // 鸿蒙侧 Rust 读不到 JS 的存储门面，写入只能回传过来由**本层落盘**——
       // 保证全程只有 JS 一个写者（两个写者会互相覆盖，且不报错）。
@@ -381,9 +389,14 @@ function loadTransport(): Promise<typeof import("../wasm/transport/goptop_transp
  * wasm 分支用**动态 import**：静态 import 会让三端都把 `goptop_transport_bg.wasm`
  * 拉下来——那正是本轮要消掉的东西（安卓实测的资源时间线里它一直在）。
  */
-export async function createSession(cfgJson: string, href: string, onChange?: () => void): Promise<GameSession> {
+export async function createSession(
+  cfgJson: string,
+  href: string,
+  onChange?: () => void,
+  opts?: { suppressNav?: boolean },
+): Promise<GameSession> {
   const call = nativeCall();
-  if (call) return await NativeSessionAdapter.create(call, cfgJson, href, onChange);
+  if (call) return await NativeSessionAdapter.create(call, cfgJson, href, onChange, opts);
   const mod = await loadTransport();
   return new WasmSessionAdapter(new mod.WasmSession(cfgJson));
 }

@@ -133,7 +133,11 @@ export default function App() {
   // useGameSession 里 incoming 与 serverIncoming 是同一字段（useGameSession.tsx:166/302），故下面
   // incoming 分支不可达，可简化为 serverIncoming 单分支。只在主页状态出现，必须明确同意/拒绝，
   // 不设背景点击关闭——静默忽略会让挑战方停在「等待对方同意」。
-  const inviteReq = serverIncoming
+  //
+  // /agent 不渲染：Agent 对战期间 B 席把 rtcAns 回执以 challenge 形态经进程内 presence
+  // 带回（lobby.rs:661，无 to 过滤），主会话会把它误当挑战弹窗——而此刻拦截面本来就会
+  // 拒绝主会话的一切开局命令（agent.rs intercept），弹窗只会诱导误点。
+  const inviteReq = mode === "agent" ? null : serverIncoming
     ? {
         fromName: serverIncoming.fromName,
         desc: `${serverIncoming.kind === "gomoku" ? "五子棋" : "围棋"} ${serverIncoming.size}×${serverIncoming.size}`,
