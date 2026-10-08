@@ -431,11 +431,42 @@ mod tests {
         let err = classify_status(401, "invalid x-api-key");
         assert!(matches!(err, LlmError::Fatal(_)));
     }
+
+    #[test]
+    fn excerpt_never_embeds_html_pages_or_breaks_lines() {
+        // 网关 404 回整页 HTML（实测 5663 字节）——摘要化，不嵌原文
+        let html = "<!DOCTYPE html><html lang=\"en\">\n  <head><meta charset=\"utf-8\">…</head></html>";
+        let out = excerpt(html);
+        assert!(out.starts_with("<非 JSON 响应："), "{out}");
+        assert!(!out.contains("DOCTYPE"), "{out}");
+        // 长 JSON 错误体：单行 + 160 钳 + 省略号
+        let long = format!("{{\"error\":{}}}", "x".repeat(400));
+        let out = excerpt(&long);
+        assert_eq!(out.chars().count(), 161, "{out}");
+        assert!(out.ends_with('…'), "{out}");
+        assert!(!out.contains('\n'), "{out}");
+        // 短错误体原样保留
+        assert_eq!(excerpt("model not found"), "model not found");
+    }
 }
 
-/// 错误体截断（进 agent_status.error 的文本；错误体可能是整页 HTML）。
+/// 错误体截断（进 agent_status.error 的文本）。错误体可能是整页 HTML（网关 404 回
+/// 落地页实测 5663 字节）——原样嵌入会把前端状态卡挤爆（紧凑红线），所以 HTML 页
+/// 一律摘要化；其余压成单行再钳 160 字符，换行/制表等空白折叠成空格防折行。
 fn excerpt(body: &str) -> String {
-    body.chars().take(400).collect()
+    let trimmed = body.trim();
+    if trimmed.starts_with('<') {
+        return format!("<非 JSON 响应：{} 字节>", body.len());
+    }
+    let single_line: String = trimmed
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let mut out: String = single_line.chars().take(160).collect();
+    if single_line.chars().count() > 160 {
+        out.push('…');
+    }
+    out
 }
 
 /* ---------------- 测试件：本地 std::TcpListener 裸 HTTP 桩 ---------------- */

@@ -756,7 +756,10 @@ export function AgentPage() {
       : phase === "pairing"
         ? "配对中…"
         : `${snap?.toMove === "black" ? "黑" : "白"} 落子`;
-  const statusNote = status.state === "error" && status.detail ? status.detail : `执${myColor === "black" ? "黑" : "白"}`;
+  /* 错误详情钳制成单行短句（Rust 侧 excerpt 已摘要化，这里兜底防其它来源的长文案
+     再挤爆状态卡——紧凑红线；全文仍在工具日志与 agent_status 可查）。 */
+  const errNote = status.state === "error" && status.detail ? status.detail.split("\n")[0].slice(0, 80) : "";
+  const statusNote = errNote || `执${myColor === "black" ? "黑" : "白"}`;
   const running = phase !== "setup";
   /* 页面启用态：桌面原生或 web 后端其一就绪即可用；横幅只在两头都不可用时出
      （鸿蒙壳 / web 产物未带 agent 导出）。 */
