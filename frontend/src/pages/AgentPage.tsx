@@ -454,6 +454,26 @@ export function AgentPage() {
     storeSet(KEY_MCP_TOKEN, v);
   }
 
+  /** 重新生成 token：落盘新串；服务器在跑就**同步重启**（agent_mcp_set(true)——
+   *  先停旧实例再按当前 store 起新的）。链路事实：token 只在 McpServer::start 时
+   *  烘焙进鉴权中间件，不重启的话运行中的服务器仍认旧串、新串反而 401——「旧串
+   *  立即作废」只在重启后成立。连接卡只在对局外渲染（设置卡），重启不会拆活局。 */
+  async function regenerateMcpToken() {
+    const next = genMcpToken();
+    setMcpToken(next);
+    // 可等待写：store_set 与 agent_mcp_set 在 Rust 侧并发无先后承诺（persistSettings 同款教训），
+    // 先落盘再重启，重启读到的一定是新串。
+    await storeSetAsync(KEY_MCP_TOKEN, next);
+    if (mcpInfo?.enabled) {
+      try {
+        const raw = await agentInvoke<string>("agent_mcp_set", { enabled: true });
+        setMcpInfo(JSON.parse(raw) as { enabled: boolean; url: string | null; token: string | null });
+      } catch {
+        /* 壳未带 agent.rs：新串下次启用服务器时生效 */
+      }
+    }
+  }
+
   /** 落盘当前设置（开始/测试连接前调——后端读的是存储，不是本组件 state）。
    *  用可等待写并 await：store_set 与 agent_start/agent_llm_test 在 Rust 侧并发
    *  执行无先后承诺，fire-and-forget 会让开局/测试读到上一份配置（错 key/错模型）。 */
@@ -750,8 +770,8 @@ export function AgentPage() {
             <input value={mcpToken} style={{ ...inputStyle, flex: 1, minWidth: 160 }} onChange={(e) => updateMcpToken(e.target.value)} />
             <button
               className="brutal-btn brutal-btn--sm"
-              title="重新生成随机 Bearer Token（旧串立即作废）"
-              onClick={() => updateMcpToken(genMcpToken())}
+              title="重新生成随机 Bearer Token（服务器运行中会自动重启使旧串立即作废；未运行则下次启用生效）"
+              onClick={() => void regenerateMcpToken()}
             >
               重新生成
             </button>
@@ -759,7 +779,16 @@ export function AgentPage() {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <button
               className="brutal-btn brutal-btn--sm"
-              onClick={() => void copyText(buildMcpJson(mcpInfo?.url ?? `http://127.0.0.1:${mcpPort.trim() || "9537"}/mcp`, mcpInfo?.token ?? mcpToken), "连接串已复制")}
+              onClick={() => {
+                // 真相分型：运行中→info 的实际 url/token（端口回退、运行中的 token 以实例为权威）；
+                // 未运行→当前输入（store 即下次启动的配置，state 里的 info 只是上次查询的快照——
+                // 重新生成/手动改串后照抄它会把已作废的旧串复制出去）。
+                const url = mcpInfo?.enabled
+                  ? mcpInfo.url ?? `http://127.0.0.1:${mcpPort.trim() || "9537"}/mcp`
+                  : `http://127.0.0.1:${mcpPort.trim() || "9537"}/mcp`;
+                const token = mcpInfo?.enabled ? mcpInfo.token ?? mcpToken : mcpToken;
+                void copyText(buildMcpJson(url, token), "连接串已复制");
+              }}
             >
               复制 .mcp.json 连接串
             </button>

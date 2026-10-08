@@ -106,24 +106,24 @@ async function moveCount(ep) {
   });
 }
 
-/** 落子（真实输入事件；坐标换算与 BoardSvg 互逆，同 agent-builtin.js）。 */
+/** 落子（真实输入事件；坐标换算与 BoardSvg 互逆，同 agent-builtin.js）。
+ *  坐标在页面里换算成视口像素，点击走 page.mouse.click——CDP 受信输入、过浏览器
+ *  命中测试。page.evaluate 里 svg.dispatchEvent 的合成事件（isTrusted=false）绕过
+ *  命中测试，会让「覆盖层挡住棋盘导致真人点不进」这类回归被假绿掩盖。 */
 async function place(ep, x, y) {
   await ep.page.locator('svg[role="grid"]').first().scrollIntoViewIfNeeded().catch(() => {});
-  await ep.page.evaluate(([gx, gy]) => {
+  const { cx, cy } = await ep.page.evaluate(([gx, gy]) => {
     const svg = document.querySelector('svg[role="grid"]');
     const r = svg.getBoundingClientRect();
     const vb = svg.viewBox.baseVal.width;
     const n = Number((svg.getAttribute("aria-label") || "").match(/(\d+)x\d+/)?.[1]) || 15;
     const pad = 30, cell = (vb - pad * 2) / (n - 1);
-    const cx = r.left + (pad + gx * cell) * (r.width / vb);
-    const cy = r.top + (pad + gy * cell) * (r.height / vb);
-    for (const type of ["pointermove", "pointerdown", "pointerup", "click"]) {
-      const ev = type.startsWith("pointer")
-        ? new PointerEvent(type, { bubbles: true, clientX: cx, clientY: cy, pointerId: 1 })
-        : new MouseEvent(type, { bubbles: true, clientX: cx, clientY: cy });
-      svg.dispatchEvent(ev);
-    }
+    return {
+      cx: r.left + (pad + gx * cell) * (r.width / vb),
+      cy: r.top + (pad + gy * cell) * (r.height / vb),
+    };
   }, [x, y]);
+  await ep.page.mouse.click(cx, cy);
 }
 
 /** 落一手并等手数推进到 expect；棋盘 disabled 的静默吞点用重试兜住。 */
@@ -325,6 +325,7 @@ function coordsOf(moves) {
     // 会让「write 暂存后卡死」的局永远等下去（实测踩过）。
     let lastProgressAt = Date.now();
     let lastLlmCalls = -1, lastAgentMoveCount = -1, lastAgentMoveAt = null, lastGhost = null;
+    let humanPlaced = 0; // 我方**真正落盘**的手数（placeAndWait 以手数推进为准）
 
     while (Date.now() - t0 < GAME_BUDGET) {
       const st = await obs.poll();
@@ -386,6 +387,7 @@ function coordsOf(moves) {
           continue;
         }
         occupied.add(`${p.x},${p.y}`);
+        humanPlaced += 1;
         lastHandledMc = mc;
       } else {
         // 等 Agent（进展时钟由上方统一维护，这里只让轮询节奏）
@@ -394,7 +396,7 @@ function coordsOf(moves) {
     }
     const gameElapsed = Date.now() - t0;
     await obs.poll();
-    console.log(`[game] 循环收束：耗时 ${(gameElapsed / 1000).toFixed(1)}s，Agent 落子 ${obs.agentMoves.length} 手，聊天 ${obs.chats} 条，LLM 调用 ${obs.llmCalls} 次，winner=${winner ?? "无"}`);
+    console.log(`[game] 循环收束：耗时 ${(gameElapsed / 1000).toFixed(1)}s，我方落盘 ${humanPlaced} 手，Agent 下达落子命令 ${obs.agentMoves.length} 手，聊天 ${obs.chats} 条，LLM 调用 ${obs.llmCalls} 次，winner=${winner ?? "无"}`);
 
     // —— 6) 无人获胜就主动认输收尾（认输是两步确认，ChatPanel 内） ——
     if (!winner && obs.errorState === null) {
@@ -422,11 +424,16 @@ function coordsOf(moves) {
     }
     await shot(ep, "06-endgame.png");
 
-    // —— 8) 门槛判定（全部以 Hub 权威口径为准） ——
+    // —— 8) 门槛判定（落盘口径为权威：终局手数 − 我方落子 = Agent 真正上盘的子。
+    //    agent_events 环的 submit:move 是 LogPlayer 在 UiCommand **下达时**记的条目
+    //    （ok 恒 true 表「已下达」），下达≠落盘——被状态机竞态拒绝的落子同样留条目，
+    //    只可作旁证，不作门槛）。 ——
+    const finalMc = await moveCount(ep);
+    const agentOnBoard = finalMc - humanPlaced;
     check("开局聊天在案（submit:chat ≥1）", obs.chats >= 1, `聊天 ${obs.chats} 条`);
-    check(`Agent 真实落子 ≥${MIN_AGENT_MOVES} 手（均为白方应手）`,
-      obs.agentMoves.length >= MIN_AGENT_MOVES,
-      `实际 ${obs.agentMoves.length} 手：${obs.agentMoves.slice(0, 8).join(" / ")}${obs.agentMoves.length > 8 ? " …" : ""}`);
+    check(`Agent 真实落盘 ≥${MIN_AGENT_MOVES} 手（均为白方应手）`,
+      agentOnBoard >= MIN_AGENT_MOVES,
+      `落盘 ${agentOnBoard} 手（手数 ${finalMc} − 我方 ${humanPlaced}）；日志下达 ${obs.agentMoves.length} 手：${obs.agentMoves.slice(0, 8).join(" / ")}${obs.agentMoves.length > 8 ? " …" : ""}`);
     check("全程无 error 态", obs.errorState === null, obs.errorState ?? "无");
     const st = obs.lastStatus ?? {};
     check("LLM 真实调用在案（llmCalls>0 且 tokensIn>0）",
@@ -441,8 +448,9 @@ function coordsOf(moves) {
 
     console.log("\n===== 实测账目 =====");
     console.log(JSON.stringify({
-      agentMoves: obs.agentMoves.length,
-      moveCoords: coordsOf(obs.agentMoves),
+      agentMovesOnBoard: agentOnBoard,
+      agentMovesIssued: obs.agentMoves.length,
+      moveCoordsIssued: coordsOf(obs.agentMoves),
       chats: obs.chats,
       llmCalls: st.llmCalls ?? obs.llmCalls,
       tokensIn: st.tokensIn ?? null,

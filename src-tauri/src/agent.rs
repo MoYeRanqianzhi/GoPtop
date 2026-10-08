@@ -75,7 +75,8 @@ const KEY_LLM_CONFIG: &str = "goptop:llm-config";
 const KEY_LLM_KEY: &str = "goptop:llm-key";
 /// 上下文上限 tokens（clamp [8k, 1M]，缺省 [`DEFAULT_CTX_LIMIT`]）。
 const KEY_CTX_LIMIT: &str = "goptop:agent-ctx-limit";
-/// MCP 开关（本阶段只落键；server 启动留阶段④）。
+/// MCP 开关偏好（[`agent_mcp_set`] 落键、[`mcp_autostart`] 启动时读——两条路
+/// 共同保证「重启后开关宣称的状态」与「服务器真实状态」一致）。
 #[cfg(desktop)]
 const KEY_MCP_ENABLED: &str = "goptop:agent-mcp-enabled";
 /// MCP 监听端口（缺省 9537）。
@@ -333,6 +334,19 @@ pub async fn agent_llm_test(app: AppHandle) -> String {
 #[cfg(desktop)]
 #[tauri::command]
 pub async fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
+    mcp_apply(&app, enabled).await
+}
+
+/// 启停的完整序列（键面 + 实体）：`agent_mcp_set` 与启动自愈 [`mcp_autostart`]
+/// 共用——两条入口对 store/hub 的动作必须一字不差，否则「开关宣称的状态」和
+/// 「服务器真实状态」又会分叉。
+///
+/// 启动读 `goptop:agent-mcp-port/token`（token 首次生成并持久化）；配置口被占时
+/// [`McpServer::start`] 回退随机口——**实际端口只回写进 info**（url 以真实口拼），
+/// 不覆盖用户配置的偏好口，下次启动仍按配置口先试。重复开启先停旧实例（端口/token
+/// 可能已改）。
+#[cfg(desktop)]
+async fn mcp_apply(app: &AppHandle, enabled: bool) -> String {
     let r = || -> Result<(), String> {
         crate::store::store_set(app.clone(), KEY_MCP_ENABLED.into(), enabled.to_string())?;
         let map = crate::store::store_load(app.clone())?;
@@ -383,7 +397,35 @@ pub async fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
         // 关闭即全停：serve 任务 + 活局/待局一起拆（agent_stop 只拆对局不停服务器）。
         s.stop();
     }
-    mcp_info_json(&app)
+    mcp_info_json(app)
+}
+
+/// 启动自愈：上次退出时 MCP 开关是开的（`goptop:agent-mcp-enabled`），本次启动
+/// 照旧把服务器拉起来。该键若只写不读，重启后开关按 store 初值渲染「已启用」而
+/// 服务器没跑——此时开局被「请先在 MCP 连接卡打开开关」拒绝，用户面对的正是一
+/// 个已经开着的开关（须点关再点开才能恢复）。lib.rs 的 setup 调用；setup 线程
+/// 只读键不等待——起停要 await（[`McpServer::start`] 的 bind + spawn serve），
+/// 派进传输层运行时的任务里做（agent_start 同款纪律）。
+///
+/// **仅桌面目标**（KEY_MCP_ENABLED 与 MCP 服务器槽同门）。
+#[cfg(desktop)]
+pub fn mcp_autostart(app: &AppHandle) {
+    let enabled = crate::store::store_load(app.clone())
+        .unwrap_or_default()
+        .get(KEY_MCP_ENABLED)
+        .map(String::as_str)
+        == Some("true");
+    if !enabled {
+        return;
+    }
+    let app = app.clone();
+    {
+        let _g = enter_runtime();
+        tokio::spawn(async move {
+            let info = mcp_apply(&app, true).await;
+            eprintln!("[agent] 上次退出时 MCP 开关为开：本次启动自启服务器 → {info}");
+        });
+    }
 }
 
 /// `agent_mcp_info() -> string`：MCP 连接信息 JSON（`{"enabled","url","token"}`）。

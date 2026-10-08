@@ -35,6 +35,10 @@ pub fn run() {
         .manage(agent::AgentHub::default())
         .setup(|app| {
             titlebar::init(app.handle().clone());
+            // MCP 开关上次为开 → 本次启动自启服务器（只读键派任务，不阻塞 setup；
+            // 桌面专属——KEY_MCP_ENABLED 与 MCP 服务器槽同门）。
+            #[cfg(desktop)]
+            agent::mcp_autostart(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

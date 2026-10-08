@@ -83,24 +83,24 @@ function waitMoves(ep, n, timeout = 30000) {
   }, n, { timeout, polling: 300 }).then(() => true).catch(() => false);
 }
 
-/** 落子（真实点击；格点换算与 BoardSvg 严格互逆）。 */
+/** 落子（真实点击；格点换算与 BoardSvg 严格互逆）。坐标在页面里换算成视口像素，
+ *  点击走 page.mouse.click——CDP 受信输入、过浏览器命中测试。page.evaluate 里
+ *  svg.dispatchEvent 的合成事件（isTrusted=false）绕过命中测试，会让「覆盖层挡住
+ *  棋盘导致真人点不进」这类回归被假绿掩盖。 */
 async function place(ep, x, y) {
   await ep.page.locator('svg[role="grid"]').first().scrollIntoViewIfNeeded().catch(() => {});
-  await ep.page.evaluate(([gx, gy]) => {
+  const { cx, cy } = await ep.page.evaluate(([gx, gy]) => {
     const svg = document.querySelector('svg[role="grid"]');
     const r = svg.getBoundingClientRect();
     const vb = svg.viewBox.baseVal.width;
     const n = Number((svg.getAttribute("aria-label") || "").match(/(\d+)x\d+/)?.[1]) || 15;
     const pad = 30, cell = (vb - pad * 2) / (n - 1);
-    const cx = r.left + (pad + gx * cell) * (r.width / vb);
-    const cy = r.top + (pad + gy * cell) * (r.height / vb);
-    for (const type of ["pointermove", "pointerdown", "pointerup", "click"]) {
-      const ev = type.startsWith("pointer")
-        ? new PointerEvent(type, { bubbles: true, clientX: cx, clientY: cy, pointerId: 1 })
-        : new MouseEvent(type, { bubbles: true, clientX: cx, clientY: cy });
-      svg.dispatchEvent(ev);
-    }
+    return {
+      cx: r.left + (pad + gx * cell) * (r.width / vb),
+      cy: r.top + (pad + gy * cell) * (r.height / vb),
+    };
   }, [x, y]);
+  await ep.page.mouse.click(cx, cy);
 }
 
 /** 落一手并等手数推进到 expect（配对刚收口的点击会被 disabled 棋盘吞掉——以推进为准）。 */
