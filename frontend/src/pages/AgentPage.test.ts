@@ -122,7 +122,7 @@ describe("normalizeLlmConfig", () => {
       maxOutputTokens: 1024,
       replyLang: "",
       enableSubagent: true,
-      effort: "",
+      effort: "off",
       debug: false,
     });
     expect(normalizeLlmConfig(JSON.stringify({ protocol: "claude-3" })).protocol).toBe("anthropic");

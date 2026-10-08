@@ -83,13 +83,13 @@ pub struct LlmConfig {
 
 /// effort 档位归一（codex Custom(String) 模式）：**档位原值即接口**——
 /// low/medium/high/xhigh/max（乃至模型自定义值）原样透传给 API，未知值不该在
-/// 客户端被拒（codex 对不认识的档位走 Custom 照发）。空/空白归 None。
-/// 仅 Anthropic 预算路径需要「已知档位→预算」的映射（见 anthropic.rs，xhigh/max
-/// 按 pi clampReasoning 折到 high 档预算）。
+/// 客户端被拒（codex 对不认识的档位走 Custom 照发）。空/"off" 归 None（不发任何
+/// 思考参数）。仅 Anthropic 预算路径需要「已知档位→预算」的映射（见 anthropic.rs，
+/// xhigh/max 按 pi clampReasoning 折到 high 档预算）。
 pub fn sanitize_effort(v: &Option<String>) -> Option<String> {
     v.as_ref()
         .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s != "off")
 }
 
 /// 工具面在请求里的形态（由 tools.rs 的 `ToolDef` 装配而来）。
