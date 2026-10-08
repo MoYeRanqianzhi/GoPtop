@@ -301,7 +301,7 @@ function coordsOf(moves) {
     console.log("[game] 已点开始，等配对…");
     await sleep(1500);
     await shot(ep, "02-pairing.png");
-    const playing = await waitText(ep, "轮到你落子", PAIRING_TIMEOUT, "配对完成（轮到你落子）");
+    const playing = await waitText(ep, "黑 落子", PAIRING_TIMEOUT, "配对完成（黑 落子）");
     check("配对完成、轮到人类（我执黑先行）", playing);
     if (!playing) {
       await diagDump(ep);
@@ -375,7 +375,7 @@ function coordsOf(moves) {
 
       // 我执黑：黑子永远落在偶数手数上（0,2,4…）——文案判轮次 + 偶数判手别，
       // 双条件防「点了但快照没跟上」的重复落子。
-      const myTurn = text.includes("轮到你落子");
+      const myTurn = text.includes("黑 落子");
       if (myTurn && mc >= 0 && mc % 2 === 0 && mc !== lastHandledMc) {
         for (const [x, y] of coordsOf(obs.agentMoves)) occupied.add(`${x},${y}`);
         const p = nextEmptyPoint(occupied);
