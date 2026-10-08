@@ -99,8 +99,10 @@ async function platformLoad(which: StoreBackend): Promise<Record<string, string>
   }
 }
 
-/** 平台侧落盘；失败则把这一条同时写进浏览器存储兜底（留副本好过丢设置）。 */
-function platformSave(which: StoreBackend, key: string, value: string | null) {
+/** 平台侧落盘；失败则把这一条同时写进浏览器存储兜底（留副本好过丢设置）。
+ *  返回写盘完成的 Promise——鸿蒙桥是同步调用，Tauri invoke 是异步的；
+ *  顺序敏感的调用点（写完配置立刻起局/测试）用 [`storeSetAsync`] 等它。 */
+function platformSave(which: StoreBackend, key: string, value: string | null): Promise<void> {
   const fallback = () => {
     if (value === null) browserRemove(key);
     else browserSet(key, value);
@@ -114,10 +116,10 @@ function platformSave(which: StoreBackend, key: string, value: string | null) {
       console.warn("[store] 鸿蒙桥写入失败，浏览器存储兜底", e);
       fallback();
     }
-    return;
+    return Promise.resolve();
   }
   // Tauri invoke 是异步的：写盘结果晚于调用点，只有失败路径需要补兜底
-  void (async () => {
+  return (async () => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (value === null) await invoke("store_remove", { key });
@@ -173,7 +175,18 @@ export function storeGet(key: string): string | null {
 export function storeSet(key: string, value: string): void {
   mem[key] = value;
   if (backend === "browser") browserSet(key, value);
-  else platformSave(backend, key, value);
+  else void platformSave(backend, key, value);
+}
+
+/**
+ * [`storeSet`] 的可等待版：resolve 时平台侧已写完。Tauri 的同步命令跑在池化
+ * 执行面上、相互间没有先后承诺——「写完配置立刻 invoke 另一条读存储的命令」
+ * 若用 fire-and-forget 的 storeSet，后者可能读到上一份配置，必须用本函数。
+ */
+export async function storeSetAsync(key: string, value: string): Promise<void> {
+  mem[key] = value;
+  if (backend === "browser") browserSet(key, value);
+  else await platformSave(backend, key, value);
 }
 
 export function storeRemove(key: string): void {

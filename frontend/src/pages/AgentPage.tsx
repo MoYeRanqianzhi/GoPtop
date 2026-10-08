@@ -37,7 +37,7 @@ import { isTauri, nav, shareOrigin } from "../net/links";
 import { createSession } from "../net/session";
 import type { GameSession } from "../net/session";
 import { myName } from "../net/identity";
-import { storeGet, storeSet } from "../net/store";
+import { storeGet, storeSet, storeSetAsync } from "../net/store";
 import { ConfirmBanner } from "../components/ConfirmBanner";
 import { BoardPanel, ChatPanel } from "./components";
 
@@ -454,11 +454,13 @@ export function AgentPage() {
     storeSet(KEY_MCP_TOKEN, v);
   }
 
-  /** 落盘当前设置（开始/测试连接前调——后端读的是存储，不是本组件 state）。 */
-  function persistSettings() {
-    storeSet(KEY_LLM_CONFIG, JSON.stringify(llm));
-    storeSet(KEY_LLM_KEY, llmKey);
-    storeSet(KEY_CTX_LIMIT, String(clampCtxLimit(ctxLimit)));
+  /** 落盘当前设置（开始/测试连接前调——后端读的是存储，不是本组件 state）。
+   *  用可等待写并 await：store_set 与 agent_start/agent_llm_test 在 Rust 侧并发
+   *  执行无先后承诺，fire-and-forget 会让开局/测试读到上一份配置（错 key/错模型）。 */
+  async function persistSettings(): Promise<void> {
+    await storeSetAsync(KEY_LLM_CONFIG, JSON.stringify(llm));
+    await storeSetAsync(KEY_LLM_KEY, llmKey);
+    await storeSetAsync(KEY_CTX_LIMIT, String(clampCtxLimit(ctxLimit)));
   }
 
   async function copyText(t: string, okMsg: string) {
@@ -474,7 +476,7 @@ export function AgentPage() {
 
   async function runLlmTest() {
     if (llmTest.busy) return;
-    persistSettings();
+    await persistSettings();
     setLlmTest({ busy: true, ok: false, text: null });
     try {
       const r = await agentInvoke<string>("agent_llm_test");
@@ -562,7 +564,7 @@ export function AgentPage() {
     setStatus(EMPTY_STATUS);
     setEvents([]);
     sinceRef.current = 0;
-    persistSettings();
+    await persistSettings();
     try {
       const cfgJson = buildStartCfg({ ...setup, uiLang: UI_LANG });
       if (setup.myColor === "white") {

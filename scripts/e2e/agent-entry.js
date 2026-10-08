@@ -57,18 +57,24 @@ function serve(port) {
   if (!fs.existsSync(path.join(DIST, "index.html"))) {
     throw new Error(`缺少 ${DIST}——先构建前端（cd frontend && npm run build）`);
   }
-  let server = await serve(PORT);
-  let port = PORT;
-  if (server.portBusy) {
-    port = PORT === "5173" ? "5174" : "5173";
-    console.log(`端口 ${PORT} 被占，改用 ${port}`);
-    server = await serve(port);
-    if (server.portBusy) throw new Error(`5173/5174 均被占用`);
-  }
-  const origin = `http://127.0.0.1:${port}`;
-  console.log(`origin: ${origin}`);
-  const ep = await Endpoint.browser("web", `${origin}/`);
+  // 资源句柄提到 try 外：起服务器/开浏览器任何一步 throw，finally 都要能收尾，
+  // 否则 serve.js 子进程留尸占着 5173/5174（process.exit 会跳过 finally——
+  // agent-builtin.js 同一条教训：先收尾，退出码收尾后再落）。
+  let server = null;
+  let ep = null;
+  let exitCode;
   try {
+    server = await serve(PORT);
+    let port = PORT;
+    if (server.portBusy) {
+      port = PORT === "5173" ? "5174" : "5173";
+      console.log(`端口 ${PORT} 被占，改用 ${port}`);
+      server = await serve(port);
+      if (server.portBusy) throw new Error(`5173/5174 均被占用`);
+    }
+    const origin = `http://127.0.0.1:${port}`;
+    console.log(`origin: ${origin}`);
+    ep = await Endpoint.browser("web", `${origin}/`);
     await ep.ready(30000);
 
     // —— 1) 菜单恰好一个「Agent 对战」入口，点击真进 /agent ——
@@ -95,14 +101,16 @@ function serve(port) {
       // 它的五子棋/围棋按钮不受本页降级管——不圈作用域会把「头部的可用按钮」误计进来。
       const scope = document.querySelector(".play-stack");
       const byText = (t) => [...scope.querySelectorAll("button")].filter((b) => b.textContent.includes(t));
+      // 空数组的 every 恒真——控件被回归删掉时断言会假 PASS，先断 count >= 1。
+      const allDisabled = (list) => list.length > 0 && list.every((el) => el.disabled);
       return {
-        start: byText("开始对局").every((b) => b.disabled),
-        kinds: byText("五子棋").concat(byText("围棋")).every((b) => b.disabled),
-        colors: byText("我执黑").concat(byText("我执白")).every((b) => b.disabled),
-        builtinDriver: byText("内置（LLM 循环）").every((b) => b.disabled),
-        protocols: byText("Anthropic").every((b) => b.disabled),
-        testConn: byText("测试连接").every((b) => b.disabled),
-        baseUrl: [...scope.querySelectorAll("input")].filter((i) => i.placeholder.includes("your-gateway")).every((i) => i.disabled),
+        start: allDisabled(byText("开始对局")),
+        kinds: allDisabled(byText("五子棋").concat(byText("围棋"))),
+        colors: allDisabled(byText("我执黑").concat(byText("我执白"))),
+        builtinDriver: allDisabled(byText("内置（LLM 循环）")),
+        protocols: allDisabled(byText("Anthropic")),
+        testConn: allDisabled(byText("测试连接")),
+        baseUrl: allDisabled([...scope.querySelectorAll("input")].filter((i) => i.placeholder.includes("your-gateway"))),
       };
     });
     check("开始对局禁用", disabledStats.start);
@@ -131,9 +139,14 @@ function serve(port) {
     check("直达 /agent 同样降级", direct);
 
     console.log(`\n===== RESULT: ${pass} passed, ${fail} failed =====`);
-    process.exit(fail > 0 ? 1 : 0);
+    exitCode = fail > 0 ? 1 : 0;
+  } catch (e) {
+    console.error("E2E CRASH:", e);
+    exitCode = 2;
   } finally {
-    await ep.close().catch(() => {});
-    server.kill();
+    if (ep) await ep.close().catch(() => {});
+    // serve 的失败路径可能只回 {portBusy} 标记（子进程已自己退出），kill 需判别
+    if (server && typeof server.kill === "function") server.kill();
   }
+  process.exit(exitCode ?? 2);
 })().catch((e) => { console.error("E2E CRASH:", e); process.exit(2); });

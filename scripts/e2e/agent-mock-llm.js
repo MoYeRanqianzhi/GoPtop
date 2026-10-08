@@ -17,7 +17,7 @@
  * CORS 头全开（Access-Control-Allow-Origin:*）为阶段⑤ Web 内置模式预留。
  *
  * 独立运行：node agent-mock-llm.js [--port 8099] [--my-color white] [--resign-after 3]
- *                                   [--wait-ms 700] [--stage-ms 1500]
+ *                                   [--wait-ms 700] [--stage-ms 1500] [--size 15]
  * 作为模块：const { startStub } = require("./agent-mock-llm.js");
  */
 const http = require("http");
@@ -31,6 +31,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 function createScript(opts) {
   const myColor = opts.myColor || "white";
+  // 盘面路数：选点必须跟盘走（围棋 9/13/19 时硬编码 15 会把子落盘外、对局假死）
+  const size = opts.size || 15;
   const resignAfter = opts.resignAfter ?? 3; // 我方第 resignAfter 手落定后，下一手认输
   const waitMs = opts.waitMs ?? 700; // 等对手时的应答节流（防预算空转烧穿）
   const stageMs = opts.stageMs ?? 1500; // 暂存与提交之间的间隔=棋盘幽灵子的可观测窗口
@@ -166,7 +168,7 @@ function createScript(opts) {
     // 1) 上一轮 submit 被拒：按错误纠正（占点→换空点重写；未轮到→回去等）
     if (lastError) {
       if (/occupied/.test(lastError) && st.oppLast) {
-        const p = pickPoint(15);
+        const p = pickPoint(size);
         console.log(`[mock-llm] 决策：占点被拒，纠正落 ${p ? `(${p.x},${p.y})` : "无点"}`);
         if (p) { st.plan = movePlan(p); return; }
       }
@@ -202,7 +204,7 @@ function createScript(opts) {
         ];
         return;
       }
-      const p = pickPoint(15);
+      const p = pickPoint(size);
       console.log(`[mock-llm] 决策：应手落 ${p ? `(${p.x},${p.y})` : "无点"}`);
       if (p) { st.plan = movePlan(p); return; }
     }
@@ -325,6 +327,7 @@ if (require.main === module) {
   startStub({
     port: Number(arg("port", 8099)),
     myColor: arg("my-color", "white"),
+    size: Number(arg("size", 15)),
     resignAfter: Number(arg("resign-after", 3)),
     waitMs: Number(arg("wait-ms", 700)),
     stageMs: Number(arg("stage-ms", 1500)),

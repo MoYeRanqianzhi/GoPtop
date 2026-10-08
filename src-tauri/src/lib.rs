@@ -74,7 +74,11 @@ pub fn run() {
             agent::agent_events,
             agent::agent_bind,
             agent::agent_llm_test,
+            // MCP 命令仅桌面目标注册（计划 MCP 节「条件编译」；agent.rs 命令面同门）——
+            // generate_handler 支持条目上的 cfg 属性（宏按条目原样转发到 match 臂）。
+            #[cfg(desktop)]
             agent::agent_mcp_set,
+            #[cfg(desktop)]
             agent::agent_mcp_info
         ])
         .run(tauri::generate_context!())

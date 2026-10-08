@@ -128,6 +128,16 @@ describe("store 门面", () => {
     expect(globalThis.localStorage.getItem("goptop:name")).toBeNull();
   });
 
+  it("storeSetAsync 落盘完成后才 resolve（浏览器后端同步生效）", async () => {
+    const box = stubLocal();
+    const { storeInit, storeGet, storeSetAsync, storeBackend } = await freshStore();
+    await storeInit();
+    expect(storeBackend()).toBe("browser");
+    await storeSetAsync("goptop:llm-config", '{"protocol":"anthropic"}');
+    expect(storeGet("goptop:llm-config")).toBe('{"protocol":"anthropic"}');
+    expect(box.get("goptop:llm-config")).toBe('{"protocol":"anthropic"}');
+  });
+
   it("storeRemove 幂等；get 不命中原型链", async () => {
     stubLocal();
     const { storeInit, storeGet, storeRemove } = await freshStore();

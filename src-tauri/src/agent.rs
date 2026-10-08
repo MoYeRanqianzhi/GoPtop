@@ -1,5 +1,6 @@
-//! AgentHub —— 「Agent 对战」的桌面壳接缝（权威规格 `.agents/plan/2026-10-08-agent-battle.md`
-//! 「F1 内置 Agent / AgentPage / Tauri 命令」节；阶段③ F 路）。
+//! AgentHub —— 「Agent 对战」的桌面壳接缝（权威规格 `.agents/plan/2026-10-08-agent-battle.md`：
+//! 「会话对」节与本文件的会话拓扑/拦截面互锁，「AgentPage（唯一入口，frontend/src/pages/
+//! AgentPage.tsx 新建）」节的「Tauri 命令」条目即本模块的命令面；阶段③ F 路）。
 //!
 //! 职责只有「装配」：结会话对、跑 `agent_loop::run` 决策循环，全部在 tokio 任务里
 //! 转；本模块持有运行表（run id → [`Run`]）并把循环侧的状态/统计/暂存着法/工具
@@ -47,7 +48,9 @@ use goptop_agent::store::{NativeStore, VfsStore};
 use goptop_agent::vfs::{InFile, Staging};
 use goptop_agent::Driver;
 use goptop_net::session::UiCommand;
-use goptop_transport_native::{Host, NativeSession, SessionConfig, enter_runtime, now_ms, rand4};
+use goptop_transport_native::{Host, NativeSession, SessionConfig, enter_runtime, now_ms};
+#[cfg(desktop)]
+use goptop_transport_native::rand4;
 use tauri::{AppHandle, Manager};
 
 /// 分享基地址（pair 的链接构造用）：与 `frontend/src/net/links.ts` 的
@@ -65,13 +68,17 @@ const KEY_LLM_KEY: &str = "goptop:llm-key";
 /// 上下文上限 tokens（clamp [8k, 1M]，缺省 [`DEFAULT_CTX_LIMIT`]）。
 const KEY_CTX_LIMIT: &str = "goptop:agent-ctx-limit";
 /// MCP 开关（本阶段只落键；server 启动留阶段④）。
+#[cfg(desktop)]
 const KEY_MCP_ENABLED: &str = "goptop:agent-mcp-enabled";
 /// MCP 监听端口（缺省 9537）。
+#[cfg(desktop)]
 const KEY_MCP_PORT: &str = "goptop:agent-mcp-port";
 /// MCP Bearer token（首次置 enabled 时生成并持久化）。
+#[cfg(desktop)]
 const KEY_MCP_TOKEN: &str = "goptop:agent-mcp-token";
 
 /// MCP 缺省端口（计划拍板 9537；占用回退随机口是阶段④ server 启动时的事）。
+#[cfg(desktop)]
 const MCP_DEFAULT_PORT: u32 = 9537;
 
 /// agent_stop 的认输定拍：cmd(Resign) 在本地状态机即刻生效，但要给 RTC 数据面
@@ -299,6 +306,9 @@ pub async fn agent_llm_test(app: AppHandle) -> String {
 ///
 /// **本阶段 server 不启动**（阶段④接线），所以回执的 `enabled` 恒 false——键先落，
 /// 阶段④的启动逻辑直接读这份配置。端口缺省 9537、token 首次生成并持久化。
+/// **仅桌面目标**（计划 MCP 节「条件编译」：MCP 相关 Tauri 命令只在桌面注册，
+/// 安卓/鸿蒙不编译 MCP 代码；lib.rs 的注册面同门）。
+#[cfg(desktop)]
 #[tauri::command]
 pub fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
     let r = (|| -> Result<(), String> {
@@ -323,12 +333,15 @@ pub fn agent_mcp_set(app: AppHandle, enabled: bool) -> String {
 
 /// `agent_mcp_info() -> string`：MCP 连接信息 JSON（`{"enabled","url","token"}`）。
 /// enabled 恒 false（server 启动留阶段④）；url/token 回已配置值，供连接卡展示。
+/// **仅桌面目标**（同 [`agent_mcp_set`] 的门）。
+#[cfg(desktop)]
 #[tauri::command]
 pub fn agent_mcp_info(app: AppHandle) -> String {
     mcp_info_json(&app)
 }
 
 /// info JSON 的拼装（set/info 共用一份形状，防两处字段漂移）。
+#[cfg(desktop)]
 fn mcp_info_json(app: &AppHandle) -> String {
     let map = crate::store::store_load(app.clone()).unwrap_or_default();
     let port: u32 = map.get(KEY_MCP_PORT).and_then(|v| v.trim().parse().ok()).unwrap_or(MCP_DEFAULT_PORT);
@@ -348,7 +361,8 @@ fn mcp_info_json(app: &AppHandle) -> String {
 pub struct AgentHub {
     runs: Mutex<HashMap<u32, Arc<Run>>>,
     next_run: AtomicU32,
-    /// agent_bind 登记的 A' 会话 id（配对目标；配对完成后由任务取走落位）。
+    /// agent_bind 登记的 A' 会话 id（配对目标；配对任务取走后，豁免续记在
+    /// 存活运行的 front_id 上——见 [`AgentHub::exempt_session`]）。
     bound: Mutex<Option<u32>>,
 }
 
@@ -388,13 +402,24 @@ impl AgentHub {
             .any(|r| r.is_live())
     }
 
-    /// 拦截面豁免的 A' 会话 id：agent_bind 登记的绑定值（A' 归前端所有、id 即
-    /// 配对目标，绑定值就是豁免对象；局终了后 any_live 已放行，残留无碍）。
+    /// 拦截面豁免的 A' 会话 id（计划「会话对」节第 4 条：Agent 局**存活期间**豁免）。
+    /// 两段来源：agent_bind 登记值还在绑定槽里（bind → 配对任务取走的窗口）；取走后
+    /// 记在存活运行的 `front_id` 上（A' 归前端所有、id 即配对目标）。终局运行
+    /// （done/error）不算豁免——局终了 any_live 已放行，拦截面整条不生效。
     pub(crate) fn exempt_session(&self) -> Option<u32> {
-        *self.bound.lock().unwrap_or_else(|e| e.into_inner())
+        if let Some(id) = *self.bound.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Some(id);
+        }
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|r| r.is_live())
+            .find_map(|r| r.front_id())
     }
 
-    /// 取走绑定值（配对任务的接驳输入；取走即消费，避免影响后续运行）。
+    /// 取走绑定值（配对任务的接驳输入；取走即消费，避免影响后续运行——豁免随取走
+    /// 一并记到 [`Run::set_front_id`]，局中继续生效）。
     fn take_bound(&self) -> Option<u32> {
         self.bound.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
@@ -432,6 +457,9 @@ struct RunInner {
     staging: Option<Arc<Staging>>,
     /// B 的执色（ticker 的 thinking/waiting 判定：轮到 B = thinking）。
     agent_color: Option<String>,
+    /// A' 的会话表 id（配对任务从绑定槽取到登记值后记账；拦截面豁免的局中依据——
+    /// 绑定槽已消费，存活局期间靠它保持 A' 豁免）。
+    front_id: Option<u32>,
 }
 
 /// 一次 Agent 对局的运行时记录。任务持有它的 Arc，命令面经 AgentHub 查它。
@@ -470,6 +498,7 @@ impl Run {
                 player: None,
                 staging: None,
                 agent_color: None,
+                front_id: None,
             }),
         }
     }
@@ -480,6 +509,16 @@ impl Run {
 
     fn state(&self) -> &'static str {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).state
+    }
+
+    /// A' 的会话表 id（拦截面豁免读；配对任务取到登记值前是 None）。
+    fn front_id(&self) -> Option<u32> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).front_id
+    }
+
+    /// 配对任务取走绑定槽登记值时记账（见 [`AgentHub::exempt_session`]）。
+    fn set_front_id(&self, id: u32) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).front_id = Some(id);
     }
 
     fn set_detail(&self, detail: Option<String>) {
@@ -731,7 +770,8 @@ struct Seats {
     agent_watch: EmitWatch,
     /// B 的装饰宿主（bind 事件队列用；生命周期与整局同长）。
     agent_hook: Arc<HookHost>,
-    /// A' 的会话表 id（= agent_bind 的登记值；拦截面豁免对象）。
+    /// A' 的会话表 id（= agent_bind 的登记值；状态 detail 文案用——豁免记账在
+    /// Run 上，见 [`AgentHub::exempt_session`]）。
     front_id: u32,
 }
 
@@ -740,10 +780,12 @@ struct Seats {
 const BIND_WAIT_SECS: u64 = 90;
 
 /// 等 agent_bind 的登记值（轮询 hub 的绑定槽；取消经 run.cancel 传播）。
+/// 取走即在本运行的 `front_id` 记账——绑定槽消费后，拦截面豁免靠它续到局终。
 async fn wait_bound(run: &Run, hub: &AgentHub, secs: u64) -> Option<u32> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         if let Some(id) = hub.take_bound() {
+            run.set_front_id(id);
             return Some(id);
         }
         if Instant::now() >= deadline {
@@ -1355,5 +1397,25 @@ mod tests {
         assert!(!run.is_live(), "error 态不拦路");
         run.set_running(ST_WAITING);
         assert_eq!(run.state(), ST_ERROR, "终态后 ticker 的运行中切换必须无效");
+    }
+
+    /* ---- 拦截面豁免：绑定槽消费后由存活运行的 front_id 续到局终 ---- */
+
+    #[test]
+    fn 拦截面豁免_绑定槽与存活运行续期() {
+        let hub = AgentHub::default();
+        *hub.bound.lock().unwrap() = Some(7);
+        assert_eq!(hub.exempt_session(), Some(7), "bind 后、配对取走前：豁免在绑定槽");
+        // wait_bound 的语义：取走即消费，同时在运行上记账。
+        let run = Arc::new(Run::new(1));
+        if let Some(id) = hub.take_bound() {
+            run.set_front_id(id);
+        }
+        assert_eq!(hub.take_bound(), None, "取走即消费，不影响后续运行");
+        assert_eq!(hub.exempt_session(), None, "未记账前豁免断了——修复前局中正是这个洞");
+        hub.insert(run.clone());
+        assert_eq!(hub.exempt_session(), Some(7), "存活运行记账后续期到局终");
+        run.set_terminal(ST_DONE, None);
+        assert_eq!(hub.exempt_session(), None, "终局运行不算豁免（局终了 any_live 已放行）");
     }
 }
