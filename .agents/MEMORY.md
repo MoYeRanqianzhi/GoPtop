@@ -1,5 +1,6 @@
 # .agents/MEMORY.md — 共享关键记忆索引
 
+- [2026-10-08 Agent 对战大轮（含验收反馈修复轮）](memory/2026-10-08-agent-battle-round.md) — 阶段①-⑤全落地（会话对/一切皆文件/停车循环/三协议流式/effort 六档/MCP 出口/Web 内置模式）；**用户亲自验收揪出的两大根因**：BC hub 全局串扰（空盘「黑胜」——per-game topic 根治，JoinChannel 给裸 gameId 由 transport 拼前缀，两侧逐字一致否则零投递）、等待期烧调用（停车机制+暂存不 park 谓词）；Write 只建新/edit 放开 in/ 槽；真 LLM 门槛 8/8（开局聊天降软指标——模型社交遵从度不可强制）；GOPTOP_TRACE_BC=1 是 BC 链路第一诊断手段；遗留：MCP 大厅注册、鸿蒙内置模式
 - [2026-10-07 探查 bug 大轮](memory/2026-10-07-bug-hunt-native-round.md) — 九维审查 44 发现/36 实证/8 驳回；四条 high（同源挑战缺 JoinChannel 砖死、ragged SyncState 越界 abort、Reset size 86GB OOM、前端 session_drop 零调用泄漏）；「迁移遗漏找 TS 同位置对照」「信任边界成串扫」两个检测法；node 被 winpty 别名（后台必须 node.exe）、rustup 更新丢 target、管道 tail 吞退出码；遗留：accept_answer stale 子态、AI 执黑重开不接第一手
 - [2026-09-18 全维度实机测试轮](memory/2026-09-18-multi-device-real-test-round.md) — 五端两两对战全通；修 7 个产品缺陷（鸿蒙链接/paste 走错通道/观战链接缺失/spec 丢失/乱序丢手/围棋终局 UI 缺失/认输判错）；测试环境搭建要点（安卓禁 connectOverCDP、桌面壳须带 custom-protocol）；布局正反馈塌陷与窄屏横幅遮挡两个陷阱
 - **[归档记忆]** 2026-09-07 全量代码审查 → 两轮修复 → 修复轮审查 → R 级修复 → 复审，全循环闭环（A1-A8/B/C/D + R1-R6 落地；残留 R2a/R2b 低危守卫补漏跟踪于 TODO.md）。审查报告已移至 `review/archive/`（2026-09-07-main-agent-code-review.md、2026-09-07-fix-round-review.md），文件头有归档标注，仅作历史记录勿回填。

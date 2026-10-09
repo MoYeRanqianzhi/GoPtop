@@ -5,6 +5,15 @@
 
 ## 2026-10-08 Agent 对战大轮（用户拍板立项，规格 plan/2026-10-08-agent-battle.md）
 
+- [x] 验收反馈修复轮（2026-10-09，用户亲自验收后六连反馈全收口，3fc8a41/a41eb77/
+      3e59472/b7d75df 已推送 main）：①BC hub 全局串扰根治——per-game topic 主题化
+      （agent 执黑空盘「黑胜」直接终局的根因），跨局隔离回归锁钉进 bc.rs 单测；
+      ②停车机制（等待期零 LLM 调用）+暂存不 park 谓词（卡局根因）；③Write 只建新+
+      edit 放开 in/ 槽（「一直 Write 不 Edit」根因）；④submit 报错明示 /memory 永不
+      需 submit、prompt 加 Memory is SCARCE（每步写记忆根因）；⑤可选流式三协议+
+      effort 六档原值直发+ThinkingRaw 原样回放；⑥两行式工具日志/事件流面板/失败红/
+      effort 六键/流式开关（前端）。测试线全绿：transport-native 5+6、workspace 全量、
+      MCP feature、agent-web 19/19、壳 23/23、reallm 真 LLM 8/8（开局聊天降软指标）。
 - [x] 阶段①+②：goptop-agent crate（会话对/一切皆文件工具面/决策循环/compact/三协议
       LLM），无头全量测试绿（Mock LLM）——提交链与 crate 结构见
       memory/2026-10-08-agent-battle-round.md。
